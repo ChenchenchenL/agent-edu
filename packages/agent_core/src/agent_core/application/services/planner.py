@@ -13,6 +13,7 @@ from agent_core.application.services.skills import SkillUsageService
 from agent_core.application.services.strategy_cards import StrategyCardService
 from agent_core.domain.entities.goal import LearnerGoal
 from agent_core.domain.entities.planning import DailyTask, PlanStage, StudyPlan
+from agent_core.domain.entities.skill import SkillResolution
 from agent_core.domain.errors import ValidationError
 from agent_core.infrastructure.llm.types import LLMProvider, StudyPlanDraft, StudyPlanStageDraft, StudyPlanTaskDraft
 from agent_core.infrastructure.observability.metrics import observe_llm_operation, observe_plan_generation_fallback
@@ -57,6 +58,7 @@ class PlannerService:
         rollout_context: dict[str, object] | None = None,
         memory_interpretation: MemoryInterpretationResult | None = None,
     ) -> MaterializedPlan:
+        skill_resolution = await self._resolve_plan_skill_for_runtime(goal)
         strategy_card = (
             await self._strategy_card_service.get_active(goal.id)
             if self._strategy_card_service is not None
@@ -231,12 +233,22 @@ class PlannerService:
             llm_draft=llm_draft,
             error_code=provider_error_code,
             trigger_source=trigger_source,
+            resolution=skill_resolution,
         )
         return MaterializedPlan(
             study_plan=study_plan,
             stages=stages,
             tasks=tasks,
             llm_draft=llm_draft,
+        )
+
+    async def _resolve_plan_skill_for_runtime(self, goal: LearnerGoal) -> SkillResolution | None:
+        if self._skill_usage_service is None:
+            return None
+        return await self._skill_usage_service.resolve_for_runtime(
+            skill_name="plan_study_path",
+            surface="plan_generation",
+            resource_id=goal.id,
         )
 
     async def _record_plan_skill_usage(
@@ -246,6 +258,7 @@ class PlannerService:
         llm_draft: StudyPlanDraft,
         error_code: str | None,
         trigger_source: str,
+        resolution: SkillResolution | None,
     ) -> None:
         if self._skill_usage_service is None:
             return
@@ -261,6 +274,7 @@ class PlannerService:
             input_summary=goal.target_outcome,
             output_summary=llm_draft.plan_summary,
             error_code=error_code,
+            resolution=resolution,
             metadata={
                 "fallback_used": llm_draft.fallback_used,
                 "response_shape_valid": llm_draft.response_shape_valid,

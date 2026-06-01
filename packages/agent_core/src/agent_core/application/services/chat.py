@@ -19,6 +19,7 @@ from agent_core.application.skills.registry import SkillRegistry
 from agent_core.domain.entities.memory import MemoryEvent
 from agent_core.domain.entities.message import SessionMessage
 from agent_core.domain.entities.session import LearningSession
+from agent_core.domain.entities.skill import SkillResolution
 from agent_core.domain.errors import NotFoundError, ValidationError
 from agent_core.domain.schemas.session import MessageRequest, MessageResponse, MessageTurnMetrics
 from agent_core.infrastructure.db.repositories import SessionMessageRepository, SessionQuizRepository, SessionRepository
@@ -80,6 +81,11 @@ class ChatService:
             raise NotFoundError(f"Session '{session_id}' was not found.")
 
         skills = self._skill_registry.trace_for_mode(payload.mode)
+        skill_resolution = await self._resolve_skill_for_runtime(
+            skill_name=skills[0],
+            surface=payload.mode,
+            resource_id=session.id,
+        )
         history = await self._message_repository.list_history(
             session_id=session.id,
             limit=8,
@@ -136,6 +142,7 @@ class ChatService:
                 latency_ms=0,
                 input_summary=payload.content,
                 error_code=type(exc).__name__,
+                resolution=skill_resolution,
                 metadata={"operation": "chat" if payload.mode == "chat" else "hint"},
             )
             if commit:
@@ -277,6 +284,7 @@ class ChatService:
                 latency_ms=0,
                 input_summary=payload.content,
                 error_code=type(exc).__name__,
+                resolution=skill_resolution,
                 metadata={
                     "operation": "chat" if payload.mode == "chat" else "hint",
                     "history_count": len(history),
@@ -450,6 +458,7 @@ class ChatService:
                 latency_ms=reply.latency_ms,
                 input_summary=payload.content,
                 output_summary=assistant_message.content,
+                resolution=skill_resolution,
                 metadata={
                     "user_message_id": user_message.id,
                     "assistant_message_id": assistant_message.id,
@@ -497,6 +506,21 @@ class ChatService:
             turn_metrics=turn_metrics,
         )
 
+    async def _resolve_skill_for_runtime(
+        self,
+        *,
+        skill_name: str,
+        surface: str,
+        resource_id: str,
+    ) -> SkillResolution | None:
+        if self._skill_usage_service is None:
+            return None
+        return await self._skill_usage_service.resolve_for_runtime(
+            skill_name=skill_name,
+            surface=surface,
+            resource_id=resource_id,
+        )
+
     async def _record_skill_usage(
         self,
         *,
@@ -508,6 +532,7 @@ class ChatService:
         input_summary: str | None,
         output_summary: str | None = None,
         error_code: str | None = None,
+        resolution: SkillResolution | None = None,
         metadata: dict[str, object] | None = None,
     ) -> None:
         if self._skill_usage_service is None:
@@ -526,6 +551,7 @@ class ChatService:
             input_summary=input_summary,
             output_summary=output_summary,
             error_code=error_code,
+            resolution=resolution,
             metadata=metadata,
         )
 

@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import and_, desc, distinct, func, or_, select, update
+from sqlalchemy import and_, case, desc, distinct, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -270,10 +270,33 @@ class SkillArtifactRepository:
             return None
         return self._to_entity(model)
 
-    async def get_active_by_name(self, name: str) -> SkillArtifact | None:
+    async def get_selectable_by_name_scope(self, *, name: str, scope: str) -> SkillArtifact | None:
         result = await self._session.execute(
             select(SkillArtifactModel)
-            .where(SkillArtifactModel.name == name, SkillArtifactModel.status == "active")
+            .where(
+                SkillArtifactModel.name == name,
+                SkillArtifactModel.scope == scope,
+                SkillArtifactModel.status.in_(["active", "stable"]),
+            )
+            .order_by(
+                desc(case((SkillArtifactModel.status == "stable", 1), else_=0)),
+                desc(SkillArtifactModel.updated_at),
+                desc(SkillArtifactModel.id),
+            )
+        )
+        model = result.scalars().first()
+        if model is None:
+            return None
+        return self._to_entity(model)
+
+    async def get_suppressed_by_name_scope(self, *, name: str, scope: str) -> SkillArtifact | None:
+        result = await self._session.execute(
+            select(SkillArtifactModel)
+            .where(
+                SkillArtifactModel.name == name,
+                SkillArtifactModel.scope == scope,
+                SkillArtifactModel.status == "suppressed",
+            )
             .order_by(desc(SkillArtifactModel.updated_at), desc(SkillArtifactModel.id))
         )
         model = result.scalars().first()
@@ -286,6 +309,8 @@ class SkillArtifactRepository:
         *,
         status: str | None = None,
         name: str | None = None,
+        scope: str | None = None,
+        lineage_id: str | None = None,
         limit: int = 50,
     ) -> list[SkillArtifact]:
         query = select(SkillArtifactModel)
@@ -293,8 +318,21 @@ class SkillArtifactRepository:
             query = query.where(SkillArtifactModel.status == status)
         if name is not None:
             query = query.where(SkillArtifactModel.name == name)
+        if scope is not None:
+            query = query.where(SkillArtifactModel.scope == scope)
+        if lineage_id is not None:
+            query = query.where(SkillArtifactModel.lineage_id == lineage_id)
         result = await self._session.execute(
             query.order_by(desc(SkillArtifactModel.updated_at), desc(SkillArtifactModel.id)).limit(limit)
+        )
+        return [self._to_entity(model) for model in result.scalars().all()]
+
+    async def list_by_lineage(self, lineage_id: str, *, limit: int = 50) -> list[SkillArtifact]:
+        result = await self._session.execute(
+            select(SkillArtifactModel)
+            .where(SkillArtifactModel.lineage_id == lineage_id)
+            .order_by(desc(SkillArtifactModel.updated_at), desc(SkillArtifactModel.id))
+            .limit(limit)
         )
         return [self._to_entity(model) for model in result.scalars().all()]
 
@@ -304,6 +342,9 @@ class SkillArtifactRepository:
             id=model.id,
             name=model.name,
             version=model.version,
+            lineage_id=model.lineage_id,
+            parent_artifact_id=model.parent_artifact_id,
+            supersedes_artifact_id=model.supersedes_artifact_id,
             skill_type=model.skill_type,
             scope=model.scope,
             status=model.status,
@@ -311,6 +352,7 @@ class SkillArtifactRepository:
             definition=dict(model.definition or {}),
             runtime_directives=dict(model.runtime_directives or {}),
             tool_plan=[dict(item) for item in model.tool_plan or []],
+            compatibility_contract=dict(model.compatibility_contract or {}),
             source_reflection_ids=list(model.source_reflection_ids or []),
             source_memory_ids=list(model.source_memory_ids or []),
             source_proposal_id=model.source_proposal_id,
@@ -333,6 +375,7 @@ class SkillUsageEventRepository:
             skill_artifact_id=entity.skill_artifact_id,
             skill_name=entity.skill_name,
             skill_version=entity.skill_version,
+            skill_status_at_use=entity.skill_status_at_use,
             learner_profile_id=entity.learner_profile_id,
             learner_goal_id=entity.learner_goal_id,
             session_id=entity.session_id,
@@ -345,8 +388,13 @@ class SkillUsageEventRepository:
             latency_ms=entity.latency_ms,
             cost_units=entity.cost_units,
             input_summary=entity.input_summary,
+            input_fingerprint=entity.input_fingerprint,
             output_summary=entity.output_summary,
+            output_fingerprint=entity.output_fingerprint,
             error_code=entity.error_code,
+            resolver_status=entity.resolver_status,
+            selection_reason=entity.selection_reason,
+            outcome_signals=entity.outcome_signals,
             usage_metadata=entity.metadata,
             created_at=entity.created_at,
         )
@@ -365,18 +413,27 @@ class SkillUsageEventRepository:
     async def list_events(
         self,
         *,
+        artifact_id: str | None = None,
         learner_goal_id: str | None = None,
         session_id: str | None = None,
         surface: str | None = None,
+        outcome_status: str | None = None,
+        resolver_status: str | None = None,
         limit: int = 50,
     ) -> list[SkillUsageEvent]:
         query = select(SkillUsageEventModel)
+        if artifact_id is not None:
+            query = query.where(SkillUsageEventModel.skill_artifact_id == artifact_id)
         if learner_goal_id is not None:
             query = query.where(SkillUsageEventModel.learner_goal_id == learner_goal_id)
         if session_id is not None:
             query = query.where(SkillUsageEventModel.session_id == session_id)
         if surface is not None:
             query = query.where(SkillUsageEventModel.surface == surface)
+        if outcome_status is not None:
+            query = query.where(SkillUsageEventModel.outcome_status == outcome_status)
+        if resolver_status is not None:
+            query = query.where(SkillUsageEventModel.resolver_status == resolver_status)
         result = await self._session.execute(
             query.order_by(desc(SkillUsageEventModel.created_at), desc(SkillUsageEventModel.id)).limit(limit)
         )
@@ -389,6 +446,7 @@ class SkillUsageEventRepository:
             skill_artifact_id=model.skill_artifact_id,
             skill_name=model.skill_name,
             skill_version=model.skill_version,
+            skill_status_at_use=model.skill_status_at_use,
             learner_profile_id=model.learner_profile_id,
             learner_goal_id=model.learner_goal_id,
             session_id=model.session_id,
@@ -401,8 +459,13 @@ class SkillUsageEventRepository:
             latency_ms=model.latency_ms,
             cost_units=model.cost_units,
             input_summary=model.input_summary,
+            input_fingerprint=model.input_fingerprint,
             output_summary=model.output_summary,
+            output_fingerprint=model.output_fingerprint,
             error_code=model.error_code,
+            resolver_status=model.resolver_status,
+            selection_reason=model.selection_reason,
+            outcome_signals=dict(model.outcome_signals or {}),
             metadata=dict(model.usage_metadata or {}),
             created_at=model.created_at,
         )

@@ -958,11 +958,24 @@ def test_workspace_summary_and_memory_browse_endpoints(app_client_factory):
 
 
 def test_skills_readyz_and_metrics_endpoints(app_client_factory):
-    client = app_client_factory(env_overrides={"AGENT_EDU_METRICS_ENABLED": "1"})
+    client = app_client_factory(
+        env_overrides={
+            "AGENT_EDU_METRICS_ENABLED": "1",
+            "AGENT_EDU_OPERATOR_API_KEY": "secret-operator",
+        }
+    )
 
     skills = client.get("/api/v1/skills")
+    assert skills.status_code == 401
+
+    skills = client.get("/api/v1/skills", headers=_operator_headers())
     assert skills.status_code == 200
     assert len(skills.json()) >= 1
+
+    _, access_key = _create_profile_with_key(client)
+    learner_skills = client.get("/api/v1/skills", headers=_learner_headers(access_key))
+    assert learner_skills.status_code == 200
+    assert len(learner_skills.json()) >= 1
 
     healthz = client.get("/healthz")
     assert healthz.status_code == 200
@@ -1264,7 +1277,28 @@ def test_skill_operator_usage_api_records_chat_usage(app_client_factory):
     )
     assert usage_response.status_code == 200
     usage = usage_response.json()
-    assert any(item["skill_name"] == "explain_concept" and item["surface"] == "chat" for item in usage)
+    chat_usage = next(item for item in usage if item["skill_name"] == "explain_concept" and item["surface"] == "chat")
+    assert chat_usage["resolver_status"] == "missing_artifact"
+    assert chat_usage["selection_reason"] == "artifact_missing_static_fallback"
+    assert chat_usage["input_fingerprint"] is not None
+    assert chat_usage["output_fingerprint"] is not None
+    assert chat_usage["outcome_signals"] == {}
 
     artifacts_response = client.get("/api/v1/skill-artifacts", headers=_operator_headers())
     assert artifacts_response.status_code == 200
+
+    filtered_usage = client.get(
+        "/api/v1/skill-usage",
+        headers=_operator_headers(),
+        params={"resolver_status": "missing_artifact", "surface": "chat"},
+    )
+    assert filtered_usage.status_code == 200
+    assert any(item["id"] == chat_usage["id"] for item in filtered_usage.json())
+
+    resolution_response = client.get(
+        "/api/v1/skill-resolution",
+        headers=_operator_headers(),
+        params={"skill_name": "explain_concept", "surface": "chat"},
+    )
+    assert resolution_response.status_code == 200
+    assert resolution_response.json()["resolver_status"] == "missing_artifact"

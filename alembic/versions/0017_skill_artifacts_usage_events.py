@@ -56,6 +56,14 @@ def upgrade() -> None:
     )
     op.create_index("uq_skill_artifacts_name_version", "skill_artifacts", ["name", "version"], unique=True)
     op.create_index("ix_skill_artifacts_status_name", "skill_artifacts", ["status", "name"])
+    op.create_index(
+        "uq_skill_artifacts_active_name",
+        "skill_artifacts",
+        ["name"],
+        unique=True,
+        postgresql_where=sa.text("status = 'active'"),
+        sqlite_where=sa.text("status = 'active'"),
+    )
 
     op.create_table(
         "skill_usage_events",
@@ -146,11 +154,23 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Seed artifacts are referenced by usage rows, so remove dependent rows before deleting seed artifacts.
+    op.execute(
+        """
+        DELETE FROM skill_usage_events
+        WHERE skill_artifact_id IN (
+            SELECT id FROM skill_artifacts WHERE created_by = 'system_seed'
+        )
+        """
+    )
+    op.execute("DELETE FROM skill_artifacts WHERE created_by = 'system_seed'")
+
     op.drop_index("ix_skill_usage_events_session_created", table_name="skill_usage_events")
     op.drop_index("ix_skill_usage_events_goal_surface_created", table_name="skill_usage_events")
     op.drop_index("ix_skill_usage_events_artifact_created", table_name="skill_usage_events")
     op.drop_table("skill_usage_events")
 
+    op.drop_index("uq_skill_artifacts_active_name", table_name="skill_artifacts")
     op.drop_index("ix_skill_artifacts_status_name", table_name="skill_artifacts")
     op.drop_index("uq_skill_artifacts_name_version", table_name="skill_artifacts")
     op.drop_table("skill_artifacts")

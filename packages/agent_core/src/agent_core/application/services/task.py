@@ -49,6 +49,7 @@ from agent_core.domain.entities.autonomy import (
 )
 from agent_core.domain.entities.goal import LearnerGoal
 from agent_core.domain.entities.planning import DailyTask, StudyPlan
+from agent_core.domain.entities.skill import SkillResolution
 from agent_core.domain.errors import NotFoundError, ValidationError
 from agent_core.domain.schemas.planning import (
     DailyTaskResponse,
@@ -2400,6 +2401,10 @@ class AutonomousTaskService:
         if source_task.task_type == "review":
             return
         goal = await self._require_goal(source_task.learner_goal_id)
+        skill_resolution = await self._resolve_review_skill_for_runtime(
+            goal=goal,
+            source_task=source_task,
+        )
         run = await self._workflow_run_service.create_run(
             workflow_type="review_scheduling",
             trigger_source="task_completed",
@@ -2467,6 +2472,7 @@ class AutonomousTaskService:
                 workflow_run_id=run.id,
                 outcome_status="completed",
                 output_summary=f"{len(review_tasks)} review tasks",
+                resolution=skill_resolution,
                 metadata={"created_review_task_ids": [task.id for task in review_tasks]},
             )
             run = await self._workflow_run_service.complete_run(
@@ -2481,10 +2487,25 @@ class AutonomousTaskService:
                 workflow_run_id=run.id,
                 outcome_status="failed",
                 error_code=type(exc).__name__,
+                resolution=skill_resolution,
                 metadata={"error": str(exc)},
             )
             await self._workflow_run_service.fail_run(run=run, error_code=type(exc).__name__)
             raise
+
+    async def _resolve_review_skill_for_runtime(
+        self,
+        *,
+        goal: LearnerGoal,
+        source_task: DailyTask,
+    ) -> SkillResolution | None:
+        if self._skill_usage_service is None:
+            return None
+        return await self._skill_usage_service.resolve_for_runtime(
+            skill_name="schedule_review",
+            surface="review_scheduling",
+            resource_id=source_task.id or goal.id,
+        )
 
     async def _record_review_skill_usage(
         self,
@@ -2495,6 +2516,7 @@ class AutonomousTaskService:
         outcome_status: str,
         output_summary: str | None = None,
         error_code: str | None = None,
+        resolution: SkillResolution | None = None,
         metadata: dict[str, object] | None = None,
     ) -> None:
         if self._skill_usage_service is None:
@@ -2512,6 +2534,7 @@ class AutonomousTaskService:
             input_summary=source_task.topic_focus,
             output_summary=output_summary,
             error_code=error_code,
+            resolution=resolution,
             metadata=metadata,
         )
 

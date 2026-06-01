@@ -16,6 +16,8 @@ class SkillRegistry:
         "chat": "explain_concept",
         "hint": "adaptive_hint",
         "quiz": "create_quiz",
+        "plan_generation": "plan_study_path",
+        "review_scheduling": "schedule_review",
     }
     _catalog = {
         "explain_concept": SkillDescriptor(
@@ -58,7 +60,8 @@ class SkillRegistry:
     def trace_for_mode(self, mode: str | None) -> list[str]:
         skill_name = self._mode_to_skill.get(mode or "")
         if skill_name is None:
-            raise ValidationError("Unsupported mode. Expected one of: chat, hint, quiz.")
+            expected = ", ".join(sorted(self._mode_to_skill))
+            raise ValidationError(f"Unsupported mode. Expected one of: {expected}.")
         if skill_name not in self._skills_by_name:
             raise ValidationError(f"Skill '{skill_name}' is not enabled for mode '{mode}'.")
         return [skill_name]

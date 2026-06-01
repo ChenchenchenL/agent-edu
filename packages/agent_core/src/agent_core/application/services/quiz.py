@@ -5,6 +5,7 @@ from agent_core.application.services.goal_skill_binding_resolver import GoalSkil
 from agent_core.application.services.skills import SkillUsageService
 from agent_core.application.skills.registry import SkillRegistry
 from agent_core.domain.entities.quiz import SessionQuiz, SessionQuizQuestion
+from agent_core.domain.entities.skill import SkillResolution
 from agent_core.domain.errors import NotFoundError, ValidationError
 from agent_core.domain.schemas.quiz import (
     GenerateQuizRequest,
@@ -46,6 +47,12 @@ class QuizService:
         session = await self._session_repository.get_by_id(payload.session_id)
         if session is None:
             raise NotFoundError(f"Session '{payload.session_id}' was not found.")
+        skills = self._skill_registry.trace_for_mode("quiz")
+        skill_resolution = await self._resolve_skill_for_runtime(
+            skill_name=skills[0],
+            surface="quiz",
+            resource_id=session.id,
+        )
         skill_binding = None
         if self._goal_skill_binding_resolver is not None and session.learner_goal_id is not None:
             skill_binding = await self._goal_skill_binding_resolver.get_active_binding(
@@ -70,7 +77,7 @@ class QuizService:
                 topic=quiz.topic,
                 difficulty=quiz.difficulty,
                 question_count=len(quiz.questions),
-                skill_trace=self._skill_registry.trace_for_mode("quiz"),
+                skill_trace=skills,
             )
             quiz_questions = [
                 SessionQuizQuestion.build(
@@ -126,6 +133,7 @@ class QuizService:
                 latency_ms=quiz.latency_ms,
                 input_summary=payload.topic,
                 output_summary=f"{len(quiz.questions)} questions",
+                resolution=skill_resolution,
                 metadata={
                     "quiz_id": session_quiz.id,
                     "difficulty": quiz.difficulty,
@@ -171,6 +179,7 @@ class QuizService:
                 latency_ms=getattr(quiz, "latency_ms", 0) if quiz is not None else 0,
                 input_summary=payload.topic,
                 error_code=type(exc).__name__,
+                resolution=skill_resolution,
                 metadata={
                     "quiz_id": session_quiz.id if session_quiz is not None else None,
                     "difficulty": payload.difficulty,
@@ -187,7 +196,7 @@ class QuizService:
             difficulty=quiz.difficulty,
             question_count=len(quiz.questions),
             questions=quiz.questions,
-            skill_trace=self._skill_registry.trace_for_mode("quiz"),
+            skill_trace=skills,
             created_at=session_quiz.created_at,
         )
 
@@ -223,6 +232,21 @@ class QuizService:
             created_at=stored.quiz.created_at,
         )
 
+    async def _resolve_skill_for_runtime(
+        self,
+        *,
+        skill_name: str,
+        surface: str,
+        resource_id: str,
+    ) -> SkillResolution | None:
+        if self._skill_usage_service is None:
+            return None
+        return await self._skill_usage_service.resolve_for_runtime(
+            skill_name=skill_name,
+            surface=surface,
+            resource_id=resource_id,
+        )
+
     async def _record_skill_usage(
         self,
         *,
@@ -233,6 +257,7 @@ class QuizService:
         input_summary: str | None,
         output_summary: str | None = None,
         error_code: str | None = None,
+        resolution: SkillResolution | None = None,
         metadata: dict[str, object] | None = None,
     ) -> None:
         if self._skill_usage_service is None:
@@ -251,5 +276,6 @@ class QuizService:
             input_summary=input_summary,
             output_summary=output_summary,
             error_code=error_code,
+            resolution=resolution,
             metadata=metadata,
         )

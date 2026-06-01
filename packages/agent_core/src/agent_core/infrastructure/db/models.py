@@ -598,6 +598,9 @@ class SkillArtifactModel(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     version: Mapped[str] = mapped_column(String(64), nullable=False)
+    lineage_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    parent_artifact_id: Mapped[str | None] = mapped_column(ForeignKey("skill_artifacts.id"), nullable=True)
+    supersedes_artifact_id: Mapped[str | None] = mapped_column(ForeignKey("skill_artifacts.id"), nullable=True)
     skill_type: Mapped[str] = mapped_column(String(64), nullable=False)
     scope: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -605,6 +608,7 @@ class SkillArtifactModel(Base):
     definition: Mapped[dict] = mapped_column(JSON, nullable=False)
     runtime_directives: Mapped[dict] = mapped_column(JSON, nullable=False)
     tool_plan: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
+    compatibility_contract: Mapped[dict] = mapped_column(JSON, nullable=False)
     source_reflection_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     source_memory_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     source_proposal_id: Mapped[str | None] = mapped_column(ForeignKey("reflection_proposals.id"), nullable=True)
@@ -618,6 +622,15 @@ class SkillArtifactModel(Base):
 
 Index("uq_skill_artifacts_name_version", SkillArtifactModel.name, SkillArtifactModel.version, unique=True)
 Index("ix_skill_artifacts_status_name", SkillArtifactModel.status, SkillArtifactModel.name)
+Index("ix_skill_artifacts_lineage_updated", SkillArtifactModel.lineage_id, SkillArtifactModel.updated_at)
+Index(
+    "uq_skill_artifacts_selectable_name_scope",
+    SkillArtifactModel.name,
+    SkillArtifactModel.scope,
+    unique=True,
+    postgresql_where=SkillArtifactModel.status.in_(["active", "stable"]),
+    sqlite_where=SkillArtifactModel.status.in_(["active", "stable"]),
+)
 
 
 class SkillUsageEventModel(Base):
@@ -627,6 +640,7 @@ class SkillUsageEventModel(Base):
     skill_artifact_id: Mapped[str | None] = mapped_column(ForeignKey("skill_artifacts.id"), nullable=True)
     skill_name: Mapped[str] = mapped_column(String(128), nullable=False)
     skill_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    skill_status_at_use: Mapped[str | None] = mapped_column(String(32), nullable=True)
     learner_profile_id: Mapped[str | None] = mapped_column(ForeignKey("learner_profiles.id"), nullable=True)
     learner_goal_id: Mapped[str | None] = mapped_column(ForeignKey("learner_goals.id"), nullable=True)
     session_id: Mapped[str | None] = mapped_column(ForeignKey("learning_sessions.id"), nullable=True)
@@ -639,8 +653,13 @@ class SkillUsageEventModel(Base):
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cost_units: Mapped[float | None] = mapped_column(Float, nullable=True)
     input_summary: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    input_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     output_summary: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    output_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    resolver_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    selection_reason: Mapped[str] = mapped_column(String(64), nullable=False)
+    outcome_signals: Mapped[dict] = mapped_column(JSON, nullable=False)
     usage_metadata: Mapped[dict] = mapped_column("metadata", JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
