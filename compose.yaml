@@ -1,0 +1,220 @@
+services:
+  api:
+    image: agent-edu-api:dev
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        ALL_PROXY: ${ALL_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+        http_proxy: ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        all_proxy: ${all_proxy:-}
+        no_proxy: ${no_proxy:-}
+    environment:
+      AGENT_EDU_APP_ENV: ${AGENT_EDU_APP_ENV:-development}
+      AGENT_EDU_API_PORT: ${AGENT_EDU_API_PORT:-8000}
+      AGENT_EDU_DATABASE_URL: ${AGENT_EDU_DATABASE_URL:-postgresql+asyncpg://agent_edu:agent_edu@postgres:5432/agent_edu}
+      AGENT_EDU_REDIS_URL: ${AGENT_EDU_REDIS_URL:-redis://redis:6379/0}
+      AGENT_EDU_LLM_PROVIDER: ${AGENT_EDU_LLM_PROVIDER:-mock}
+      AGENT_EDU_LLM_MODEL: ${AGENT_EDU_LLM_MODEL:-mock-tutor-v1}
+      AGENT_EDU_LLM_API_KEY: ${AGENT_EDU_LLM_API_KEY:-}
+      AGENT_EDU_LLM_BASE_URL: ${AGENT_EDU_LLM_BASE_URL:-}
+      AGENT_EDU_LLM_TIMEOUT_SECONDS: ${AGENT_EDU_LLM_TIMEOUT_SECONDS:-30.0}
+      AGENT_EDU_LLM_MAX_RETRIES: ${AGENT_EDU_LLM_MAX_RETRIES:-2}
+      AGENT_EDU_LLM_TEMPERATURE: ${AGENT_EDU_LLM_TEMPERATURE:-0.2}
+      AGENT_EDU_LLM_MAX_OUTPUT_TOKENS: ${AGENT_EDU_LLM_MAX_OUTPUT_TOKENS:-1200}
+      AGENT_EDU_TUTOR_MODEL: ${AGENT_EDU_TUTOR_MODEL:-}
+      AGENT_EDU_QUIZ_MODEL: ${AGENT_EDU_QUIZ_MODEL:-}
+      AGENT_EDU_HINT_MODEL: ${AGENT_EDU_HINT_MODEL:-}
+      AGENT_EDU_EMBEDDING_PROVIDER: ${AGENT_EDU_EMBEDDING_PROVIDER:-}
+      AGENT_EDU_EMBEDDING_MODEL: ${AGENT_EDU_EMBEDDING_MODEL:-}
+      AGENT_EDU_EMBEDDING_API_KEY: ${AGENT_EDU_EMBEDDING_API_KEY:-}
+      AGENT_EDU_EMBEDDING_BASE_URL: ${AGENT_EDU_EMBEDDING_BASE_URL:-}
+      AGENT_EDU_EMBEDDING_DIMENSIONS: ${AGENT_EDU_EMBEDDING_DIMENSIONS:-}
+      AGENT_EDU_EMBEDDING_TIMEOUT_SECONDS: ${AGENT_EDU_EMBEDDING_TIMEOUT_SECONDS:-30.0}
+      AGENT_EDU_ALLOWED_SKILLS: ${AGENT_EDU_ALLOWED_SKILLS:-explain_concept,create_quiz,adaptive_hint,plan_study_path,schedule_review}
+      AGENT_EDU_REFLECTION_MAX_DEPTH: ${AGENT_EDU_REFLECTION_MAX_DEPTH:-2}
+      AGENT_EDU_METRICS_ENABLED: ${AGENT_EDU_METRICS_ENABLED:-1}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      ALL_PROXY: ${ALL_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis,api,prometheus,grafana}
+      http_proxy: ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      all_proxy: ${all_proxy:-}
+      no_proxy: ${no_proxy:-localhost,127.0.0.1,postgres,redis,api,prometheus,grafana}
+    ports:
+      - "${AGENT_EDU_API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz').read()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    command: >
+      sh -c "alembic upgrade head &&
+      uvicorn apps.api.main:app --host 0.0.0.0 --port 8000"
+
+  worker:
+    image: agent-edu-api:dev
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        ALL_PROXY: ${ALL_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+        http_proxy: ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        all_proxy: ${all_proxy:-}
+        no_proxy: ${no_proxy:-}
+    environment:
+      AGENT_EDU_APP_ENV: ${AGENT_EDU_APP_ENV:-development}
+      AGENT_EDU_DATABASE_URL: ${AGENT_EDU_DATABASE_URL:-postgresql+asyncpg://agent_edu:agent_edu@postgres:5432/agent_edu}
+      AGENT_EDU_REDIS_URL: ${AGENT_EDU_REDIS_URL:-redis://redis:6379/0}
+      AGENT_EDU_LLM_PROVIDER: ${AGENT_EDU_LLM_PROVIDER:-mock}
+      AGENT_EDU_LLM_MODEL: ${AGENT_EDU_LLM_MODEL:-mock-tutor-v1}
+      AGENT_EDU_LLM_API_KEY: ${AGENT_EDU_LLM_API_KEY:-}
+      AGENT_EDU_LLM_BASE_URL: ${AGENT_EDU_LLM_BASE_URL:-}
+      AGENT_EDU_LLM_TIMEOUT_SECONDS: ${AGENT_EDU_LLM_TIMEOUT_SECONDS:-30.0}
+      AGENT_EDU_LLM_MAX_RETRIES: ${AGENT_EDU_LLM_MAX_RETRIES:-2}
+      AGENT_EDU_LLM_TEMPERATURE: ${AGENT_EDU_LLM_TEMPERATURE:-0.2}
+      AGENT_EDU_LLM_MAX_OUTPUT_TOKENS: ${AGENT_EDU_LLM_MAX_OUTPUT_TOKENS:-1200}
+      AGENT_EDU_TUTOR_MODEL: ${AGENT_EDU_TUTOR_MODEL:-}
+      AGENT_EDU_QUIZ_MODEL: ${AGENT_EDU_QUIZ_MODEL:-}
+      AGENT_EDU_HINT_MODEL: ${AGENT_EDU_HINT_MODEL:-}
+      AGENT_EDU_EMBEDDING_PROVIDER: ${AGENT_EDU_EMBEDDING_PROVIDER:-}
+      AGENT_EDU_EMBEDDING_MODEL: ${AGENT_EDU_EMBEDDING_MODEL:-}
+      AGENT_EDU_EMBEDDING_API_KEY: ${AGENT_EDU_EMBEDDING_API_KEY:-}
+      AGENT_EDU_EMBEDDING_BASE_URL: ${AGENT_EDU_EMBEDDING_BASE_URL:-}
+      AGENT_EDU_EMBEDDING_DIMENSIONS: ${AGENT_EDU_EMBEDDING_DIMENSIONS:-}
+      AGENT_EDU_EMBEDDING_TIMEOUT_SECONDS: ${AGENT_EDU_EMBEDDING_TIMEOUT_SECONDS:-30.0}
+      AGENT_EDU_ALLOWED_SKILLS: ${AGENT_EDU_ALLOWED_SKILLS:-explain_concept,create_quiz,adaptive_hint,plan_study_path,schedule_review}
+      AGENT_EDU_REFLECTION_MAX_DEPTH: ${AGENT_EDU_REFLECTION_MAX_DEPTH:-2}
+      AGENT_EDU_METRICS_ENABLED: ${AGENT_EDU_METRICS_ENABLED:-1}
+      AGENT_EDU_AUTONOMY_WORKER_POLL_INTERVAL_SECONDS: ${AGENT_EDU_AUTONOMY_WORKER_POLL_INTERVAL_SECONDS:-15.0}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      ALL_PROXY: ${ALL_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis,api,prometheus,grafana}
+      http_proxy: ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      all_proxy: ${all_proxy:-}
+      no_proxy: ${no_proxy:-localhost,127.0.0.1,postgres,redis,api,prometheus,grafana}
+    depends_on:
+      api:
+        condition: service_healthy
+    command: python -m apps.worker.main
+
+  tester:
+    image: agent-edu-api:dev
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        ALL_PROXY: ${ALL_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+        http_proxy: ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        all_proxy: ${all_proxy:-}
+        no_proxy: ${no_proxy:-}
+    profiles: ["test"]
+    environment:
+      AGENT_EDU_APP_ENV: ${AGENT_EDU_APP_ENV:-development}
+      AGENT_EDU_API_BASE_URL: ${AGENT_EDU_API_BASE_URL:-http://api:8000}
+      AGENT_EDU_DATABASE_URL: ${AGENT_EDU_DATABASE_URL:-postgresql+asyncpg://agent_edu:agent_edu@postgres:5432/agent_edu}
+      AGENT_EDU_REDIS_URL: ${AGENT_EDU_REDIS_URL:-redis://redis:6379/0}
+      AGENT_EDU_LLM_PROVIDER: ${AGENT_EDU_LLM_PROVIDER:-mock}
+      AGENT_EDU_LLM_MODEL: ${AGENT_EDU_LLM_MODEL:-mock-tutor-v1}
+      AGENT_EDU_LLM_API_KEY: ${AGENT_EDU_LLM_API_KEY:-}
+      AGENT_EDU_LLM_BASE_URL: ${AGENT_EDU_LLM_BASE_URL:-}
+      AGENT_EDU_TUTOR_MODEL: ${AGENT_EDU_TUTOR_MODEL:-}
+      AGENT_EDU_QUIZ_MODEL: ${AGENT_EDU_QUIZ_MODEL:-}
+      AGENT_EDU_HINT_MODEL: ${AGENT_EDU_HINT_MODEL:-}
+      AGENT_EDU_EMBEDDING_PROVIDER: ${AGENT_EDU_EMBEDDING_PROVIDER:-}
+      AGENT_EDU_EMBEDDING_MODEL: ${AGENT_EDU_EMBEDDING_MODEL:-}
+      AGENT_EDU_EMBEDDING_API_KEY: ${AGENT_EDU_EMBEDDING_API_KEY:-}
+      AGENT_EDU_EMBEDDING_BASE_URL: ${AGENT_EDU_EMBEDDING_BASE_URL:-}
+      AGENT_EDU_EMBEDDING_DIMENSIONS: ${AGENT_EDU_EMBEDDING_DIMENSIONS:-}
+      AGENT_EDU_ALLOWED_SKILLS: ${AGENT_EDU_ALLOWED_SKILLS:-explain_concept,create_quiz,adaptive_hint,plan_study_path,schedule_review}
+      AGENT_EDU_RUN_REAL_PROVIDER_REGRESSION: ${AGENT_EDU_RUN_REAL_PROVIDER_REGRESSION:-0}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      ALL_PROXY: ${ALL_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis,api,prometheus,grafana}
+      http_proxy: ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      all_proxy: ${all_proxy:-}
+      no_proxy: ${no_proxy:-localhost,127.0.0.1,postgres,redis,api,prometheus,grafana}
+    depends_on:
+      api:
+        condition: service_healthy
+    command: pytest tests/test_docker_blackbox.py -q
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: ["observability"]
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    depends_on:
+      prometheus:
+        condition: service_started
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: agent_edu
+      POSTGRES_USER: agent_edu
+      POSTGRES_PASSWORD: agent_edu
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent_edu -d agent_edu"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7.4-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres-data:
