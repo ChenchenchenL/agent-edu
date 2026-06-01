@@ -1,13 +1,24 @@
 from __future__ import annotations
 
 from hashlib import sha256
+import re
 from typing import Any
 
 from agent_core.application.services.audit import AuditService
 from agent_core.application.skills.registry import SkillRegistry
+from agent_core.domain.entities.reflection_closure import ReflectionProposal
 from agent_core.domain.entities.skill import SkillArtifact, SkillResolution, SkillUsageEvent
 from agent_core.domain.errors import NotFoundError, ValidationError
-from agent_core.infrastructure.db.repositories import SkillArtifactRepository, SkillUsageEventRepository
+from agent_core.infrastructure.db.repositories import (
+    ReflectionProposalEvaluationRepository,
+    ReflectionProposalRepository,
+    SkillArtifactRepository,
+    SkillUsageEventRepository,
+)
+
+
+ALLOWED_SKILL_PACKAGE_TOOLS = {"review_scheduling", "assessment_generation", "partial_replan"}
+CANDIDATE_MIN_SCORE_DELTA = 0.1
 
 
 def _bounded_limit(limit: int) -> int:
@@ -54,6 +65,174 @@ class SkillCatalogService:
         return await self._artifact_repository.list_by_lineage(
             artifact.lineage_id,
             limit=_bounded_limit(limit),
+        )
+
+
+class SkillCandidateService:
+    def __init__(
+        self,
+        *,
+        artifact_repository: SkillArtifactRepository,
+        proposal_repository: ReflectionProposalRepository,
+        evaluation_repository: ReflectionProposalEvaluationRepository,
+        audit_service: AuditService,
+    ) -> None:
+        self._artifact_repository = artifact_repository
+        self._proposal_repository = proposal_repository
+        self._evaluation_repository = evaluation_repository
+        self._audit_service = audit_service
+
+    async def create_candidate_from_proposal(
+        self,
+        *,
+        proposal_id: str,
+        operator_id: str,
+    ) -> SkillArtifact:
+        existing = await self._artifact_repository.get_by_source_proposal_id(proposal_id)
+        if existing is not None:
+            await self._audit_candidate(existing, event_type="skill.artifact.candidate_reused")
+            return existing
+
+        proposal = await self._proposal_repository.get_by_id(proposal_id)
+        if proposal is None:
+            raise NotFoundError(f"Reflection proposal '{proposal_id}' was not found.")
+        evaluation = await self._evaluation_repository.get_by_proposal(proposal_id)
+        self._validate_candidate_source(proposal=proposal, evaluation_status=evaluation.evaluation_status if evaluation else None, score_delta=evaluation.score_delta if evaluation else None)
+        payload = self._validated_payload(proposal)
+        skill_name = str(payload["skill_name"])
+        surface = str(payload["surface"])
+        artifact = SkillArtifact.build(
+            name=skill_name,
+            version=await self._next_candidate_version(skill_name),
+            skill_type="learned",
+            scope=surface,
+            status="candidate",
+            description=proposal.change_summary,
+            definition={
+                "artifact_kind": payload["artifact_kind"],
+                "hypothesis": proposal.hypothesis,
+                "change_summary": proposal.change_summary,
+                "expected_improvement": proposal.expected_improvement,
+                "match_rules": dict(payload["match_rules"]),
+                "scoring_contract": dict(payload["scoring_contract"]),
+                "source_proposal": {
+                    "id": proposal.id,
+                    "risk_level": proposal.risk_level,
+                    "evaluation_status": evaluation.evaluation_status if evaluation else None,
+                    "score_delta": evaluation.score_delta if evaluation else None,
+                    "sandbox_run_id": evaluation.sandbox_run_id if evaluation else None,
+                },
+            },
+            runtime_directives=dict(payload["runtime_directives"]),
+            tool_plan=[dict(item) for item in payload["tool_plan"]],
+            compatibility_contract={
+                "surfaces": [surface],
+                "implementation_binding": skill_name,
+                "input_schema_version": "1.0",
+                "output_schema_version": "1.0",
+                "dynamic_execution": False,
+            },
+            source_reflection_ids=[proposal.reflection_record_id],
+            source_memory_ids=self._source_memory_ids(proposal.evidence_snapshot),
+            source_proposal_id=proposal.id,
+            quality_score=self._quality_score(evaluation.score_delta if evaluation else 0.0),
+            created_by=operator_id,
+        )
+        await self._artifact_repository.create(artifact)
+        await self._audit_candidate(artifact, event_type="skill.artifact.candidate_created")
+        return artifact
+
+    @staticmethod
+    def _validate_candidate_source(
+        *,
+        proposal: ReflectionProposal,
+        evaluation_status: str | None,
+        score_delta: float | None,
+    ) -> None:
+        if proposal.proposal_type != "skill_package":
+            raise ValidationError("Only skill_package proposals can create skill candidates.")
+        if proposal.status != "approved":
+            raise ValidationError("Only approved skill_package proposals can create skill candidates.")
+        if evaluation_status != "effective":
+            raise ValidationError("Skill candidate creation requires an effective evaluation.")
+        if score_delta is None or score_delta < CANDIDATE_MIN_SCORE_DELTA:
+            raise ValidationError("Skill candidate creation requires sufficient evaluation score_delta.")
+
+    @staticmethod
+    def _validated_payload(proposal: ReflectionProposal) -> dict[str, object]:
+        payload = dict(proposal.structured_patch_payload)
+        if payload.get("artifact_kind") != "declarative_skill_package":
+            raise ValidationError("Unsupported skill package artifact_kind.")
+        skill_name = payload.get("skill_name")
+        if not isinstance(skill_name, str) or not skill_name.strip():
+            raise ValidationError("Skill package skill_name is required.")
+        surface = payload.get("surface")
+        if surface != proposal.target_scope:
+            raise ValidationError("Skill package surface must match proposal target scope.")
+        for key in ("match_rules", "runtime_directives", "scoring_contract"):
+            if not isinstance(payload.get(key), dict):
+                raise ValidationError(f"Skill package {key} must be an object.")
+        tool_plan = payload.get("tool_plan")
+        if not isinstance(tool_plan, list):
+            raise ValidationError("Skill package tool_plan must be a list.")
+        for item in tool_plan:
+            if not isinstance(item, dict):
+                raise ValidationError("Skill package tool_plan items must be objects.")
+            tool_name = item.get("tool_name")
+            if tool_name not in ALLOWED_SKILL_PACKAGE_TOOLS:
+                raise ValidationError("Unsupported skill package tool.")
+        return {
+            "artifact_kind": payload["artifact_kind"],
+            "skill_name": skill_name.strip(),
+            "surface": str(surface),
+            "match_rules": dict(payload["match_rules"]),
+            "runtime_directives": dict(payload["runtime_directives"]),
+            "tool_plan": [dict(item) for item in tool_plan],
+            "scoring_contract": dict(payload["scoring_contract"]),
+        }
+
+    async def _next_candidate_version(self, name: str) -> str:
+        artifacts = await self._artifact_repository.list_by_name(name, limit=200)
+        max_patch = -1
+        for artifact in artifacts:
+            match = re.fullmatch(r"0\.1\.(\d+)", artifact.version)
+            if match is not None:
+                max_patch = max(max_patch, int(match.group(1)))
+        return f"0.1.{max_patch + 1}"
+
+    @staticmethod
+    def _source_memory_ids(evidence_snapshot: dict[str, Any]) -> list[str]:
+        items = list((evidence_snapshot.get("memory_corpus") or {}).get("items") or [])
+        memory_ids: list[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            memory_id = item.get("memory_id")
+            if isinstance(memory_id, str) and memory_id and memory_id not in memory_ids:
+                memory_ids.append(memory_id)
+        return memory_ids
+
+    @staticmethod
+    def _quality_score(score_delta: float) -> float:
+        return min(1.0, max(0.0, 0.5 + score_delta))
+
+    async def _audit_candidate(self, artifact: SkillArtifact, *, event_type: str) -> None:
+        await self._audit_service.record(
+            event_type=event_type,
+            resource_type="skill_artifact",
+            resource_id=artifact.id,
+            actor="system",
+            event_data={
+                "artifact_id": artifact.id,
+                "skill_name": artifact.name,
+                "version": artifact.version,
+                "scope": artifact.scope,
+                "status": artifact.status,
+                "source_proposal_id": artifact.source_proposal_id,
+                "source_reflection_ids": artifact.source_reflection_ids,
+                "source_memory_ids": artifact.source_memory_ids,
+                "quality_score": artifact.quality_score,
+            },
         )
 
 

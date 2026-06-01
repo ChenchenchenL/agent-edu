@@ -264,8 +264,49 @@ class SkillArtifactRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def create(self, entity: SkillArtifact) -> None:
+        self._session.add(
+            SkillArtifactModel(
+                id=entity.id,
+                name=entity.name,
+                version=entity.version,
+                lineage_id=entity.lineage_id,
+                parent_artifact_id=entity.parent_artifact_id,
+                supersedes_artifact_id=entity.supersedes_artifact_id,
+                skill_type=entity.skill_type,
+                scope=entity.scope,
+                status=entity.status,
+                description=entity.description,
+                definition=entity.definition,
+                runtime_directives=entity.runtime_directives,
+                tool_plan=entity.tool_plan,
+                compatibility_contract=entity.compatibility_contract,
+                source_reflection_ids=entity.source_reflection_ids,
+                source_memory_ids=entity.source_memory_ids,
+                source_proposal_id=entity.source_proposal_id,
+                quality_score=entity.quality_score,
+                created_by=entity.created_by,
+                approved_by=entity.approved_by,
+                approved_at=entity.approved_at,
+                created_at=entity.created_at,
+                updated_at=entity.updated_at,
+            )
+        )
+        await self._session.flush()
+
     async def get_by_id(self, artifact_id: str) -> SkillArtifact | None:
         model = await self._session.get(SkillArtifactModel, artifact_id)
+        if model is None:
+            return None
+        return self._to_entity(model)
+
+    async def get_by_source_proposal_id(self, proposal_id: str) -> SkillArtifact | None:
+        result = await self._session.execute(
+            select(SkillArtifactModel)
+            .where(SkillArtifactModel.source_proposal_id == proposal_id)
+            .order_by(desc(SkillArtifactModel.created_at), desc(SkillArtifactModel.id))
+        )
+        model = result.scalars().first()
         if model is None:
             return None
         return self._to_entity(model)
@@ -324,6 +365,15 @@ class SkillArtifactRepository:
             query = query.where(SkillArtifactModel.lineage_id == lineage_id)
         result = await self._session.execute(
             query.order_by(desc(SkillArtifactModel.updated_at), desc(SkillArtifactModel.id)).limit(limit)
+        )
+        return [self._to_entity(model) for model in result.scalars().all()]
+
+    async def list_by_name(self, name: str, *, limit: int = 200) -> list[SkillArtifact]:
+        result = await self._session.execute(
+            select(SkillArtifactModel)
+            .where(SkillArtifactModel.name == name)
+            .order_by(desc(SkillArtifactModel.created_at), desc(SkillArtifactModel.id))
+            .limit(limit)
         )
         return [self._to_entity(model) for model in result.scalars().all()]
 

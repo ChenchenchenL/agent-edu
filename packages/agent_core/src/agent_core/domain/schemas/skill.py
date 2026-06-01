@@ -39,6 +39,10 @@ class SkillArtifactResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class CreateSkillCandidateFromProposalRequest(BaseModel):
+    proposal_id: str = Field(min_length=1, max_length=36)
+
+
 class SkillUsageEventResponse(BaseModel):
     id: str
     skill_artifact_id: str | None

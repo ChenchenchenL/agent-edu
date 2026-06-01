@@ -4,9 +4,12 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from agent_core.application.services.audit import AuditService
-from agent_core.application.services.skills import SkillResolver, SkillUsageService
+import pytest
+
+from agent_core.application.services.skills import SkillCandidateService, SkillResolver, SkillUsageService
 from agent_core.application.skills.registry import SkillRegistry
 from agent_core.domain.entities.audit import AuditEvent
+from agent_core.domain.entities.reflection_closure import ReflectionProposal, ReflectionProposalEvaluation
 from agent_core.domain.entities.skill import SkillArtifact, SkillUsageEvent
 from agent_core.domain.errors import ValidationError
 from agent_core.domain.schemas.skill import SkillUsageEventResponse
@@ -24,49 +27,73 @@ class StubAuditRepository:
 class StubSkillArtifactRepository:
     def __init__(self, artifact: SkillArtifact | None = None):
         self.artifact = artifact
+        self.artifacts: list[SkillArtifact] = [artifact] if artifact is not None else []
+
+    async def create(self, entity: SkillArtifact):
+        self.artifact = entity
+        self.artifacts.append(entity)
 
     async def get_by_id(self, artifact_id: str):
-        if self.artifact is not None and self.artifact.id == artifact_id:
-            return self.artifact
+        for artifact in self.artifacts:
+            if artifact.id == artifact_id:
+                return artifact
+        return None
+
+    async def get_by_source_proposal_id(self, proposal_id: str):
+        for artifact in self.artifacts:
+            if artifact.source_proposal_id == proposal_id:
+                return artifact
         return None
 
     async def get_selectable_by_name_scope(self, *, name: str, scope: str):
-        if (
-            self.artifact is not None
-            and self.artifact.name == name
-            and self.artifact.scope == scope
-            and self.artifact.status in {"active", "stable"}
-        ):
-            return self.artifact
+        for artifact in self.artifacts:
+            if artifact.name == name and artifact.scope == scope and artifact.status in {"active", "stable"}:
+                return artifact
         return None
 
     async def get_suppressed_by_name_scope(self, *, name: str, scope: str):
-        if (
-            self.artifact is not None
-            and self.artifact.name == name
-            and self.artifact.scope == scope
-            and self.artifact.status == "suppressed"
-        ):
-            return self.artifact
+        for artifact in self.artifacts:
+            if artifact.name == name and artifact.scope == scope and artifact.status == "suppressed":
+                return artifact
         return None
 
     async def list_artifacts(self, *, status=None, name=None, scope=None, lineage_id=None, limit=50):
-        if self.artifact is None:
-            return []
-        if status is not None and self.artifact.status != status:
-            return []
-        if name is not None and self.artifact.name != name:
-            return []
-        if scope is not None and self.artifact.scope != scope:
-            return []
-        if lineage_id is not None and self.artifact.lineage_id != lineage_id:
-            return []
-        return [self.artifact]
+        artifacts = list(self.artifacts)
+        if status is not None:
+            artifacts = [item for item in artifacts if item.status == status]
+        if name is not None:
+            artifacts = [item for item in artifacts if item.name == name]
+        if scope is not None:
+            artifacts = [item for item in artifacts if item.scope == scope]
+        if lineage_id is not None:
+            artifacts = [item for item in artifacts if item.lineage_id == lineage_id]
+        return artifacts[:limit]
 
     async def list_by_lineage(self, lineage_id: str, *, limit: int = 50):
-        if self.artifact is None or self.artifact.lineage_id != lineage_id:
-            return []
-        return [self.artifact]
+        return [item for item in self.artifacts if item.lineage_id == lineage_id][:limit]
+
+    async def list_by_name(self, name: str, *, limit: int = 200):
+        return [item for item in self.artifacts if item.name == name][:limit]
+
+
+class StubProposalRepository:
+    def __init__(self, proposal: ReflectionProposal | None = None):
+        self.proposal = proposal
+
+    async def get_by_id(self, proposal_id: str):
+        if self.proposal is not None and self.proposal.id == proposal_id:
+            return self.proposal
+        return None
+
+
+class StubProposalEvaluationRepository:
+    def __init__(self, evaluation: ReflectionProposalEvaluation | None = None):
+        self.evaluation = evaluation
+
+    async def get_by_proposal(self, proposal_id: str):
+        if self.evaluation is not None and self.evaluation.proposal_id == proposal_id:
+            return self.evaluation
+        return None
 
 
 class StubSkillUsageEventRepository:

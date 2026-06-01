@@ -6,14 +6,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent_core.api.dependencies import (
     get_access_context,
     get_db_session,
+    get_skill_candidate_service,
     get_skill_catalog_service,
     get_skill_registry,
     get_skill_resolver,
     get_skill_usage_service,
     require_operator_api_key,
 )
-from agent_core.application.services.skills import SkillCatalogService, SkillResolver, SkillUsageService
+from agent_core.application.services.skills import SkillCandidateService, SkillCatalogService, SkillResolver, SkillUsageService
 from agent_core.domain.schemas.skill import (
+    CreateSkillCandidateFromProposalRequest,
     SkillArtifactResponse,
     SkillDescriptorResponse,
     SkillResolutionResponse,
@@ -53,6 +55,24 @@ async def list_skill_artifacts(
         limit=limit,
     )
     return [SkillArtifactResponse.model_validate(item) for item in artifacts]
+
+
+@router.post(
+    "/skill-artifacts/from-reflection-proposal",
+    response_model=SkillArtifactResponse,
+    dependencies=[Depends(require_operator_api_key)],
+)
+async def create_skill_candidate_from_reflection_proposal(
+    payload: CreateSkillCandidateFromProposalRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: SkillCandidateService = Depends(get_skill_candidate_service),
+) -> SkillArtifactResponse:
+    artifact = await service.create_candidate_from_proposal(
+        proposal_id=payload.proposal_id,
+        operator_id="operator",
+    )
+    await session.commit()
+    return SkillArtifactResponse.model_validate(artifact)
 
 
 @router.get(

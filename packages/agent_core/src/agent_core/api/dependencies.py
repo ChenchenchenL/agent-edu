@@ -39,7 +39,7 @@ from agent_core.application.services.reflection_proposal_sandbox import Reflecti
 from agent_core.application.services.reflection_proposals import ReflectionProposalService
 from agent_core.application.services.reflection_replay import ReflectionReplayService
 from agent_core.application.services.session import SessionService
-from agent_core.application.services.skills import SkillCatalogService, SkillResolver, SkillUsageService
+from agent_core.application.services.skills import SkillCandidateService, SkillCatalogService, SkillResolver, SkillUsageService
 from agent_core.application.services.strategy_cards import StrategyCardService
 from agent_core.application.services.task import AutonomousTaskService
 from agent_core.application.services.workflow import WorkflowRunService
@@ -373,6 +373,15 @@ def get_skill_catalog_service(session: AsyncSession = Depends(get_db_session)) -
         artifact_repository=SkillArtifactRepository(session),
         audit_service=get_audit_service(session),
         skill_registry=get_skill_registry(),
+    )
+
+
+def get_skill_candidate_service(session: AsyncSession = Depends(get_db_session)) -> SkillCandidateService:
+    return SkillCandidateService(
+        artifact_repository=SkillArtifactRepository(session),
+        proposal_repository=ReflectionProposalRepository(session),
+        evaluation_repository=ReflectionProposalEvaluationRepository(session),
+        audit_service=get_audit_service(session),
     )
 
 
