@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from agent_core.application.services.audit import AuditService
 import pytest
 
+from agent_core.application.services.audit import AuditService
 from agent_core.application.services.skills import SkillCandidateService, SkillResolver, SkillUsageService
 from agent_core.application.skills.registry import SkillRegistry
 from agent_core.domain.entities.audit import AuditEvent
@@ -14,6 +15,8 @@ from agent_core.domain.entities.skill import SkillArtifact, SkillUsageEvent
 from agent_core.domain.errors import ValidationError
 from agent_core.domain.schemas.skill import SkillUsageEventResponse
 from agent_core.infrastructure.db.models import SkillArtifactModel, SkillUsageEventModel
+
+pytestmark = pytest.mark.asyncio
 
 
 class StubAuditRepository:
@@ -336,6 +339,213 @@ def test_skill_artifact_model_has_partial_unique_selectable_name_scope_index():
     assert [column.name for column in index.columns] == ["name", "scope"]
     assert index.dialect_options["sqlite"]["where"] is not None
     assert index.dialect_options["postgresql"]["where"] is not None
+
+
+def _approved_skill_package_proposal(
+    *,
+    proposal_type: str = "skill_package",
+    evaluation_status: str = "effective",
+) -> tuple[ReflectionProposal, ReflectionProposalEvaluation]:
+    proposal = ReflectionProposal.build(
+        reflection_record_id="reflection-1",
+        learner_goal_id="goal-1",
+        proposal_type=proposal_type,
+        target_scope="quiz",
+        priority_score=0.8,
+        hypothesis="Reusable quiz remediation helps.",
+        change_summary="Create quiz skill package.",
+        structured_patch_payload={
+            "artifact_kind": "declarative_skill_package",
+            "skill_name": "quiz_knowledge_gap",
+            "bundle_id": "bundle-1",
+            "surface": "quiz",
+            "match_rules": {"required_root_causes": ["knowledge_gap"]},
+            "runtime_directives": {"feedback_style": "guided_correction"},
+            "tool_plan": [],
+            "scoring_contract": {"mode": "rule_replay_live_llm"},
+        }
+        if proposal_type == "skill_package"
+        else {"response_preference_bias": "guided"},
+        expected_improvement="Reuse verified quiz remediation.",
+        risk_level="low",
+        evidence_snapshot={"memory_corpus": {"items": [{"memory_id": "memory-1"}, {"memory_id": "memory-1"}]}},
+    ).enqueue_sandbox(
+        sandbox_run_id="sandbox-1",
+    ).start_sandbox(
+        sandbox_run_id="sandbox-1",
+    ).complete_sandbox(
+        sandbox_run_id="sandbox-1",
+        evaluation_status=evaluation_status,
+        evaluation_summary="sandbox:0.20",
+    ).approve(
+        operator_id="operator",
+        reason_code="validated",
+        reason_note=None,
+    )
+    evaluation = ReflectionProposalEvaluation.build(
+        proposal_id=proposal.id,
+        comparison_window_size=3,
+        baseline_policy_snapshot={},
+        candidate_policy_snapshot=proposal.structured_patch_payload,
+        evaluator_type="rule",
+        sandbox_run_id="sandbox-1",
+    ).with_result(
+        evaluation_status=evaluation_status,
+        simulated_outcome_summary={"score_delta": 0.2},
+        score_delta=0.2,
+        sandbox_run_id="sandbox-1",
+    )
+    return proposal, evaluation
+
+
+def replace_payload(proposal: ReflectionProposal, patch: dict[str, object]) -> ReflectionProposal:
+    payload = dict(proposal.structured_patch_payload)
+    payload.update(patch)
+    return replace(proposal, structured_patch_payload=payload)
+
+
+async def test_skill_candidate_service_creates_candidate_from_approved_effective_proposal():
+    proposal, evaluation = _approved_skill_package_proposal()
+    artifact_repository = StubSkillArtifactRepository()
+    audit_repository = StubAuditRepository()
+    service = SkillCandidateService(
+        artifact_repository=artifact_repository,
+        proposal_repository=StubProposalRepository(proposal),
+        evaluation_repository=StubProposalEvaluationRepository(evaluation),
+        audit_service=AuditService(audit_repository),
+    )
+
+    artifact = await service.create_candidate_from_proposal(proposal_id=proposal.id, operator_id="operator")
+
+    assert artifact.status == "candidate"
+    assert artifact.name == "quiz_knowledge_gap"
+    assert artifact.version == "0.1.0"
+    assert artifact.skill_type == "learned"
+    assert artifact.scope == "quiz"
+    assert artifact.runtime_directives == {"feedback_style": "guided_correction"}
+    assert artifact.tool_plan == []
+    assert artifact.compatibility_contract["dynamic_execution"] is False
+    assert artifact.compatibility_contract["implementation_binding"] == "quiz_knowledge_gap"
+    assert artifact.source_reflection_ids == ["reflection-1"]
+    assert artifact.source_memory_ids == ["memory-1"]
+    assert artifact.source_proposal_id == proposal.id
+    assert artifact.quality_score == 0.7
+    assert artifact.approved_by is None
+    assert artifact.approved_at is None
+    assert artifact_repository.artifacts == [artifact]
+    assert any(item.event_type == "skill.artifact.candidate_created" for item in audit_repository.events)
+
+
+async def test_skill_candidate_service_is_idempotent_per_source_proposal():
+    proposal, evaluation = _approved_skill_package_proposal()
+    artifact_repository = StubSkillArtifactRepository()
+    audit_repository = StubAuditRepository()
+    service = SkillCandidateService(
+        artifact_repository=artifact_repository,
+        proposal_repository=StubProposalRepository(proposal),
+        evaluation_repository=StubProposalEvaluationRepository(evaluation),
+        audit_service=AuditService(audit_repository),
+    )
+
+    first = await service.create_candidate_from_proposal(proposal_id=proposal.id, operator_id="operator")
+    second = await service.create_candidate_from_proposal(proposal_id=proposal.id, operator_id="operator")
+
+    assert first.id == second.id
+    assert len(artifact_repository.artifacts) == 1
+    assert any(item.event_type == "skill.artifact.candidate_reused" for item in audit_repository.events)
+
+
+async def test_skill_candidate_service_rejects_unapproved_or_ineffective_sources():
+    proposal, evaluation = _approved_skill_package_proposal()
+    unapproved = ReflectionProposal.build(
+        reflection_record_id="reflection-1",
+        learner_goal_id="goal-1",
+        proposal_type="skill_package",
+        target_scope="quiz",
+        priority_score=0.8,
+        hypothesis="Reusable quiz remediation helps.",
+        change_summary="Create quiz skill package.",
+        structured_patch_payload=proposal.structured_patch_payload,
+        expected_improvement="Reuse verified quiz remediation.",
+        risk_level="low",
+        evidence_snapshot=proposal.evidence_snapshot,
+    ).enqueue_sandbox(
+        sandbox_run_id="sandbox-1",
+    ).start_sandbox(
+        sandbox_run_id="sandbox-1",
+    ).complete_sandbox(
+        sandbox_run_id="sandbox-1",
+        evaluation_status="effective",
+        evaluation_summary="sandbox:0.20",
+    )
+    service = SkillCandidateService(
+        artifact_repository=StubSkillArtifactRepository(),
+        proposal_repository=StubProposalRepository(unapproved),
+        evaluation_repository=StubProposalEvaluationRepository(evaluation),
+        audit_service=AuditService(StubAuditRepository()),
+    )
+
+    with pytest.raises(ValidationError):
+        await service.create_candidate_from_proposal(proposal_id=proposal.id, operator_id="operator")
+
+    proposal, evaluation = _approved_skill_package_proposal(evaluation_status="inconclusive")
+    service = SkillCandidateService(
+        artifact_repository=StubSkillArtifactRepository(),
+        proposal_repository=StubProposalRepository(proposal),
+        evaluation_repository=StubProposalEvaluationRepository(evaluation),
+        audit_service=AuditService(StubAuditRepository()),
+    )
+
+    with pytest.raises(ValidationError):
+        await service.create_candidate_from_proposal(proposal_id=proposal.id, operator_id="operator")
+
+
+async def test_skill_candidate_service_rejects_non_skill_package_and_unknown_tool():
+    proposal, evaluation = _approved_skill_package_proposal(proposal_type="prompt_optimization")
+    service = SkillCandidateService(
+        artifact_repository=StubSkillArtifactRepository(),
+        proposal_repository=StubProposalRepository(proposal),
+        evaluation_repository=StubProposalEvaluationRepository(evaluation),
+        audit_service=AuditService(StubAuditRepository()),
+    )
+
+    with pytest.raises(ValidationError):
+        await service.create_candidate_from_proposal(proposal_id=proposal.id, operator_id="operator")
+
+    proposal, evaluation = _approved_skill_package_proposal()
+    proposal = replace_payload(proposal, {"tool_plan": [{"tool_name": "shell"}]})
+    service = SkillCandidateService(
+        artifact_repository=StubSkillArtifactRepository(),
+        proposal_repository=StubProposalRepository(proposal),
+        evaluation_repository=StubProposalEvaluationRepository(evaluation),
+        audit_service=AuditService(StubAuditRepository()),
+    )
+
+    with pytest.raises(ValidationError):
+        await service.create_candidate_from_proposal(proposal_id=proposal.id, operator_id="operator")
+
+
+async def test_skill_candidate_service_increments_candidate_patch_version():
+    proposal, evaluation = _approved_skill_package_proposal()
+    existing = SkillArtifact.build(
+        name="quiz_knowledge_gap",
+        version="0.1.0",
+        skill_type="learned",
+        scope="quiz",
+        status="candidate",
+        description="Existing candidate.",
+    )
+    artifact_repository = StubSkillArtifactRepository(existing)
+    service = SkillCandidateService(
+        artifact_repository=artifact_repository,
+        proposal_repository=StubProposalRepository(proposal),
+        evaluation_repository=StubProposalEvaluationRepository(evaluation),
+        audit_service=AuditService(StubAuditRepository()),
+    )
+
+    artifact = await service.create_candidate_from_proposal(proposal_id=proposal.id, operator_id="operator")
+
+    assert artifact.version == "0.1.1"
 
 
 async def test_skill_usage_service_records_active_artifact_usage():

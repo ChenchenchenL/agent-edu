@@ -97,7 +97,11 @@ class SkillCandidateService:
         if proposal is None:
             raise NotFoundError(f"Reflection proposal '{proposal_id}' was not found.")
         evaluation = await self._evaluation_repository.get_by_proposal(proposal_id)
-        self._validate_candidate_source(proposal=proposal, evaluation_status=evaluation.evaluation_status if evaluation else None, score_delta=evaluation.score_delta if evaluation else None)
+        self._validate_candidate_source(
+            proposal=proposal,
+            evaluation_status=evaluation.evaluation_status if evaluation else None,
+            score_delta=evaluation.score_delta if evaluation else None,
+        )
         payload = self._validated_payload(proposal)
         skill_name = str(payload["skill_name"])
         surface = str(payload["surface"])
@@ -139,7 +143,7 @@ class SkillCandidateService:
             created_by=operator_id,
         )
         await self._artifact_repository.create(artifact)
-        await self._audit_candidate(artifact, event_type="skill.artifact.candidate_created")
+        await self._audit_candidate(artifact, event_type="skill.artifact.candidate_created", operator_id=operator_id)
         return artifact
 
     @staticmethod
@@ -216,7 +220,13 @@ class SkillCandidateService:
     def _quality_score(score_delta: float) -> float:
         return min(1.0, max(0.0, 0.5 + score_delta))
 
-    async def _audit_candidate(self, artifact: SkillArtifact, *, event_type: str) -> None:
+    async def _audit_candidate(
+        self,
+        artifact: SkillArtifact,
+        *,
+        event_type: str,
+        operator_id: str | None = None,
+    ) -> None:
         await self._audit_service.record(
             event_type=event_type,
             resource_type="skill_artifact",
@@ -232,6 +242,7 @@ class SkillCandidateService:
                 "source_reflection_ids": artifact.source_reflection_ids,
                 "source_memory_ids": artifact.source_memory_ids,
                 "quality_score": artifact.quality_score,
+                "operator_id": operator_id,
             },
         )
 

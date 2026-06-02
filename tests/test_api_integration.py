@@ -785,6 +785,34 @@ def test_reflection_proposal_sandbox_and_approval_endpoints(app_client_factory):
     assert approved.status_code == 200
     assert approved.json()["status"] == "approved"
 
+    candidate_unauthorized = client.post(
+        "/api/v1/skill-artifacts/from-reflection-proposal",
+        json={"proposal_id": proposal_id},
+    )
+    assert candidate_unauthorized.status_code == 403
+
+    candidate = client.post(
+        "/api/v1/skill-artifacts/from-reflection-proposal",
+        headers={"X-Operator-Key": "secret-operator"},
+        json={"proposal_id": proposal_id},
+    )
+    if approved.json()["proposal_type"] == "skill_package" and evaluation.json()["evaluation_status"] == "effective":
+        assert candidate.status_code == 200
+        candidate_payload = candidate.json()
+        assert candidate_payload["status"] == "candidate"
+        assert candidate_payload["source_proposal_id"] == proposal_id
+        assert candidate_payload["source_reflection_ids"] == [reflection_id]
+        assert candidate_payload["version"] == "0.1.0"
+        candidate_repeat = client.post(
+            "/api/v1/skill-artifacts/from-reflection-proposal",
+            headers={"X-Operator-Key": "secret-operator"},
+            json={"proposal_id": proposal_id},
+        )
+        assert candidate_repeat.status_code == 200
+        assert candidate_repeat.json()["id"] == candidate_payload["id"]
+    else:
+        assert candidate.status_code == 400
+
     activated = client.post(
         f"/api/v1/proposals/{proposal_id}/activate",
         headers={"X-Operator-Key": "secret-operator"},
