@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from agent_core.application.services.audit import AuditService
 from agent_core.application.services.autonomy_jobs import AutonomyJobService
+from agent_core.application.services.skills import ALLOWED_SKILL_PACKAGE_TOOLS
 from agent_core.domain.entities.reflection import ReflectionRecord
 from agent_core.domain.entities.reflection_closure import (
     ReflectionProposal,
@@ -152,7 +153,13 @@ class ReflectionProposalService:
     async def list_by_reflection(self, reflection_record_id: str) -> list[ReflectionProposal]:
         return await self._repository.list_by_reflection(reflection_record_id)
 
-    async def list_queue(self, *, statuses: set[str] | None = None, limit: int = 20, offset: int = 0):
+    async def list_queue(
+        self,
+        *,
+        statuses: set[str] | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[ReflectionProposal], int]:
         items = await self._repository.list_queue(statuses=statuses, limit=limit, offset=offset)
         total = await self._repository.count_queue(statuses=statuses)
         return items, total
@@ -226,7 +233,7 @@ class ReflectionProposalService:
             event_type="reflection.proposal.sandbox.queued",
             resource_type="reflection_proposal",
             resource_id=proposal.id,
-            actor="operator",
+            actor=operator_id,
             event_data={
                 "proposal_id": proposal.id,
                 "autonomy_job_id": job.id,
@@ -301,7 +308,7 @@ class ReflectionProposalService:
             event_type="reflection.proposal.approved",
             resource_type="reflection_proposal",
             resource_id=proposal.id,
-            actor="operator",
+            actor=operator_id,
             event_data={"proposal_id": proposal.id, "operator_id": operator_id, "reason_code": reason_code},
         )
         return updated
@@ -335,7 +342,7 @@ class ReflectionProposalService:
             event_type="reflection.proposal.rejected",
             resource_type="reflection_proposal",
             resource_id=proposal.id,
-            actor="operator",
+            actor=operator_id,
             event_data={"proposal_id": proposal.id, "operator_id": operator_id, "reason_code": reason_code},
         )
         return updated
@@ -435,7 +442,7 @@ class ReflectionProposalService:
                 if not isinstance(item, dict):
                     raise ValidationError("Skill package tool_plan items must be objects.")
                 tool_name = str(item.get("tool_name") or "")
-                if tool_name not in {"review_scheduling", "assessment_generation", "partial_replan"}:
+                if tool_name not in ALLOWED_SKILL_PACKAGE_TOOLS:
                     raise ValidationError("Unsupported skill package tool.")
 
     async def _find_equivalent_active_proposal(
@@ -444,15 +451,15 @@ class ReflectionProposalService:
     ) -> ReflectionProposal | None:
         candidates = await self._repository.list_queue(
             statuses={"proposed", "sandbox_queued", "sandbox_running", "sandbox_completed", "approved"},
+            learner_goal_id=proposal.learner_goal_id,
+            proposal_type=proposal.proposal_type,
+            target_scope=proposal.target_scope,
             limit=200,
             offset=0,
         )
         for item in candidates:
             if (
-                item.learner_goal_id == proposal.learner_goal_id
-                and item.proposal_type == proposal.proposal_type
-                and item.target_scope == proposal.target_scope
-                and item.structured_patch_payload == proposal.structured_patch_payload
+                item.structured_patch_payload == proposal.structured_patch_payload
             ):
                 return item
         return None
@@ -505,6 +512,21 @@ class ReflectionProposalService:
         surfaces = mapping.get(reflection.primary_root_cause, [])
         topic_key = str((reflection.evidence_payload.get("task") or {}).get("topic_focus") or "")
         task_type = str((reflection.evidence_payload.get("task") or {}).get("task_type") or "")
+        skill_name_by_surface = {
+            "chat": "explain_concept",
+            "hint": "adaptive_hint",
+            "quiz": "create_quiz",
+            "plan_generation": "plan_study_path",
+            "review_scheduling": "schedule_review",
+            "assessment_generation": "create_quiz",
+            "replan": "plan_study_path",
+        }
+        trigger_sources_by_surface = {
+            "chat": ["chat"],
+            "hint": ["hint"],
+            "quiz": ["quiz_generation"],
+            "review_scheduling": ["task_completed"],
+        }
         drafts: list[dict[str, object]] = []
         for surface in surfaces:
             runtime_directives: dict[str, object]
@@ -551,14 +573,14 @@ class ReflectionProposalService:
                     "risk_level": "high" if surface == "replan" else ("medium" if surface in {"plan_generation", "review_scheduling", "assessment_generation"} else "low"),
                     "structured_patch_payload": {
                         "artifact_kind": "declarative_skill_package",
-                        "skill_name": f"{surface}_{reflection.primary_root_cause}",
+                        "skill_name": skill_name_by_surface[surface],
                         "bundle_id": bundle_id,
                         "surface": surface,
                         "match_rules": {
                             "required_root_causes": [reflection.primary_root_cause],
                             "topic_keys": [topic_key] if topic_key else [],
                             "task_types": [task_type] if task_type else [],
-                            "trigger_sources": [reflection.trigger_source],
+                            "trigger_sources": trigger_sources_by_surface.get(surface, []),
                         },
                         "runtime_directives": runtime_directives,
                         "tool_plan": tool_plan,

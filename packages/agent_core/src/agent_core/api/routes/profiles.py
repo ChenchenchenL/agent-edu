@@ -42,8 +42,8 @@ async def get_learner_profile(
 @router.post("/learner-profiles/{profile_id}/access-key/rotate", response_model=CreateLearnerProfileResponse)
 async def rotate_learner_profile_access_key(
     profile_id: str,
-    _: str = Depends(require_operator_api_key),
+    operator_id: str = Depends(require_operator_api_key),
     session: AsyncSession = Depends(get_db_session),
 ) -> CreateLearnerProfileResponse:
     service = get_profile_service(session)
-    return await service.rotate_access_key(profile_id)
+    return await service.rotate_access_key(profile_id, operator_id=operator_id)

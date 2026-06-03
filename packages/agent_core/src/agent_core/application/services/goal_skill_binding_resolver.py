@@ -20,6 +20,29 @@ class ActiveGoalSkillBinding:
     runtime_directives: dict[str, Any]
     tool_plan: list[dict[str, Any]]
 
+    def usage_metadata(self, *, skill_name: str) -> dict[str, Any]:
+        return {
+            "skill_package_rollout": {
+                "proposal_id": self.proposal_id,
+                "rollout_id": self.rollout_id,
+                "binding_id": self.binding_id,
+                "skill_name": skill_name,
+                "surface": self.surface,
+                "binding_status": self.status,
+            }
+        }
+
+    def with_usage_metadata(
+        self,
+        metadata: dict[str, object] | None,
+        *,
+        skill_name: str,
+    ) -> dict[str, object]:
+        return {
+            **dict(metadata or {}),
+            **self.usage_metadata(skill_name=skill_name),
+        }
+
 
 class GoalSkillBindingResolver:
     def __init__(self, *, repository: GoalSkillBindingRepository) -> None:
@@ -36,20 +59,21 @@ class GoalSkillBindingResolver:
         goal_active_root_causes: set[str] | None = None,
         include_staged: bool = False,
     ) -> ActiveGoalSkillBinding | None:
-        binding = await self._repository.get_active_by_goal_and_surface(learner_goal_id, surface)
-        if binding is None:
-            return None
-        if binding.status == "staged" and not include_staged:
-            return None
-        if not self._matches(
-            binding,
-            topic_key=topic_key,
-            task_type=task_type,
-            trigger_source=trigger_source,
-            goal_active_root_causes=goal_active_root_causes or set(),
-        ):
-            return None
-        return self._to_active(binding)
+        bindings = await self._repository.list_active_by_goal_and_surface(
+            learner_goal_id,
+            surface,
+            include_staged=include_staged,
+        )
+        for binding in bindings:
+            if self._matches(
+                binding,
+                topic_key=topic_key,
+                task_type=task_type,
+                trigger_source=trigger_source,
+                goal_active_root_causes=goal_active_root_causes,
+            ):
+                return self._to_active(binding)
+        return None
 
     @staticmethod
     def _matches(
@@ -58,11 +82,15 @@ class GoalSkillBindingResolver:
         topic_key: str | None,
         task_type: str | None,
         trigger_source: str | None,
-        goal_active_root_causes: set[str],
+        goal_active_root_causes: set[str] | None,
     ) -> bool:
         rules = binding.match_rules
         required_root_causes = {str(item) for item in rules.get("required_root_causes", []) if str(item)}
-        if required_root_causes and not required_root_causes.intersection(goal_active_root_causes):
+        if (
+            required_root_causes
+            and goal_active_root_causes is not None
+            and not required_root_causes.intersection(goal_active_root_causes)
+        ):
             return False
         topic_keys = {str(item) for item in rules.get("topic_keys", []) if str(item)}
         if topic_keys and (topic_key is None or topic_key not in topic_keys):

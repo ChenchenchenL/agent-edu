@@ -166,11 +166,12 @@ class ReflectionProposalRolloutService:
             event_type="reflection.proposal.rollout.activated",
             resource_type="reflection_proposal_rollout",
             resource_id=rollout.id,
-            actor="operator",
+            actor=operator_id,
             event_data={
                 "proposal_id": proposal.id,
                 "rollout_id": rollout.id,
                 "surface": rollout.surface,
+                "operator_id": operator_id,
                 "reason_code": reason_code,
             },
         )
@@ -206,8 +207,13 @@ class ReflectionProposalRolloutService:
             event_type="reflection.proposal.rollout.promoted",
             resource_type="reflection_proposal_rollout",
             resource_id=updated.id,
-            actor="operator",
-            event_data={"proposal_id": updated.proposal_id, "rollout_id": updated.id, "reason_code": reason_code},
+            actor=operator_id,
+            event_data={
+                "proposal_id": updated.proposal_id,
+                "rollout_id": updated.id,
+                "operator_id": operator_id,
+                "reason_code": reason_code,
+            },
         )
         return updated
 
@@ -248,8 +254,13 @@ class ReflectionProposalRolloutService:
             event_type="reflection.proposal.rollout.rolled_back",
             resource_type="reflection_proposal_rollout",
             resource_id=updated.id,
-            actor="operator",
-            event_data={"proposal_id": updated.proposal_id, "rollout_id": updated.id, "reason_code": reason_code},
+            actor=operator_id,
+            event_data={
+                "proposal_id": updated.proposal_id,
+                "rollout_id": updated.id,
+                "operator_id": operator_id,
+                "reason_code": reason_code,
+            },
         )
         return updated
 

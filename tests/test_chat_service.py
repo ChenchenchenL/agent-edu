@@ -66,6 +66,14 @@ class StubSessionRepository:
             sessions.append(self.session_entity)
         return sessions
 
+    async def list_recent_by_goal(self, learner_goal_id, *, limit=10, exclude_id=None):
+        sessions = [
+            item
+            for item in self.other_sessions
+            if item.learner_goal_id == learner_goal_id and item.id != exclude_id
+        ]
+        return sessions[:limit]
+
     async def update(self, entity):
         self.updated = entity
         self.session_entity = entity
@@ -429,8 +437,18 @@ async def test_chat_message_uses_retrieved_memory_context():
 
 
 async def test_chat_message_uses_cross_session_profile_context():
-    session = LearningSession.build(learner_profile_id="profile-1", title="Linear Algebra", subject="Matrices")
-    past_session = LearningSession.build(learner_profile_id="profile-1", title="Linear Algebra Review", subject="Matrices")
+    session = LearningSession.build(
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+        title="Linear Algebra",
+        subject="Matrices",
+    )
+    past_session = LearningSession.build(
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+        title="Linear Algebra Review",
+        subject="Matrices",
+    )
     past_session = past_session.with_message_activity(
         message_count_delta=2,
         last_activity_at=past_session.last_activity_at,

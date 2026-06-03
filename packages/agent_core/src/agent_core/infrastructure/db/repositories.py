@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import and_, desc, distinct, func, or_, select, update
+from sqlalchemy import Integer, and_, cast, desc, distinct, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -138,6 +138,29 @@ class SessionRepository:
         result = await self._session.execute(query)
         return [self._to_entity(model) for model in result.scalars().all()]
 
+    async def list_recent_by_goal(
+        self,
+        learner_goal_id: str | None,
+        *,
+        limit: int = 10,
+        exclude_id: str | None = None,
+    ) -> list[LearningSession]:
+        if learner_goal_id is None:
+            return []
+        query = (
+            select(LearningSessionModel)
+            .where(LearningSessionModel.learner_goal_id == learner_goal_id)
+            .order_by(
+                desc(LearningSessionModel.last_activity_at),
+                desc(LearningSessionModel.created_at),
+            )
+            .limit(limit)
+        )
+        if exclude_id is not None:
+            query = query.where(LearningSessionModel.id != exclude_id)
+        result = await self._session.execute(query)
+        return [self._to_entity(model) for model in result.scalars().all()]
+
     async def get_by_id(self, session_id: str) -> LearningSession | None:
         result = await self._session.execute(
             select(LearningSessionModel).where(LearningSessionModel.id == session_id)
@@ -264,16 +287,110 @@ class SkillArtifactRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def create(self, entity: SkillArtifact) -> None:
+        self._session.add(
+            SkillArtifactModel(
+                id=entity.id,
+                name=entity.name,
+                version=entity.version,
+                lineage_id=entity.lineage_id,
+                parent_artifact_id=entity.parent_artifact_id,
+                supersedes_artifact_id=entity.supersedes_artifact_id,
+                skill_type=entity.skill_type,
+                scope=entity.scope,
+                status=entity.status,
+                description=entity.description,
+                definition=entity.definition,
+                runtime_directives=entity.runtime_directives,
+                tool_plan=entity.tool_plan,
+                compatibility_contract=entity.compatibility_contract,
+                source_reflection_ids=entity.source_reflection_ids,
+                source_memory_ids=entity.source_memory_ids,
+                source_proposal_id=entity.source_proposal_id,
+                quality_score=entity.quality_score,
+                created_by=entity.created_by,
+                approved_by=entity.approved_by,
+                approved_at=entity.approved_at,
+                created_at=entity.created_at,
+                updated_at=entity.updated_at,
+            )
+        )
+        await self._session.flush()
+
+    async def update(self, entity: SkillArtifact) -> None:
+        model = await self._session.get(SkillArtifactModel, entity.id)
+        if model is None:
+            return
+        model.name = entity.name
+        model.version = entity.version
+        model.lineage_id = entity.lineage_id
+        model.parent_artifact_id = entity.parent_artifact_id
+        model.supersedes_artifact_id = entity.supersedes_artifact_id
+        model.skill_type = entity.skill_type
+        model.scope = entity.scope
+        model.status = entity.status
+        model.description = entity.description
+        model.definition = dict(entity.definition)
+        model.runtime_directives = dict(entity.runtime_directives)
+        model.tool_plan = [dict(item) for item in entity.tool_plan]
+        model.compatibility_contract = dict(entity.compatibility_contract)
+        model.source_reflection_ids = list(entity.source_reflection_ids)
+        model.source_memory_ids = list(entity.source_memory_ids)
+        model.source_proposal_id = entity.source_proposal_id
+        model.quality_score = entity.quality_score
+        model.created_by = entity.created_by
+        model.approved_by = entity.approved_by
+        model.approved_at = entity.approved_at
+        model.created_at = entity.created_at
+        model.updated_at = entity.updated_at
+        await self._session.flush()
+
     async def get_by_id(self, artifact_id: str) -> SkillArtifact | None:
         model = await self._session.get(SkillArtifactModel, artifact_id)
         if model is None:
             return None
         return self._to_entity(model)
 
-    async def get_active_by_name(self, name: str) -> SkillArtifact | None:
+    async def get_by_source_proposal_id(self, proposal_id: str) -> SkillArtifact | None:
         result = await self._session.execute(
             select(SkillArtifactModel)
-            .where(SkillArtifactModel.name == name, SkillArtifactModel.status == "active")
+            .where(SkillArtifactModel.source_proposal_id == proposal_id)
+            .order_by(desc(SkillArtifactModel.created_at), desc(SkillArtifactModel.id))
+        )
+        model = result.scalars().first()
+        if model is None:
+            return None
+        return self._to_entity(model)
+
+    async def get_selectable_by_name_scope(self, *, name: str, scope: str) -> SkillArtifact | None:
+        stable = await self._get_latest_by_name_scope_status(name=name, scope=scope, status="stable")
+        if stable is not None:
+            return stable
+        return await self._get_latest_by_name_scope_status(name=name, scope=scope, status="active")
+
+    async def _get_latest_by_name_scope_status(self, *, name: str, scope: str, status: str) -> SkillArtifact | None:
+        result = await self._session.execute(
+            select(SkillArtifactModel)
+            .where(
+                SkillArtifactModel.name == name,
+                SkillArtifactModel.scope == scope,
+                SkillArtifactModel.status == status,
+            )
+            .order_by(desc(SkillArtifactModel.updated_at), desc(SkillArtifactModel.id))
+        )
+        model = result.scalars().first()
+        if model is None:
+            return None
+        return self._to_entity(model)
+
+    async def get_suppressed_by_name_scope(self, *, name: str, scope: str) -> SkillArtifact | None:
+        result = await self._session.execute(
+            select(SkillArtifactModel)
+            .where(
+                SkillArtifactModel.name == name,
+                SkillArtifactModel.scope == scope,
+                SkillArtifactModel.status == "suppressed",
+            )
             .order_by(desc(SkillArtifactModel.updated_at), desc(SkillArtifactModel.id))
         )
         model = result.scalars().first()
@@ -286,6 +403,8 @@ class SkillArtifactRepository:
         *,
         status: str | None = None,
         name: str | None = None,
+        scope: str | None = None,
+        lineage_id: str | None = None,
         limit: int = 50,
     ) -> list[SkillArtifact]:
         query = select(SkillArtifactModel)
@@ -293,8 +412,40 @@ class SkillArtifactRepository:
             query = query.where(SkillArtifactModel.status == status)
         if name is not None:
             query = query.where(SkillArtifactModel.name == name)
+        if scope is not None:
+            query = query.where(SkillArtifactModel.scope == scope)
+        if lineage_id is not None:
+            query = query.where(SkillArtifactModel.lineage_id == lineage_id)
         result = await self._session.execute(
             query.order_by(desc(SkillArtifactModel.updated_at), desc(SkillArtifactModel.id)).limit(limit)
+        )
+        return [self._to_entity(model) for model in result.scalars().all()]
+
+    async def list_by_name(self, name: str, *, limit: int = 200) -> list[SkillArtifact]:
+        result = await self._session.execute(
+            select(SkillArtifactModel)
+            .where(SkillArtifactModel.name == name)
+            .order_by(desc(SkillArtifactModel.created_at), desc(SkillArtifactModel.id))
+            .limit(limit)
+        )
+        return [self._to_entity(model) for model in result.scalars().all()]
+
+    async def max_candidate_patch_version(self, name: str) -> int:
+        result = await self._session.execute(
+            select(func.max(cast(func.substr(SkillArtifactModel.version, 5), Integer))).where(
+                SkillArtifactModel.name == name,
+                SkillArtifactModel.version.like("0.1.%"),
+            )
+        )
+        max_patch = result.scalar_one()
+        return int(max_patch) if max_patch is not None else -1
+
+    async def list_by_lineage(self, lineage_id: str, *, limit: int = 50) -> list[SkillArtifact]:
+        result = await self._session.execute(
+            select(SkillArtifactModel)
+            .where(SkillArtifactModel.lineage_id == lineage_id)
+            .order_by(desc(SkillArtifactModel.updated_at), desc(SkillArtifactModel.id))
+            .limit(limit)
         )
         return [self._to_entity(model) for model in result.scalars().all()]
 
@@ -304,6 +455,9 @@ class SkillArtifactRepository:
             id=model.id,
             name=model.name,
             version=model.version,
+            lineage_id=model.lineage_id,
+            parent_artifact_id=model.parent_artifact_id,
+            supersedes_artifact_id=model.supersedes_artifact_id,
             skill_type=model.skill_type,
             scope=model.scope,
             status=model.status,
@@ -311,6 +465,7 @@ class SkillArtifactRepository:
             definition=dict(model.definition or {}),
             runtime_directives=dict(model.runtime_directives or {}),
             tool_plan=[dict(item) for item in model.tool_plan or []],
+            compatibility_contract=dict(model.compatibility_contract or {}),
             source_reflection_ids=list(model.source_reflection_ids or []),
             source_memory_ids=list(model.source_memory_ids or []),
             source_proposal_id=model.source_proposal_id,
@@ -333,6 +488,7 @@ class SkillUsageEventRepository:
             skill_artifact_id=entity.skill_artifact_id,
             skill_name=entity.skill_name,
             skill_version=entity.skill_version,
+            skill_status_at_use=entity.skill_status_at_use,
             learner_profile_id=entity.learner_profile_id,
             learner_goal_id=entity.learner_goal_id,
             session_id=entity.session_id,
@@ -345,8 +501,13 @@ class SkillUsageEventRepository:
             latency_ms=entity.latency_ms,
             cost_units=entity.cost_units,
             input_summary=entity.input_summary,
+            input_fingerprint=entity.input_fingerprint,
             output_summary=entity.output_summary,
+            output_fingerprint=entity.output_fingerprint,
             error_code=entity.error_code,
+            resolver_status=entity.resolver_status,
+            selection_reason=entity.selection_reason,
+            outcome_signals=entity.outcome_signals,
             usage_metadata=entity.metadata,
             created_at=entity.created_at,
         )
@@ -365,18 +526,33 @@ class SkillUsageEventRepository:
     async def list_events(
         self,
         *,
+        artifact_id: str | None = None,
+        skill_name: str | None = None,
         learner_goal_id: str | None = None,
         session_id: str | None = None,
         surface: str | None = None,
+        outcome_status: str | None = None,
+        resolver_status: str | None = None,
+        created_at_from: datetime | None = None,
         limit: int = 50,
     ) -> list[SkillUsageEvent]:
         query = select(SkillUsageEventModel)
+        if artifact_id is not None:
+            query = query.where(SkillUsageEventModel.skill_artifact_id == artifact_id)
+        if skill_name is not None:
+            query = query.where(SkillUsageEventModel.skill_name == skill_name)
         if learner_goal_id is not None:
             query = query.where(SkillUsageEventModel.learner_goal_id == learner_goal_id)
         if session_id is not None:
             query = query.where(SkillUsageEventModel.session_id == session_id)
         if surface is not None:
             query = query.where(SkillUsageEventModel.surface == surface)
+        if outcome_status is not None:
+            query = query.where(SkillUsageEventModel.outcome_status == outcome_status)
+        if resolver_status is not None:
+            query = query.where(SkillUsageEventModel.resolver_status == resolver_status)
+        if created_at_from is not None:
+            query = query.where(SkillUsageEventModel.created_at >= created_at_from)
         result = await self._session.execute(
             query.order_by(desc(SkillUsageEventModel.created_at), desc(SkillUsageEventModel.id)).limit(limit)
         )
@@ -389,6 +565,7 @@ class SkillUsageEventRepository:
             skill_artifact_id=model.skill_artifact_id,
             skill_name=model.skill_name,
             skill_version=model.skill_version,
+            skill_status_at_use=model.skill_status_at_use,
             learner_profile_id=model.learner_profile_id,
             learner_goal_id=model.learner_goal_id,
             session_id=model.session_id,
@@ -401,8 +578,13 @@ class SkillUsageEventRepository:
             latency_ms=model.latency_ms,
             cost_units=model.cost_units,
             input_summary=model.input_summary,
+            input_fingerprint=model.input_fingerprint,
             output_summary=model.output_summary,
+            output_fingerprint=model.output_fingerprint,
             error_code=model.error_code,
+            resolver_status=model.resolver_status,
+            selection_reason=model.selection_reason,
+            outcome_signals=dict(model.outcome_signals or {}),
             metadata=dict(model.usage_metadata or {}),
             created_at=model.created_at,
         )
@@ -3260,6 +3442,9 @@ class ReflectionProposalRepository:
         self,
         *,
         statuses: set[str] | None = None,
+        learner_goal_id: str | None = None,
+        proposal_type: str | None = None,
+        target_scope: str | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> list[ReflectionProposal]:
@@ -3268,6 +3453,12 @@ class ReflectionProposalRepository:
             query = query.where(ReflectionProposalModel.status.in_(sorted(statuses)))
         else:
             query = query.where(ReflectionProposalModel.status.in_(["proposed", "sandbox_queued", "sandbox_running", "sandbox_completed"]))
+        if learner_goal_id is not None:
+            query = query.where(ReflectionProposalModel.learner_goal_id == learner_goal_id)
+        if proposal_type is not None:
+            query = query.where(ReflectionProposalModel.proposal_type == proposal_type)
+        if target_scope is not None:
+            query = query.where(ReflectionProposalModel.target_scope == target_scope)
         query = query.order_by(
             desc(ReflectionProposalModel.priority_score),
             desc(ReflectionProposalModel.created_at),
@@ -3276,12 +3467,25 @@ class ReflectionProposalRepository:
         result = await self._session.execute(query)
         return [self._to_entity(model) for model in result.scalars().all()]
 
-    async def count_queue(self, *, statuses: set[str] | None = None) -> int:
+    async def count_queue(
+        self,
+        *,
+        statuses: set[str] | None = None,
+        learner_goal_id: str | None = None,
+        proposal_type: str | None = None,
+        target_scope: str | None = None,
+    ) -> int:
         query = select(func.count()).select_from(ReflectionProposalModel)
         if statuses:
             query = query.where(ReflectionProposalModel.status.in_(sorted(statuses)))
         else:
             query = query.where(ReflectionProposalModel.status.in_(["proposed", "sandbox_queued", "sandbox_running", "sandbox_completed"]))
+        if learner_goal_id is not None:
+            query = query.where(ReflectionProposalModel.learner_goal_id == learner_goal_id)
+        if proposal_type is not None:
+            query = query.where(ReflectionProposalModel.proposal_type == proposal_type)
+        if target_scope is not None:
+            query = query.where(ReflectionProposalModel.target_scope == target_scope)
         result = await self._session.execute(query)
         return int(result.scalar_one())
 
@@ -3501,13 +3705,16 @@ class ReflectionProposalRolloutRepository:
         self,
         learner_goal_id: str,
         surface: str,
+        *,
+        include_staged: bool = True,
     ) -> ReflectionProposalRollout | None:
+        statuses = ["staged", "rolled_out"] if include_staged else ["rolled_out"]
         result = await self._session.execute(
             select(ReflectionProposalRolloutModel)
             .where(
                 ReflectionProposalRolloutModel.learner_goal_id == learner_goal_id,
                 ReflectionProposalRolloutModel.surface == surface,
-                ReflectionProposalRolloutModel.status.in_(["staged", "rolled_out"]),
+                ReflectionProposalRolloutModel.status.in_(statuses),
             )
             .order_by(desc(ReflectionProposalRolloutModel.created_at), desc(ReflectionProposalRolloutModel.id))
         )
@@ -3660,20 +3867,34 @@ class GoalSkillBindingRepository:
         self,
         learner_goal_id: str,
         surface: str,
+        *,
+        include_staged: bool = True,
     ) -> GoalSkillBinding | None:
+        bindings = await self.list_active_by_goal_and_surface(
+            learner_goal_id,
+            surface,
+            include_staged=include_staged,
+        )
+        return bindings[0] if bindings else None
+
+    async def list_active_by_goal_and_surface(
+        self,
+        learner_goal_id: str,
+        surface: str,
+        *,
+        include_staged: bool = True,
+    ) -> list[GoalSkillBinding]:
+        statuses = ["staged", "rolled_out"] if include_staged else ["rolled_out"]
         result = await self._session.execute(
             select(GoalSkillBindingModel)
             .where(
                 GoalSkillBindingModel.learner_goal_id == learner_goal_id,
                 GoalSkillBindingModel.surface == surface,
-                GoalSkillBindingModel.status.in_(["staged", "rolled_out"]),
+                GoalSkillBindingModel.status.in_(statuses),
             )
             .order_by(desc(GoalSkillBindingModel.priority_score), desc(GoalSkillBindingModel.updated_at))
         )
-        model = result.scalars().first()
-        if model is None:
-            return None
-        return self._to_entity(model)
+        return [self._to_entity(model) for model in result.scalars().all()]
 
     async def list_by_goal(self, learner_goal_id: str) -> list[GoalSkillBinding]:
         result = await self._session.execute(

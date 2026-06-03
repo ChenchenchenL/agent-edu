@@ -36,10 +36,9 @@ class ReflectionProposalRolloutResolver:
         rollout = await self._rollout_repository.get_active_by_goal_and_surface(
             learner_goal_id,
             surface,
+            include_staged=include_staged,
         )
         if rollout is None:
-            return None
-        if rollout.status == "staged" and not include_staged:
             return None
         return self._to_overlay(rollout)
 

@@ -139,13 +139,13 @@ async def list_reflection_review_queue(
 async def review_reflection(
     reflection_id: str,
     payload: ReviewReflectionRequest,
-    _: str = Depends(require_operator_api_key),
+    operator_id: str = Depends(require_operator_api_key),
     session: AsyncSession = Depends(get_db_session),
 ) -> ReflectionReviewDecisionResponse:
     service = get_reflection_governance_service(session)
     result = await service.review(
         reflection_id=reflection_id,
-        operator_id="operator",
+        operator_id=operator_id,
         reason_code=payload.reason_code,
         reason_note=payload.reason_note,
     )
@@ -157,13 +157,13 @@ async def review_reflection(
 async def resolve_reflection(
     reflection_id: str,
     payload: ResolveReflectionRequest,
-    _: str = Depends(require_operator_api_key),
+    operator_id: str = Depends(require_operator_api_key),
     session: AsyncSession = Depends(get_db_session),
 ) -> ReflectionReviewDecisionResponse:
     service = get_reflection_governance_service(session)
     result = await service.resolve(
         reflection_id=reflection_id,
-        operator_id="operator",
+        operator_id=operator_id,
         new_status=payload.new_status,
         reason_code=payload.reason_code,
         reason_note=payload.reason_note,
@@ -176,13 +176,13 @@ async def resolve_reflection(
 async def override_reflection_root_cause(
     reflection_id: str,
     payload: OverrideReflectionRootCauseRequest,
-    _: str = Depends(require_operator_api_key),
+    operator_id: str = Depends(require_operator_api_key),
     session: AsyncSession = Depends(get_db_session),
 ) -> ReflectionReviewDecisionResponse:
     service = get_reflection_governance_service(session)
     result = await service.override_root_cause(
         reflection_id=reflection_id,
-        operator_id="operator",
+        operator_id=operator_id,
         new_root_cause=payload.new_root_cause,
         reason_code=payload.reason_code,
         reason_note=payload.reason_note,
@@ -195,13 +195,13 @@ async def override_reflection_root_cause(
 async def override_reflection_action(
     reflection_id: str,
     payload: OverrideReflectionActionRequest,
-    _: str = Depends(require_operator_api_key),
+    operator_id: str = Depends(require_operator_api_key),
     session: AsyncSession = Depends(get_db_session),
 ) -> ReflectionReviewDecisionResponse:
     service = get_reflection_governance_service(session)
     result = await service.override_action(
         reflection_id=reflection_id,
-        operator_id="operator",
+        operator_id=operator_id,
         action_type=payload.action_type,
         payload=payload.payload,
         reason_code=payload.reason_code,
@@ -284,13 +284,13 @@ async def review_reflection_proposal(
 async def enqueue_reflection_proposal_sandbox(
     proposal_id: str,
     payload: EnqueueReflectionProposalSandboxRequest,
-    _: str = Depends(require_operator_api_key),
+    operator_id: str = Depends(require_operator_api_key),
     session: AsyncSession = Depends(get_db_session),
 ) -> ReflectionProposalResponse:
     service = get_reflection_proposal_service(session)
     proposal = await service.enqueue_sandbox(
         proposal_id=proposal_id,
-        operator_id="operator",
+        operator_id=operator_id,
         reason_code=payload.reason_code,
         reason_note=payload.reason_note,
     )
@@ -333,13 +333,13 @@ async def list_reflection_proposal_approval_decisions(
 async def approve_reflection_proposal(
     proposal_id: str,
     payload: ApproveReflectionProposalRequest,
-    _: str = Depends(require_operator_api_key),
+    operator_id: str = Depends(require_operator_api_key),
     session: AsyncSession = Depends(get_db_session),
 ) -> ReflectionProposalResponse:
     service = get_reflection_proposal_service(session)
     proposal = await service.approve(
         proposal_id=proposal_id,
-        operator_id="operator",
+        operator_id=operator_id,
         reason_code=payload.reason_code,
         reason_note=payload.reason_note,
     )
@@ -351,13 +351,13 @@ async def approve_reflection_proposal(
 async def reject_reflection_proposal(
     proposal_id: str,
     payload: RejectReflectionProposalRequest,
-    _: str = Depends(require_operator_api_key),
+    operator_id: str = Depends(require_operator_api_key),
     session: AsyncSession = Depends(get_db_session),
 ) -> ReflectionProposalResponse:
     service = get_reflection_proposal_service(session)
     proposal = await service.reject(
         proposal_id=proposal_id,
-        operator_id="operator",
+        operator_id=operator_id,
         reason_code=payload.reason_code,
         reason_note=payload.reason_note,
     )
@@ -369,13 +369,13 @@ async def reject_reflection_proposal(
 async def activate_reflection_proposal_rollout(
     proposal_id: str,
     payload: ActivateReflectionProposalRequest,
-    _: str = Depends(require_operator_api_key),
+    operator_id: str = Depends(require_operator_api_key),
     session: AsyncSession = Depends(get_db_session),
 ) -> ReflectionProposalRolloutResponse:
     service = get_reflection_proposal_rollout_service(session)
     rollout = await service.activate(
         proposal_id=proposal_id,
-        operator_id="operator",
+        operator_id=operator_id,
         reason_code=payload.reason_code,
         reason_note=payload.reason_note,
     )
@@ -396,10 +396,12 @@ async def list_reflection_proposal_rollouts(
 @router.get("/goals/{goal_id}/skill-bindings", response_model=list[GoalSkillBindingResponse])
 async def list_goal_skill_bindings(
     goal_id: str,
-    _: str = Depends(require_operator_api_key),
+    context: AccessContext = Depends(get_access_context),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[GoalSkillBindingResponse]:
-    await require_goal_access(goal_id, AccessContext(actor_type="operator", learner_profile_id=None), session)
+    if context.actor_type != "operator":
+        raise HTTPException(status_code=403, detail="Operator access is required.")
+    await require_goal_access(goal_id, context, session)
     _ = get_goal_skill_binding_resolver(session)
     repository = GoalSkillBindingRepository(session)
     items = await repository.list_by_goal(goal_id)
@@ -476,13 +478,13 @@ async def observe_reflection_proposal_rollout(
 async def promote_reflection_proposal_rollout(
     rollout_id: str,
     payload: PromoteReflectionProposalRolloutRequest,
-    _: str = Depends(require_operator_api_key),
+    operator_id: str = Depends(require_operator_api_key),
     session: AsyncSession = Depends(get_db_session),
 ) -> ReflectionProposalRolloutResponse:
     service = get_reflection_proposal_rollout_service(session)
     rollout = await service.promote(
         rollout_id=rollout_id,
-        operator_id="operator",
+        operator_id=operator_id,
         reason_code=payload.reason_code,
         reason_note=payload.reason_note,
     )
@@ -494,13 +496,13 @@ async def promote_reflection_proposal_rollout(
 async def rollback_reflection_proposal_rollout(
     rollout_id: str,
     payload: RollbackReflectionProposalRolloutRequest,
-    _: str = Depends(require_operator_api_key),
+    operator_id: str = Depends(require_operator_api_key),
     session: AsyncSession = Depends(get_db_session),
 ) -> ReflectionProposalRolloutResponse:
     service = get_reflection_proposal_rollout_service(session)
     rollout = await service.rollback(
         rollout_id=rollout_id,
-        operator_id="operator",
+        operator_id=operator_id,
         reason_code=payload.reason_code,
         reason_note=payload.reason_note,
     )

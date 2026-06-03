@@ -1378,7 +1378,7 @@ class MemoryService:
                 event_type=f"{memory_type}_memory.annotated",
                 resource_type=f"{memory_type}_memory",
                 resource_id=memory_id,
-                actor="operator",
+                actor=actor_id,
                 event_data={
                     "memory_id": memory_id,
                     "annotation_id": annotation.id,
@@ -3355,7 +3355,7 @@ class MemoryService:
                 event_type=f"{memory_type}_memory.{decision_type}d" if decision_type in {"suppress", "restore"} else f"{memory_type}_memory.{decision_type}",
                 resource_type=f"{memory_type}_memory",
                 resource_id=memory_id,
-                actor="operator",
+                actor=actor_id,
                 event_data={
                     "memory_id": memory_id,
                     "previous_status": previous_status,

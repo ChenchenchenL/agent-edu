@@ -1,6 +1,47 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date, timedelta
+from hashlib import sha256
+import os
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from agent_core.infrastructure.db.models import AuditEventModel
+
+
+async def _audit_event_types() -> list[str]:
+    engine = create_async_engine(os.environ["AGENT_EDU_DATABASE_URL"], future=True)
+    try:
+        async with engine.connect() as connection:
+            result = await connection.execute(select(AuditEventModel.event_type).order_by(AuditEventModel.created_at))
+            return list(result.scalars().all())
+    finally:
+        await engine.dispose()
+
+
+async def _audit_events() -> list[dict[str, object]]:
+    engine = create_async_engine(os.environ["AGENT_EDU_DATABASE_URL"], future=True)
+    try:
+        async with engine.connect() as connection:
+            result = await connection.execute(
+                select(
+                    AuditEventModel.event_type,
+                    AuditEventModel.actor,
+                    AuditEventModel.event_data,
+                ).order_by(AuditEventModel.created_at)
+            )
+            return [
+                {
+                    "event_type": event_type,
+                    "actor": actor,
+                    "event_data": event_data,
+                }
+                for event_type, actor, event_data in result.all()
+            ]
+    finally:
+        await engine.dispose()
 
 
 def _create_profile_with_key(client) -> tuple[str, str]:
@@ -16,6 +57,26 @@ def _learner_headers(access_key: str) -> dict[str, str]:
 
 def _operator_headers() -> dict[str, str]:
     return {"X-Operator-Key": "secret-operator"}
+
+
+def _operator_actor_id() -> str:
+    return f"operator:{sha256('secret-operator'.encode('utf-8')).hexdigest()[:12]}"
+
+
+def _run_autonomy_worker_once() -> None:
+    from agent_core.api import dependencies as api_dependencies
+
+    async def run_worker_once() -> None:
+        session_factory = api_dependencies.get_session_factory()
+        async with session_factory() as db:
+            service = api_dependencies.get_task_service(db)
+            await service.run_due_autonomy_jobs(raise_on_error=True, lease_owner="test-worker")
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(run_worker_once())
+    finally:
+        loop.close()
 
 
 def test_session_endpoints_cover_create_list_get_update_and_errors(app_client_factory):
@@ -546,6 +607,7 @@ def test_reflection_endpoints_cover_goal_task_and_detail(app_client_factory):
         json={"status": "failed", "result_note": "Still confused"},
     )
     assert failed_response.status_code == 200
+    _run_autonomy_worker_once()
 
     goal_reflections = client.get(f"/api/v1/goals/{goal_id}/reflections", headers=headers)
     assert goal_reflections.status_code == 200
@@ -696,7 +758,9 @@ def test_reflection_proposal_sandbox_and_approval_endpoints(app_client_factory):
 
     tasks_response = client.get(f"/api/v1/goals/{goal_id}/tasks", headers=headers)
     assert tasks_response.status_code == 200
-    task_id = tasks_response.json()[0]["id"]
+    task_payload = tasks_response.json()[0]
+    task_id = task_payload["id"]
+    task_topic = task_payload["topic_focus"]
 
     execute_response = client.post(f"/api/v1/tasks/{task_id}/execute", headers=headers)
     assert execute_response.status_code == 200
@@ -707,6 +771,7 @@ def test_reflection_proposal_sandbox_and_approval_endpoints(app_client_factory):
         json={"status": "failed", "result_note": "Still confused"},
     )
     assert failed_response.status_code == 200
+    _run_autonomy_worker_once()
 
     reflections = client.get(f"/api/v1/tasks/{task_id}/reflections", headers=headers)
     assert reflections.status_code == 200
@@ -715,7 +780,16 @@ def test_reflection_proposal_sandbox_and_approval_endpoints(app_client_factory):
     proposals = client.get(f"/api/v1/reflections/{reflection_id}/proposals", headers=headers)
     assert proposals.status_code == 200
     assert len(proposals.json()) >= 1
-    proposal_id = proposals.json()[0]["id"]
+    skill_package_payload = next(
+        (
+            item
+            for item in proposals.json()
+            if item["proposal_type"] == "skill_package"
+        ),
+        None,
+    )
+    proposal_payload = skill_package_payload or proposals.json()[0]
+    proposal_id = proposal_payload["id"]
 
     unauthorized = client.post(
         f"/api/v1/proposals/{proposal_id}/sandbox",
@@ -731,20 +805,7 @@ def test_reflection_proposal_sandbox_and_approval_endpoints(app_client_factory):
     assert queued.status_code == 200
     assert queued.json()["status"] in {"sandbox_queued", "sandbox_running", "sandbox_completed"}
 
-    from agent_core.api import dependencies as api_dependencies
-    import asyncio
-
-    async def run_worker_once() -> None:
-        session_factory = api_dependencies.get_session_factory()
-        async with session_factory() as db:
-            service = api_dependencies.get_task_service(db)
-            await service.run_due_autonomy_jobs(raise_on_error=True, lease_owner="test-worker")
-
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(run_worker_once())
-    finally:
-        loop.close()
+    _run_autonomy_worker_once()
 
     proposal_detail = client.get(
         f"/api/v1/proposals/{proposal_id}",
@@ -785,6 +846,70 @@ def test_reflection_proposal_sandbox_and_approval_endpoints(app_client_factory):
     assert approved.status_code == 200
     assert approved.json()["status"] == "approved"
 
+    candidate_unauthorized = client.post(
+        "/api/v1/skill-artifacts/from-reflection-proposal",
+        json={"proposal_id": proposal_id},
+    )
+    assert candidate_unauthorized.status_code == 403
+
+    candidate = client.post(
+        "/api/v1/skill-artifacts/from-reflection-proposal",
+        headers={"X-Operator-Key": "secret-operator"},
+        json={"proposal_id": proposal_id},
+    )
+    staged_payload = None
+    if approved.json()["proposal_type"] == "skill_package" and evaluation.json()["evaluation_status"] == "effective":
+        assert candidate.status_code == 200
+        candidate_payload = candidate.json()
+        assert candidate_payload["status"] == "candidate"
+        assert candidate_payload["source_proposal_id"] == proposal_id
+        assert candidate_payload["source_reflection_ids"] == [reflection_id]
+        assert candidate_payload["version"] == "0.1.0"
+        candidate_repeat = client.post(
+            "/api/v1/skill-artifacts/from-reflection-proposal",
+            headers={"X-Operator-Key": "secret-operator"},
+            json={"proposal_id": proposal_id},
+        )
+        assert candidate_repeat.status_code == 200
+        assert candidate_repeat.json()["id"] == candidate_payload["id"]
+        stage_unauthorized = client.post(
+            f"/api/v1/skill-artifacts/{candidate_payload['id']}/stage",
+            json={"reason_code": "reviewed", "reason_note": "Operator reviewed candidate"},
+        )
+        assert stage_unauthorized.status_code == 403
+
+        staged = client.post(
+            f"/api/v1/skill-artifacts/{candidate_payload['id']}/stage",
+            headers={"X-Operator-Key": "secret-operator"},
+            json={"reason_code": "reviewed", "reason_note": "Operator reviewed candidate"},
+        )
+        assert staged.status_code == 200
+        staged_payload = staged.json()
+        assert staged_payload["id"] == candidate_payload["id"]
+        assert staged_payload["status"] == "staged"
+        assert staged_payload["version"] == candidate_payload["version"]
+        assert staged_payload["approved_by"] is None
+        assert staged_payload["approved_at"] is None
+
+        staged_resolution = client.get(
+            "/api/v1/skill-resolution",
+            headers={"X-Operator-Key": "secret-operator"},
+            params={"skill_name": staged_payload["name"], "surface": staged_payload["scope"]},
+        )
+        assert staged_resolution.status_code == 200
+        assert staged_resolution.json()["resolver_status"] == "missing_artifact"
+
+        staged_repeat = client.post(
+            f"/api/v1/skill-artifacts/{candidate_payload['id']}/stage",
+            headers={"X-Operator-Key": "secret-operator"},
+            json={"reason_code": "reviewed", "reason_note": "Operator reviewed candidate"},
+        )
+        assert staged_repeat.status_code == 200
+        assert staged_repeat.json()["id"] == staged_payload["id"]
+        assert staged_repeat.json()["version"] == staged_payload["version"]
+    else:
+        assert candidate.status_code == 400
+
     activated = client.post(
         f"/api/v1/proposals/{proposal_id}/activate",
         headers={"X-Operator-Key": "secret-operator"},
@@ -807,29 +932,35 @@ def test_reflection_proposal_sandbox_and_approval_endpoints(app_client_factory):
             "learner_profile_id": profile_id,
             "learner_goal_id": goal_id,
             "title": "Matrices rollout check",
-            "subject": "Linear Algebra",
+            "subject": task_topic,
         },
     )
     assert rollout_session.status_code == 200
     rollout_session_id = rollout_session.json()["id"]
 
-    hint_response = client.post(
-        f"/api/v1/sessions/{rollout_session_id}/messages",
-        json={
-            "content": "Give me a first hint.",
-            "mode": "hint",
-            "question_prompt": "What is the next step in matrix multiplication?",
-        },
-    )
-    assert hint_response.status_code == 200
-    if proposal_payload["activation_surface"] == "hint":
-        assert hint_response.json()["assistant_payload"]["hint_level"] == "scaffolded"
+    rollout_mode = proposal_payload["activation_surface"]
+    for index in range(3):
+        message_payload = {
+            "content": f"Rollout check turn {index + 1}.",
+            "mode": rollout_mode,
+        }
+        if rollout_mode == "hint":
+            message_payload["question_prompt"] = "What is the next step in matrix multiplication?"
+        rollout_message = client.post(
+            f"/api/v1/sessions/{rollout_session_id}/messages",
+            json=message_payload,
+        )
+        assert rollout_message.status_code == 200
+        if rollout_mode == "hint":
+            assert rollout_message.json()["assistant_payload"]["hint_level"] in {"conceptual", "scaffolded", "targeted"}
 
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(run_worker_once())
-    finally:
-        loop.close()
+    observed = client.post(
+        f"/api/v1/rollouts/{rollout_id}/observe",
+        headers={"X-Operator-Key": "secret-operator"},
+        json={"reason_code": "manual_observe", "reason_note": "Rollout usage collected"},
+    )
+    assert observed.status_code == 200
+    assert observed.json()["recommendation"] == "promote"
 
     observations = client.get(
         f"/api/v1/rollouts/{rollout_id}/observations",
@@ -837,6 +968,7 @@ def test_reflection_proposal_sandbox_and_approval_endpoints(app_client_factory):
     )
     assert observations.status_code == 200
     assert len(observations.json()) >= 1
+    assert observations.json()[0]["recommendation"] == "promote"
 
     promoted = client.post(
         f"/api/v1/rollouts/{rollout_id}/promote",
@@ -845,6 +977,56 @@ def test_reflection_proposal_sandbox_and_approval_endpoints(app_client_factory):
     )
     assert promoted.status_code == 200
     assert promoted.json()["status"] == "rolled_out"
+    if approved.json()["proposal_type"] != "skill_package":
+        rolled_back = client.post(
+            f"/api/v1/rollouts/{rollout_id}/rollback",
+            headers={"X-Operator-Key": "secret-operator"},
+            json={"reason_code": "rollback", "reason_note": "End staged rollout"},
+        )
+        assert rolled_back.status_code == 200
+        assert rolled_back.json()["status"] == "rolled_back"
+        return
+    assert staged_payload is not None
+
+    activate_unauthorized = client.post(
+        f"/api/v1/skill-artifacts/{staged_payload['id']}/activate",
+        json={"reason_code": "rollout_promoted", "reason_note": "Promote staged artifact"},
+    )
+    assert activate_unauthorized.status_code == 403
+
+    artifact_activation = client.post(
+        f"/api/v1/skill-artifacts/{staged_payload['id']}/activate",
+        headers={"X-Operator-Key": "secret-operator"},
+        json={"reason_code": "rollout_promoted", "reason_note": "Promote staged artifact"},
+    )
+    assert artifact_activation.status_code == 200
+    activated_artifact_payload = artifact_activation.json()
+    assert activated_artifact_payload["id"] == staged_payload["id"]
+    assert activated_artifact_payload["status"] == "active"
+    assert activated_artifact_payload["version"] == staged_payload["version"]
+    assert activated_artifact_payload["approved_by"] == _operator_actor_id()
+    assert activated_artifact_payload["approved_at"] is not None
+
+    active_resolution = client.get(
+        "/api/v1/skill-resolution",
+        headers={"X-Operator-Key": "secret-operator"},
+        params={
+            "skill_name": activated_artifact_payload["name"],
+            "surface": activated_artifact_payload["scope"],
+        },
+    )
+    assert active_resolution.status_code == 200
+    assert active_resolution.json()["resolver_status"] == "resolved"
+    assert active_resolution.json()["artifact_id"] == activated_artifact_payload["id"]
+
+    artifact_activation_repeat = client.post(
+        f"/api/v1/skill-artifacts/{staged_payload['id']}/activate",
+        headers={"X-Operator-Key": "secret-operator"},
+        json={"reason_code": "rollout_promoted", "reason_note": "Promote staged artifact"},
+    )
+    assert artifact_activation_repeat.status_code == 200
+    assert artifact_activation_repeat.json()["id"] == staged_payload["id"]
+    assert artifact_activation_repeat.json()["version"] == staged_payload["version"]
 
     rolled_back = client.post(
         f"/api/v1/rollouts/{rollout_id}/rollback",
@@ -853,6 +1035,33 @@ def test_reflection_proposal_sandbox_and_approval_endpoints(app_client_factory):
     )
     assert rolled_back.status_code == 200
     assert rolled_back.json()["status"] == "rolled_back"
+
+    deactivate_unauthorized = client.post(
+        f"/api/v1/skill-artifacts/{activated_artifact_payload['id']}/deactivate",
+        json={"reason_code": "rollout_rollback", "reason_note": "Deactivate rolled back artifact"},
+    )
+    assert deactivate_unauthorized.status_code == 403
+
+    deactivated_artifact = client.post(
+        f"/api/v1/skill-artifacts/{activated_artifact_payload['id']}/deactivate",
+        headers={"X-Operator-Key": "secret-operator"},
+        json={"reason_code": "rollout_rollback", "reason_note": "Deactivate rolled back artifact"},
+    )
+    assert deactivated_artifact.status_code == 200
+    assert deactivated_artifact.json()["id"] == activated_artifact_payload["id"]
+    assert deactivated_artifact.json()["status"] == "deprecated"
+
+    deactivated_resolution = client.get(
+        "/api/v1/skill-resolution",
+        headers={"X-Operator-Key": "secret-operator"},
+        params={
+            "skill_name": activated_artifact_payload["name"],
+            "surface": activated_artifact_payload["scope"],
+        },
+    )
+    assert deactivated_resolution.status_code == 200
+    assert deactivated_resolution.json()["resolver_status"] == "missing_artifact"
+    assert deactivated_resolution.json()["artifact_id"] is None
 
 
 def test_workspace_summary_and_memory_browse_endpoints(app_client_factory):
@@ -958,11 +1167,24 @@ def test_workspace_summary_and_memory_browse_endpoints(app_client_factory):
 
 
 def test_skills_readyz_and_metrics_endpoints(app_client_factory):
-    client = app_client_factory(env_overrides={"AGENT_EDU_METRICS_ENABLED": "1"})
+    client = app_client_factory(
+        env_overrides={
+            "AGENT_EDU_METRICS_ENABLED": "1",
+            "AGENT_EDU_OPERATOR_API_KEY": "secret-operator",
+        }
+    )
 
     skills = client.get("/api/v1/skills")
+    assert skills.status_code == 401
+
+    skills = client.get("/api/v1/skills", headers=_operator_headers())
     assert skills.status_code == 200
     assert len(skills.json()) >= 1
+
+    _, access_key = _create_profile_with_key(client)
+    learner_skills = client.get("/api/v1/skills", headers=_learner_headers(access_key))
+    assert learner_skills.status_code == 200
+    assert len(learner_skills.json()) >= 1
 
     healthz = client.get("/healthz")
     assert healthz.status_code == 200
@@ -1047,6 +1269,7 @@ def test_phase2_profile_goal_plan_task_workflow_chain(app_client_factory):
     assert complete.status_code == 200
     assert complete.json()["status"] == "completed"
 
+    _run_autonomy_worker_once()
     tasks_after = client.get(f"/api/v1/goals/{goal_id}/tasks", headers=headers)
     assert tasks_after.status_code == 200
     assert any(item["task_type"] == "review" for item in tasks_after.json())
@@ -1089,6 +1312,7 @@ def test_phase2_failed_task_triggers_replan_and_supersedes_future_tasks(app_clie
     )
     assert failed.status_code == 200
     assert failed.json()["status"] == "failed"
+    _run_autonomy_worker_once()
 
     plans = client.get(f"/api/v1/goals/{goal_id}/plans", headers=headers)
     assert plans.status_code == 200
@@ -1226,6 +1450,7 @@ def test_milestone_gate_surfaces_assessment_due_phase(app_client_factory):
             json={"status": "completed", "result_note": "Done"},
         )
         assert completed.status_code == 200
+        _run_autonomy_worker_once()
 
     worker_materialized = client.post(f"/api/v1/goals/{goal_id}/autonomy/materialize-today", headers=headers)
     assert worker_materialized.status_code == 200
@@ -1243,6 +1468,16 @@ def test_skill_operator_usage_api_records_chat_usage(app_client_factory):
     client = app_client_factory(env_overrides={"AGENT_EDU_OPERATOR_API_KEY": "secret-operator"})
     missing_key = client.get("/api/v1/skill-usage")
     assert missing_key.status_code == 403
+    wrong_key = client.get("/api/v1/skill-usage", headers={"X-Operator-Key": "wrong-secret"})
+    assert wrong_key.status_code == 403
+    auth_failures = [
+        item
+        for item in asyncio.run(_audit_events())
+        if item["event_type"] == "auth.operator_api_key.rejected"
+    ]
+    assert len(auth_failures) == 2
+    assert {item["actor"] for item in auth_failures} == {"anonymous"}
+    assert all("wrong-secret" not in str(item["event_data"]) for item in auth_failures)
 
     session_response = client.post(
         "/api/v1/sessions",
@@ -1264,7 +1499,51 @@ def test_skill_operator_usage_api_records_chat_usage(app_client_factory):
     )
     assert usage_response.status_code == 200
     usage = usage_response.json()
-    assert any(item["skill_name"] == "explain_concept" and item["surface"] == "chat" for item in usage)
+    chat_usage = next(item for item in usage if item["skill_name"] == "explain_concept" and item["surface"] == "chat")
+    assert chat_usage["resolver_status"] == "missing_artifact"
+    assert chat_usage["selection_reason"] == "artifact_missing_static_fallback"
+    assert chat_usage["input_fingerprint"] is not None
+    assert chat_usage["output_fingerprint"] is not None
+    assert chat_usage["outcome_signals"] == {}
 
     artifacts_response = client.get("/api/v1/skill-artifacts", headers=_operator_headers())
     assert artifacts_response.status_code == 200
+
+    filtered_usage = client.get(
+        "/api/v1/skill-usage",
+        headers=_operator_headers(),
+        params={"resolver_status": "missing_artifact", "surface": "chat"},
+    )
+    assert filtered_usage.status_code == 200
+    assert any(item["id"] == chat_usage["id"] for item in filtered_usage.json())
+
+    before_resolution_probe = asyncio.run(_audit_event_types())
+    resolution_response = client.get(
+        "/api/v1/skill-resolution",
+        headers=_operator_headers(),
+        params={"skill_name": "explain_concept", "surface": "chat"},
+    )
+    assert resolution_response.status_code == 200
+    assert resolution_response.json()["resolver_status"] == "missing_artifact"
+    after_default_probe = asyncio.run(_audit_event_types())
+    assert after_default_probe.count("skill.resolution.probed") == before_resolution_probe.count(
+        "skill.resolution.probed"
+    )
+    assert after_default_probe.count("skill.resolution.missing_artifact") == before_resolution_probe.count(
+        "skill.resolution.missing_artifact"
+    )
+
+    audited_resolution_response = client.get(
+        "/api/v1/skill-resolution",
+        headers=_operator_headers(),
+        params={"skill_name": "explain_concept", "surface": "chat", "audit": "true"},
+    )
+    assert audited_resolution_response.status_code == 200
+    assert audited_resolution_response.json()["resolver_status"] == "missing_artifact"
+    after_audited_probe = asyncio.run(_audit_event_types())
+    assert after_audited_probe.count("skill.resolution.probed") == after_default_probe.count(
+        "skill.resolution.probed"
+    ) + 1
+    assert after_audited_probe.count("skill.resolution.missing_artifact") == after_default_probe.count(
+        "skill.resolution.missing_artifact"
+    ) + 1
