@@ -89,15 +89,16 @@ async def test_create_profile_does_not_expose_hash_in_response_models():
 
 async def test_rotate_access_key_changes_hash_and_invalidates_old_key():
     repository = StubLearnerProfileRepository()
+    audit_repository = StubAuditRepository()
     service = LearnerProfileService(
         repository,
         FakeSession(),
-        AuditService(StubAuditRepository()),
+        AuditService(audit_repository),
     )
     created = await service.create_profile()
     old_hash = repository.profiles[created.id].access_key_hash
 
-    rotated = await service.rotate_access_key(created.id)
+    rotated = await service.rotate_access_key(created.id, operator_id="operator:abc123")
 
     assert rotated.id == created.id
     assert rotated.access_key != created.access_key
@@ -105,6 +106,9 @@ async def test_rotate_access_key_changes_hash_and_invalidates_old_key():
     assert repository.profiles[created.id].access_key_hash != old_hash
     assert await repository.get_by_access_key_hash(hash_profile_access_key(created.access_key)) is None
     assert (await repository.get_by_access_key_hash(hash_profile_access_key(rotated.access_key))).id == created.id
+    rotated_event = next(item for item in audit_repository.events if item.event_type == "learner_profile.access_key.rotated")
+    assert rotated_event.actor == "operator:abc123"
+    assert rotated_event.event_data["operator_id"] == "operator:abc123"
 
 
 async def test_create_profile_failure_writes_durable_audit():

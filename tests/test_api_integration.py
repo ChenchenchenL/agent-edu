@@ -1,6 +1,24 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date, timedelta
+from hashlib import sha256
+import os
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from agent_core.infrastructure.db.models import AuditEventModel
+
+
+async def _audit_event_types() -> list[str]:
+    engine = create_async_engine(os.environ["AGENT_EDU_DATABASE_URL"], future=True)
+    try:
+        async with engine.connect() as connection:
+            result = await connection.execute(select(AuditEventModel.event_type).order_by(AuditEventModel.created_at))
+            return list(result.scalars().all())
+    finally:
+        await engine.dispose()
 
 
 def _create_profile_with_key(client) -> tuple[str, str]:
@@ -16,6 +34,10 @@ def _learner_headers(access_key: str) -> dict[str, str]:
 
 def _operator_headers() -> dict[str, str]:
     return {"X-Operator-Key": "secret-operator"}
+
+
+def _operator_actor_id() -> str:
+    return f"operator:{sha256('secret-operator'.encode('utf-8')).hexdigest()[:12]}"
 
 
 def test_session_endpoints_cover_create_list_get_update_and_errors(app_client_factory):
@@ -696,7 +718,9 @@ def test_reflection_proposal_sandbox_and_approval_endpoints(app_client_factory):
 
     tasks_response = client.get(f"/api/v1/goals/{goal_id}/tasks", headers=headers)
     assert tasks_response.status_code == 200
-    task_id = tasks_response.json()[0]["id"]
+    task_payload = tasks_response.json()[0]
+    task_id = task_payload["id"]
+    task_topic = task_payload["topic_focus"]
 
     execute_response = client.post(f"/api/v1/tasks/{task_id}/execute", headers=headers)
     assert execute_response.status_code == 200
@@ -715,7 +739,16 @@ def test_reflection_proposal_sandbox_and_approval_endpoints(app_client_factory):
     proposals = client.get(f"/api/v1/reflections/{reflection_id}/proposals", headers=headers)
     assert proposals.status_code == 200
     assert len(proposals.json()) >= 1
-    proposal_id = proposals.json()[0]["id"]
+    proposal_payload = next(
+        (
+            item
+            for item in proposals.json()
+            if item["proposal_type"] == "skill_package" and item["activation_surface"] in {"chat", "hint"}
+        ),
+        None,
+    )
+    assert proposal_payload is not None
+    proposal_id = proposal_payload["id"]
 
     unauthorized = client.post(
         f"/api/v1/proposals/{proposal_id}/sandbox",
@@ -796,6 +829,7 @@ def test_reflection_proposal_sandbox_and_approval_endpoints(app_client_factory):
         headers={"X-Operator-Key": "secret-operator"},
         json={"proposal_id": proposal_id},
     )
+    staged_payload = None
     if approved.json()["proposal_type"] == "skill_package" and evaluation.json()["evaluation_status"] == "effective":
         assert candidate.status_code == 200
         candidate_payload = candidate.json()
@@ -810,6 +844,41 @@ def test_reflection_proposal_sandbox_and_approval_endpoints(app_client_factory):
         )
         assert candidate_repeat.status_code == 200
         assert candidate_repeat.json()["id"] == candidate_payload["id"]
+        stage_unauthorized = client.post(
+            f"/api/v1/skill-artifacts/{candidate_payload['id']}/stage",
+            json={"reason_code": "reviewed", "reason_note": "Operator reviewed candidate"},
+        )
+        assert stage_unauthorized.status_code == 403
+
+        staged = client.post(
+            f"/api/v1/skill-artifacts/{candidate_payload['id']}/stage",
+            headers={"X-Operator-Key": "secret-operator"},
+            json={"reason_code": "reviewed", "reason_note": "Operator reviewed candidate"},
+        )
+        assert staged.status_code == 200
+        staged_payload = staged.json()
+        assert staged_payload["id"] == candidate_payload["id"]
+        assert staged_payload["status"] == "staged"
+        assert staged_payload["version"] == candidate_payload["version"]
+        assert staged_payload["approved_by"] is None
+        assert staged_payload["approved_at"] is None
+
+        staged_resolution = client.get(
+            "/api/v1/skill-resolution",
+            headers={"X-Operator-Key": "secret-operator"},
+            params={"skill_name": staged_payload["name"], "surface": staged_payload["scope"]},
+        )
+        assert staged_resolution.status_code == 200
+        assert staged_resolution.json()["resolver_status"] == "missing_artifact"
+
+        staged_repeat = client.post(
+            f"/api/v1/skill-artifacts/{candidate_payload['id']}/stage",
+            headers={"X-Operator-Key": "secret-operator"},
+            json={"reason_code": "reviewed", "reason_note": "Operator reviewed candidate"},
+        )
+        assert staged_repeat.status_code == 200
+        assert staged_repeat.json()["id"] == staged_payload["id"]
+        assert staged_repeat.json()["version"] == staged_payload["version"]
     else:
         assert candidate.status_code == 400
 
@@ -835,29 +904,35 @@ def test_reflection_proposal_sandbox_and_approval_endpoints(app_client_factory):
             "learner_profile_id": profile_id,
             "learner_goal_id": goal_id,
             "title": "Matrices rollout check",
-            "subject": "Linear Algebra",
+            "subject": task_topic,
         },
     )
     assert rollout_session.status_code == 200
     rollout_session_id = rollout_session.json()["id"]
 
-    hint_response = client.post(
-        f"/api/v1/sessions/{rollout_session_id}/messages",
-        json={
-            "content": "Give me a first hint.",
-            "mode": "hint",
-            "question_prompt": "What is the next step in matrix multiplication?",
-        },
-    )
-    assert hint_response.status_code == 200
-    if proposal_payload["activation_surface"] == "hint":
-        assert hint_response.json()["assistant_payload"]["hint_level"] == "scaffolded"
+    rollout_mode = proposal_payload["activation_surface"]
+    for index in range(3):
+        message_payload = {
+            "content": f"Rollout check turn {index + 1}.",
+            "mode": rollout_mode,
+        }
+        if rollout_mode == "hint":
+            message_payload["question_prompt"] = "What is the next step in matrix multiplication?"
+        rollout_message = client.post(
+            f"/api/v1/sessions/{rollout_session_id}/messages",
+            json=message_payload,
+        )
+        assert rollout_message.status_code == 200
+        if rollout_mode == "hint":
+            assert rollout_message.json()["assistant_payload"]["hint_level"] in {"conceptual", "scaffolded", "targeted"}
 
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(run_worker_once())
-    finally:
-        loop.close()
+    observed = client.post(
+        f"/api/v1/rollouts/{rollout_id}/observe",
+        headers={"X-Operator-Key": "secret-operator"},
+        json={"reason_code": "manual_observe", "reason_note": "Rollout usage collected"},
+    )
+    assert observed.status_code == 200
+    assert observed.json()["recommendation"] == "promote"
 
     observations = client.get(
         f"/api/v1/rollouts/{rollout_id}/observations",
@@ -865,6 +940,7 @@ def test_reflection_proposal_sandbox_and_approval_endpoints(app_client_factory):
     )
     assert observations.status_code == 200
     assert len(observations.json()) >= 1
+    assert observations.json()[0]["recommendation"] == "promote"
 
     promoted = client.post(
         f"/api/v1/rollouts/{rollout_id}/promote",
@@ -873,6 +949,47 @@ def test_reflection_proposal_sandbox_and_approval_endpoints(app_client_factory):
     )
     assert promoted.status_code == 200
     assert promoted.json()["status"] == "rolled_out"
+    assert staged_payload is not None
+
+    activate_unauthorized = client.post(
+        f"/api/v1/skill-artifacts/{staged_payload['id']}/activate",
+        json={"reason_code": "rollout_promoted", "reason_note": "Promote staged artifact"},
+    )
+    assert activate_unauthorized.status_code == 403
+
+    artifact_activation = client.post(
+        f"/api/v1/skill-artifacts/{staged_payload['id']}/activate",
+        headers={"X-Operator-Key": "secret-operator"},
+        json={"reason_code": "rollout_promoted", "reason_note": "Promote staged artifact"},
+    )
+    assert artifact_activation.status_code == 200
+    activated_artifact_payload = artifact_activation.json()
+    assert activated_artifact_payload["id"] == staged_payload["id"]
+    assert activated_artifact_payload["status"] == "active"
+    assert activated_artifact_payload["version"] == staged_payload["version"]
+    assert activated_artifact_payload["approved_by"] == _operator_actor_id()
+    assert activated_artifact_payload["approved_at"] is not None
+
+    active_resolution = client.get(
+        "/api/v1/skill-resolution",
+        headers={"X-Operator-Key": "secret-operator"},
+        params={
+            "skill_name": activated_artifact_payload["name"],
+            "surface": activated_artifact_payload["scope"],
+        },
+    )
+    assert active_resolution.status_code == 200
+    assert active_resolution.json()["resolver_status"] == "resolved"
+    assert active_resolution.json()["artifact_id"] == activated_artifact_payload["id"]
+
+    artifact_activation_repeat = client.post(
+        f"/api/v1/skill-artifacts/{staged_payload['id']}/activate",
+        headers={"X-Operator-Key": "secret-operator"},
+        json={"reason_code": "rollout_promoted", "reason_note": "Promote staged artifact"},
+    )
+    assert artifact_activation_repeat.status_code == 200
+    assert artifact_activation_repeat.json()["id"] == staged_payload["id"]
+    assert artifact_activation_repeat.json()["version"] == staged_payload["version"]
 
     rolled_back = client.post(
         f"/api/v1/rollouts/{rollout_id}/rollback",
@@ -1323,6 +1440,7 @@ def test_skill_operator_usage_api_records_chat_usage(app_client_factory):
     assert filtered_usage.status_code == 200
     assert any(item["id"] == chat_usage["id"] for item in filtered_usage.json())
 
+    before_resolution_probe = asyncio.run(_audit_event_types())
     resolution_response = client.get(
         "/api/v1/skill-resolution",
         headers=_operator_headers(),
@@ -1330,3 +1448,25 @@ def test_skill_operator_usage_api_records_chat_usage(app_client_factory):
     )
     assert resolution_response.status_code == 200
     assert resolution_response.json()["resolver_status"] == "missing_artifact"
+    after_default_probe = asyncio.run(_audit_event_types())
+    assert after_default_probe.count("skill.resolution.probed") == before_resolution_probe.count(
+        "skill.resolution.probed"
+    )
+    assert after_default_probe.count("skill.resolution.missing_artifact") == before_resolution_probe.count(
+        "skill.resolution.missing_artifact"
+    )
+
+    audited_resolution_response = client.get(
+        "/api/v1/skill-resolution",
+        headers=_operator_headers(),
+        params={"skill_name": "explain_concept", "surface": "chat", "audit": "true"},
+    )
+    assert audited_resolution_response.status_code == 200
+    assert audited_resolution_response.json()["resolver_status"] == "missing_artifact"
+    after_audited_probe = asyncio.run(_audit_event_types())
+    assert after_audited_probe.count("skill.resolution.probed") == after_default_probe.count(
+        "skill.resolution.probed"
+    ) + 1
+    assert after_audited_probe.count("skill.resolution.missing_artifact") == after_default_probe.count(
+        "skill.resolution.missing_artifact"
+    ) + 1

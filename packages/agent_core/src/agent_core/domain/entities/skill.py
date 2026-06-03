@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -44,6 +44,7 @@ SKILL_SELECTION_REASONS = {
     "artifact_missing_static_fallback",
     "suppressed_artifact",
     "contract_incompatible",
+    "runtime_resolution_failed",
 }
 SKILL_OUTCOME_SIGNAL_KEYS = {
     "accepted_by_user",
@@ -177,8 +178,8 @@ class SkillArtifact:
             raise ValidationError("compatibility_contract.surfaces cannot be empty.")
         if any(surface not in SKILL_USAGE_SURFACES for surface in contract["surfaces"]):
             raise ValidationError("compatibility_contract contains unsupported surface.")
-        if scope not in contract["surfaces"]:
-            raise ValidationError("artifact scope must be included in compatibility_contract.surfaces.")
+        if contract["surfaces"] != [scope]:
+            raise ValidationError("In V2, artifact surfaces must exactly match artifact scope.")
         binding = contract.get("implementation_binding")
         if binding is None:
             contract["implementation_binding"] = implementation_binding
@@ -190,6 +191,25 @@ class SkillArtifact:
             raise ValidationError("compatibility_contract.dynamic_execution must be false.")
         contract["dynamic_execution"] = False
         return contract
+
+    def mark_staged(self) -> "SkillArtifact":
+        if self.status != "candidate":
+            raise ValidationError("Only candidate skill artifacts can be staged.")
+        return replace(self, status="staged", updated_at=_utcnow())
+
+    def mark_active(self, *, operator_id: str) -> "SkillArtifact":
+        if self.status != "staged":
+            raise ValidationError("Only staged skill artifacts can be activated.")
+        if not operator_id.strip():
+            raise ValidationError("operator_id is required.")
+        now = _utcnow()
+        return replace(
+            self,
+            status="active",
+            approved_by=operator_id,
+            approved_at=now,
+            updated_at=now,
+        )
 
 
 @dataclass(frozen=True)

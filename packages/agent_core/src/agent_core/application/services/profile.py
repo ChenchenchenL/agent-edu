@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent_core.application.services.audit import AuditService
 from agent_core.application.services.profile_access import generate_profile_access_key, hash_profile_access_key
 from agent_core.domain.entities.learner_profile import LearnerProfile
-from agent_core.domain.errors import NotFoundError
+from agent_core.domain.errors import NotFoundError, ValidationError
 from agent_core.domain.schemas.goal import CreateLearnerProfileResponse, LearnerProfileResponse
 from agent_core.infrastructure.db.repositories import LearnerProfileRepository
 
@@ -69,7 +69,9 @@ class LearnerProfileService:
             raise NotFoundError(f"Learner profile '{profile_id}' was not found.")
         return LearnerProfileResponse.model_validate(profile)
 
-    async def rotate_access_key(self, profile_id: str) -> CreateLearnerProfileResponse:
+    async def rotate_access_key(self, profile_id: str, *, operator_id: str) -> CreateLearnerProfileResponse:
+        if not operator_id.strip():
+            raise ValidationError("operator_id is required.")
         profile = await self._repository.get_by_id(profile_id)
         if profile is None:
             raise NotFoundError(f"Learner profile '{profile_id}' was not found.")
@@ -86,8 +88,8 @@ class LearnerProfileService:
                 event_type="learner_profile.access_key.rotated",
                 resource_type="learner_profile",
                 resource_id=profile_id,
-                actor="operator",
-                event_data={"learner_profile_id": profile_id},
+                actor=operator_id,
+                event_data={"learner_profile_id": profile_id, "operator_id": operator_id},
             )
             await self._db_session.commit()
         except Exception as exc:
@@ -96,9 +98,10 @@ class LearnerProfileService:
                 event_type="learner_profile.access_key.rotate.failed",
                 resource_type="learner_profile",
                 resource_id=profile_id,
-                actor="operator",
+                actor=operator_id,
                 event_data={
                     "learner_profile_id": profile_id,
+                    "operator_id": operator_id,
                     "error": str(exc),
                 },
             )

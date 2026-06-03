@@ -1,7 +1,9 @@
+from dataclasses import dataclass
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_core.application.services.audit import AuditService
-from agent_core.application.services.goal_skill_binding_resolver import GoalSkillBindingResolver
+from agent_core.application.services.goal_skill_binding_resolver import ActiveGoalSkillBinding, GoalSkillBindingResolver
 from agent_core.application.services.long_term_memory_materialization import LongTermMemoryMaterializationService
 from agent_core.application.services.long_term_memory_materialization_replay import (
     LongTermMemoryMaterializationReplayScheduler,
@@ -16,19 +18,43 @@ from agent_core.application.services.reflection_evidence import ReflectionEviden
 from agent_core.application.services.skills import SkillUsageService
 from agent_core.application.services.strategy_cards import StrategyCardService
 from agent_core.application.skills.registry import SkillRegistry
-from agent_core.domain.entities.memory import MemoryEvent
+from agent_core.domain.entities.memory import MemoryEvent, MemoryRetrievalResult
 from agent_core.domain.entities.message import SessionMessage
 from agent_core.domain.entities.session import LearningSession
 from agent_core.domain.entities.skill import SkillResolution
 from agent_core.domain.errors import NotFoundError, ValidationError
 from agent_core.domain.schemas.session import MessageRequest, MessageResponse, MessageTurnMetrics
 from agent_core.infrastructure.db.repositories import SessionMessageRepository, SessionQuizRepository, SessionRepository
-from agent_core.infrastructure.llm.types import HintContext, LLMProvider, SessionLearnerProfile
+from agent_core.infrastructure.llm.types import HintContext, LLMProvider, SessionLearnerProfile, TutorReply
 from agent_core.infrastructure.observability.metrics import (
     observe_embedding_operation,
     observe_llm_operation,
     observe_long_term_memory_materialization,
 )
+
+
+@dataclass(frozen=True)
+class _ChatRuntimeContext:
+    session: LearningSession
+    skills: list[str]
+    skill_resolution: SkillResolution | None
+    history: list[SessionMessage]
+    cross_session_context: list[str]
+    hint_context: HintContext | None
+    retrieval_result: MemoryRetrievalResult
+    profile_retrieval_result: MemoryRetrievalResult
+    long_term_context: list[str]
+    strategy_card: object | None
+    rollout_overlay_payload: dict[str, object] | None
+    skill_binding: ActiveGoalSkillBinding | None
+
+
+@dataclass(frozen=True)
+class _ChatTurnArtifacts:
+    user_message: SessionMessage
+    assistant_message: SessionMessage
+    updated_session: LearningSession
+    turn_metrics: MessageTurnMetrics
 
 
 class ChatService:
@@ -76,6 +102,33 @@ class ChatService:
         payload: MessageRequest,
         commit: bool = True,
     ) -> MessageResponse:
+        context = await self._resolve_context(session_id=session_id, payload=payload, commit=commit)
+        reply = await self._generate_reply(context=context, payload=payload, commit=commit)
+        artifacts = self._build_turn_artifacts(context=context, payload=payload, reply=reply)
+        await self._persist_turn(
+            context=context,
+            payload=payload,
+            reply=reply,
+            artifacts=artifacts,
+            commit=commit,
+        )
+        return MessageResponse(
+            session_id=context.session.id,
+            user_message_id=artifacts.user_message.id,
+            assistant_message_id=artifacts.assistant_message.id,
+            assistant_message=artifacts.assistant_message.content,
+            assistant_payload=reply.payload,
+            skill_trace=context.skills,
+            turn_metrics=artifacts.turn_metrics,
+        )
+
+    async def _resolve_context(
+        self,
+        *,
+        session_id: str,
+        payload: MessageRequest,
+        commit: bool,
+    ) -> _ChatRuntimeContext:
         session = await self._session_repository.get_by_id(session_id)
         if session is None:
             raise NotFoundError(f"Session '{session_id}' was not found.")
@@ -91,8 +144,11 @@ class ChatService:
             limit=8,
             before_id=None,
         )
-        all_sessions = await self._session_repository.list_sessions()
-        past_sessions = [item for item in all_sessions if item.id != session.id]
+        past_sessions = await self._session_repository.list_recent_by_goal(
+            learner_goal_id=session.learner_goal_id,
+            limit=10,
+            exclude_id=session.id,
+        )
         cross_session_context = self._build_cross_session_context(past_sessions=past_sessions)
         hint_context = await self._build_hint_context(
             session_id=session.id,
@@ -135,7 +191,7 @@ class ChatService:
                 },
             )
             await self._record_skill_usage(
-                skill_name=skills[0] if skills else ("adaptive_hint" if payload.mode == "hint" else "explain_concept"),
+                skill_name=skills[0],
                 surface=payload.mode,
                 outcome_status="failed",
                 session=session,
@@ -226,27 +282,53 @@ class ChatService:
                 trigger_source=payload.mode,
                 include_staged=True,
             )
-        learner_profile = self._build_learner_profile(
-            session_title=session.title,
-            subject=session.subject,
-            payload=payload,
+        return _ChatRuntimeContext(
+            session=session,
+            skills=skills,
+            skill_resolution=skill_resolution,
             history=history,
-            memory_contexts=[item.summary for item in retrieval_result.memories],
+            cross_session_context=cross_session_context,
+            hint_context=hint_context,
+            retrieval_result=retrieval_result,
+            profile_retrieval_result=profile_retrieval_result,
             long_term_context=long_term_context,
             strategy_card=strategy_card,
             rollout_overlay_payload=dict(rollout_overlay.payload) if rollout_overlay is not None else None,
-            skill_directives=list(skill_binding.runtime_directives.get("skill_directives") or []) if skill_binding is not None else None,
+            skill_binding=skill_binding,
+        )
+
+    async def _generate_reply(
+        self,
+        *,
+        context: _ChatRuntimeContext,
+        payload: MessageRequest,
+        commit: bool,
+    ) -> TutorReply:
+        learner_profile = self._build_learner_profile(
+            session_title=context.session.title,
+            subject=context.session.subject,
+            payload=payload,
+            history=context.history,
+            memory_contexts=[item.summary for item in context.retrieval_result.memories],
+            long_term_context=context.long_term_context,
+            strategy_card=context.strategy_card,
+            rollout_overlay_payload=context.rollout_overlay_payload,
+            skill_directives=(
+                list(context.skill_binding.runtime_directives.get("skill_directives") or [])
+                if context.skill_binding is not None
+                else None
+            ),
         )
         try:
             reply = await self._llm_provider.generate_tutor_reply(
-                session_title=session.title,
-                subject=session.subject,
+                session_title=context.session.title,
+                subject=context.session.subject,
                 learner_message=payload.content,
                 mode=payload.mode,
-                history=history[-8:],
-                memory_contexts=[item.summary for item in retrieval_result.memories],
+                history=context.history[-8:],
+                memory_contexts=[item.summary for item in context.retrieval_result.memories],
                 learner_profile=learner_profile,
-                hint_context=hint_context,
+                hint_context=context.hint_context,
             )
         except Exception as exc:
             observe_llm_operation(
@@ -258,7 +340,7 @@ class ChatService:
             await self._audit_service.record_durable(
                 event_type="llm.chat.failed",
                 resource_type="learning_session",
-                resource_id=session.id,
+                resource_id=context.session.id,
                 actor="system",
                 event_data={
                     "provider": getattr(self._llm_provider, "provider_name", "unknown"),
@@ -267,30 +349,42 @@ class ChatService:
                     "status": "failed",
                     "latency_ms": 0,
                     "retry_count": 0,
-                    "session_id": session.id,
+                    "session_id": context.session.id,
                     "response_shape_valid": False,
                     "usage": None,
                     "error": str(exc),
-                    "history_count": len(history),
-                    "memory_context_count": len(retrieval_result.memories) if "retrieval_result" in locals() else 0,
-                    "cross_session_context_count": len(long_term_context),
+                    "history_count": len(context.history),
+                    "memory_context_count": len(context.retrieval_result.memories),
+                    "cross_session_context_count": len(context.long_term_context),
                 },
             )
             await self._record_skill_usage(
-                skill_name=skills[0],
+                skill_name=context.skills[0],
                 surface=payload.mode,
                 outcome_status="failed",
-                session=session,
+                session=context.session,
                 latency_ms=0,
                 input_summary=payload.content,
                 error_code=type(exc).__name__,
-                resolution=skill_resolution,
-                metadata={
-                    "operation": "chat" if payload.mode == "chat" else "hint",
-                    "history_count": len(history),
-                    "memory_context_count": len(retrieval_result.memories),
-                    "response_shape_valid": False,
-                },
+                resolution=context.skill_resolution,
+                metadata=(
+                    context.skill_binding.with_usage_metadata(
+                        {
+                            "operation": "chat" if payload.mode == "chat" else "hint",
+                            "history_count": len(context.history),
+                            "memory_context_count": len(context.retrieval_result.memories),
+                            "response_shape_valid": False,
+                        },
+                        skill_name=context.skills[0],
+                    )
+                    if context.skill_binding is not None
+                    else {
+                        "operation": "chat" if payload.mode == "chat" else "hint",
+                        "history_count": len(context.history),
+                        "memory_context_count": len(context.retrieval_result.memories),
+                        "response_shape_valid": False,
+                    }
+                ),
             )
             if commit:
                 await self._db_session.commit()
@@ -301,210 +395,272 @@ class ChatService:
             status="completed",
             latency_ms=reply.latency_ms,
         )
+        return reply
 
+    def _build_turn_artifacts(
+        self,
+        *,
+        context: _ChatRuntimeContext,
+        payload: MessageRequest,
+        reply: TutorReply,
+    ) -> _ChatTurnArtifacts:
         user_message = SessionMessage.build(
-            session_id=session.id,
+            session_id=context.session.id,
             role="user",
             content=payload.content,
             mode=payload.mode,
             skill_trace=[],
         )
         assistant_message = SessionMessage.build(
-            session_id=session.id,
+            session_id=context.session.id,
             role="assistant",
             content=reply.content,
             content_payload=reply.payload.model_dump(),
             mode=payload.mode,
-            skill_trace=skills,
+            skill_trace=context.skills,
         )
 
-        updated_session = session.with_message_activity(
+        updated_session = context.session.with_message_activity(
             message_count_delta=2,
             last_activity_at=assistant_message.created_at,
-            summary=self._build_session_summary(session_title=session.title, subject=session.subject, payload=payload),
+            summary=self._build_session_summary(
+                session_title=context.session.title,
+                subject=context.session.subject,
+                payload=payload,
+            ),
         )
         turn_metrics = MessageTurnMetrics(
-            history_count=len(history),
-            memory_context_count=len(retrieval_result.memories),
-            cross_session_context_count=len(long_term_context),
-            hint_level=hint_context.hint_level if hint_context is not None else None,
-            hint_history_count=hint_context.prior_hint_count if hint_context is not None else 0,
-            used_quiz_context=hint_context.reference_answer is not None if hint_context is not None else False,
-            used_error_analysis=bool(hint_context.mistake_analysis) if hint_context is not None else False,
-            retrieval_latency_ms=retrieval_result.latency_ms,
+            history_count=len(context.history),
+            memory_context_count=len(context.retrieval_result.memories),
+            cross_session_context_count=len(context.long_term_context),
+            hint_level=context.hint_context.hint_level if context.hint_context is not None else None,
+            hint_history_count=context.hint_context.prior_hint_count if context.hint_context is not None else 0,
+            used_quiz_context=context.hint_context.reference_answer is not None if context.hint_context is not None else False,
+            used_error_analysis=bool(context.hint_context.mistake_analysis) if context.hint_context is not None else False,
+            retrieval_latency_ms=context.retrieval_result.latency_ms,
             llm_latency_ms=reply.latency_ms,
             llm_retry_count=reply.retry_count,
             response_shape_valid=reply.response_shape_valid,
         )
+        return _ChatTurnArtifacts(
+            user_message=user_message,
+            assistant_message=assistant_message,
+            updated_session=updated_session,
+            turn_metrics=turn_metrics,
+        )
 
+    async def _persist_turn(
+        self,
+        *,
+        context: _ChatRuntimeContext,
+        payload: MessageRequest,
+        reply: TutorReply,
+        artifacts: _ChatTurnArtifacts,
+        commit: bool,
+    ) -> None:
         try:
-            await self._message_repository.create(user_message)
-            await self._message_repository.create(assistant_message)
-            await self._session_repository.update(updated_session)
+            await self._message_repository.create(artifacts.user_message)
+            await self._message_repository.create(artifacts.assistant_message)
+            await self._session_repository.update(artifacts.updated_session)
             memory_events = await self._memory_service.record_learning_memories(
-                session_id=session.id,
-                learner_profile_id=session.learner_profile_id,
+                session_id=context.session.id,
+                learner_profile_id=context.session.learner_profile_id,
                 learner_message=payload.content,
-                assistant_message=assistant_message.content,
-                source_message_id=user_message.id,
+                assistant_message=artifacts.assistant_message.content,
+                source_message_id=artifacts.user_message.id,
                 mode=payload.mode,
-                subject=session.subject,
-                session_title=session.title,
+                subject=context.session.subject,
+                session_title=context.session.title,
             )
             if self._long_term_memory_materialization_service is not None:
                 await self._materialize_chat_turn_isolated(
-                    session=session,
+                    session=context.session,
                     learner_message=payload.content,
-                    assistant_message=assistant_message.content,
-                    source_message_id=user_message.id,
-                    assistant_message_id=assistant_message.id,
+                    assistant_message=artifacts.assistant_message.content,
+                    source_message_id=artifacts.user_message.id,
+                    assistant_message_id=artifacts.assistant_message.id,
                     mode=payload.mode,
                     memory_events=memory_events,
                 )
-            await self._audit_service.record(
-                event_type="session.message.user_created",
-                resource_type="learning_session",
-                resource_id=session.id,
-                actor="learner",
-                event_data={
-                    "message_id": user_message.id,
-                    "role": "user",
-                    "mode": payload.mode,
-                    "hint_level": hint_context.hint_level if hint_context is not None else None,
-                    "learner_profile_id": session.learner_profile_id,
-                },
-            )
-            await self._audit_service.record(
-                event_type="embedding.query.completed",
-                resource_type="learning_session",
-                resource_id=session.id,
-                actor="system",
-                event_data={
-                    "provider": retrieval_result.provider,
-                    "model": retrieval_result.model,
-                    "operation": "memory_retrieval",
-                    "status": "completed",
-                    "latency_ms": retrieval_result.latency_ms,
-                    "retry_count": 0,
-                    "session_id": session.id,
-                    "response_shape_valid": True,
-                    "usage": None,
-                    "candidate_count": retrieval_result.candidate_count,
-                    "retrieved_count": len(retrieval_result.memories),
-                    "history_count": len(history),
-                    "cross_session_context_count": len(long_term_context),
-                    "hint_level": hint_context.hint_level if hint_context is not None else None,
-                    "profile_retrieved_count": len(profile_retrieval_result.memories),
-                },
-            )
-            await self._audit_service.record(
-                event_type="llm.chat.completed",
-                resource_type="learning_session",
-                resource_id=session.id,
-                actor="system",
-                event_data={
-                    "provider": reply.provider,
-                    "model": reply.model,
-                    "operation": "chat" if payload.mode == "chat" else "hint",
-                    "status": "completed",
-                    "latency_ms": reply.latency_ms,
-                    "retry_count": reply.retry_count,
-                    "session_id": session.id,
-                    "response_shape_valid": reply.response_shape_valid,
-                    "usage": None,
-                    "history_count": len(history),
-                    "memory_context_count": len(retrieval_result.memories),
-                    "cross_session_context_count": len(long_term_context),
-                    "hint_level": hint_context.hint_level if hint_context is not None else None,
-                    "hint_history_count": hint_context.prior_hint_count if hint_context is not None else 0,
-                    "used_quiz_context": hint_context.reference_answer is not None if hint_context is not None else False,
-                    "used_error_analysis": bool(hint_context.mistake_analysis) if hint_context is not None else False,
-                    "direct_answer_given": getattr(reply.payload, "direct_answer_given", False),
-                    "learner_profile_id": session.learner_profile_id,
-                },
-            )
-            await self._audit_service.record(
-                event_type="memory.events.recorded",
-                resource_type="learning_session",
-                resource_id=session.id,
-                actor="system",
-                event_data={
-                    "session_id": session.id,
-                    "learner_profile_id": session.learner_profile_id,
-                    "count": len(memory_events),
-                    "memory_scopes": [item.memory_scope for item in memory_events],
-                    "memory_levels": [item.memory_level for item in memory_events],
-                },
-            )
-            await self._audit_service.record(
-                event_type="session.message.assistant_created",
-                resource_type="learning_session",
-                resource_id=session.id,
-                actor="system",
-                event_data={
-                    "message_id": assistant_message.id,
-                    "role": "assistant",
-                    "mode": payload.mode,
-                    "skill_trace": skills,
-                    "hint_level": hint_context.hint_level if hint_context is not None else None,
-                    "learner_profile_id": session.learner_profile_id,
-                },
+            await self._record_turn_audits(
+                context=context,
+                payload=payload,
+                reply=reply,
+                artifacts=artifacts,
+                memory_events=memory_events,
             )
             await self._record_skill_usage(
-                skill_name=skills[0],
+                skill_name=context.skills[0],
                 surface=payload.mode,
                 outcome_status="completed",
-                session=session,
+                session=context.session,
                 latency_ms=reply.latency_ms,
                 input_summary=payload.content,
-                output_summary=assistant_message.content,
-                resolution=skill_resolution,
-                metadata={
-                    "user_message_id": user_message.id,
-                    "assistant_message_id": assistant_message.id,
-                    "response_shape_valid": reply.response_shape_valid,
-                    "retry_count": reply.retry_count,
-                    "provider": reply.provider,
-                    "model": reply.model,
-                },
+                output_summary=artifacts.assistant_message.content,
+                resolution=context.skill_resolution,
+                metadata=(
+                    context.skill_binding.with_usage_metadata(
+                        {
+                            "user_message_id": artifacts.user_message.id,
+                            "assistant_message_id": artifacts.assistant_message.id,
+                            "response_shape_valid": reply.response_shape_valid,
+                            "retry_count": reply.retry_count,
+                            "provider": reply.provider,
+                            "model": reply.model,
+                        },
+                        skill_name=context.skills[0],
+                    )
+                    if context.skill_binding is not None
+                    else {
+                        "user_message_id": artifacts.user_message.id,
+                        "assistant_message_id": artifacts.assistant_message.id,
+                        "response_shape_valid": reply.response_shape_valid,
+                        "retry_count": reply.retry_count,
+                        "provider": reply.provider,
+                        "model": reply.model,
+                    }
+                ),
             )
-            if (
-                self._reflection_evidence_service is not None
-                and session.learner_goal_id is not None
-            ):
-                await self._reflection_evidence_service.derive_from_session_turn(
-                    learner_profile_id=session.learner_profile_id,
-                    learner_goal_id=session.learner_goal_id,
-                    session_id=session.id,
-                    turn_metrics=turn_metrics.model_dump(),
-                    learner_message=user_message,
-                )
-            if (
-                self._rollout_observation_scheduler is not None
-                and session.learner_goal_id is not None
-                and payload.mode in {"chat", "hint"}
-            ):
-                await self._rollout_observation_scheduler.schedule_active(
-                    learner_goal_id=session.learner_goal_id,
-                    surface=payload.mode,
-                    trigger_source="session_turn_completed",
-                    source_ref=assistant_message.id,
-                )
+            await self._post_turn_side_effects(context=context, artifacts=artifacts, payload=payload)
             if commit:
                 await self._db_session.commit()
         except Exception:
             await self._db_session.rollback()
             raise
 
-        return MessageResponse(
-            session_id=session.id,
-            user_message_id=user_message.id,
-            assistant_message_id=assistant_message.id,
-            assistant_message=assistant_message.content,
-            assistant_payload=reply.payload,
-            skill_trace=skills,
-            turn_metrics=turn_metrics,
+    async def _record_turn_audits(
+        self,
+        *,
+        context: _ChatRuntimeContext,
+        payload: MessageRequest,
+        reply: TutorReply,
+        artifacts: _ChatTurnArtifacts,
+        memory_events: list[MemoryEvent],
+    ) -> None:
+        await self._audit_service.record(
+            event_type="session.message.user_created",
+            resource_type="learning_session",
+            resource_id=context.session.id,
+            actor="learner",
+            event_data={
+                "message_id": artifacts.user_message.id,
+                "role": "user",
+                "mode": payload.mode,
+                "hint_level": context.hint_context.hint_level if context.hint_context is not None else None,
+                "learner_profile_id": context.session.learner_profile_id,
+            },
         )
+        await self._audit_service.record(
+            event_type="embedding.query.completed",
+            resource_type="learning_session",
+            resource_id=context.session.id,
+            actor="system",
+            event_data={
+                "provider": context.retrieval_result.provider,
+                "model": context.retrieval_result.model,
+                "operation": "memory_retrieval",
+                "status": "completed",
+                "latency_ms": context.retrieval_result.latency_ms,
+                "retry_count": 0,
+                "session_id": context.session.id,
+                "response_shape_valid": True,
+                "usage": None,
+                "candidate_count": context.retrieval_result.candidate_count,
+                "retrieved_count": len(context.retrieval_result.memories),
+                "history_count": len(context.history),
+                "cross_session_context_count": len(context.long_term_context),
+                "hint_level": context.hint_context.hint_level if context.hint_context is not None else None,
+                "profile_retrieved_count": len(context.profile_retrieval_result.memories),
+            },
+        )
+        await self._audit_service.record(
+            event_type="llm.chat.completed",
+            resource_type="learning_session",
+            resource_id=context.session.id,
+            actor="system",
+            event_data={
+                "provider": reply.provider,
+                "model": reply.model,
+                "operation": "chat" if payload.mode == "chat" else "hint",
+                "status": "completed",
+                "latency_ms": reply.latency_ms,
+                "retry_count": reply.retry_count,
+                "session_id": context.session.id,
+                "response_shape_valid": reply.response_shape_valid,
+                "usage": None,
+                "history_count": len(context.history),
+                "memory_context_count": len(context.retrieval_result.memories),
+                "cross_session_context_count": len(context.long_term_context),
+                "hint_level": context.hint_context.hint_level if context.hint_context is not None else None,
+                "hint_history_count": context.hint_context.prior_hint_count if context.hint_context is not None else 0,
+                "used_quiz_context": (
+                    context.hint_context.reference_answer is not None
+                    if context.hint_context is not None
+                    else False
+                ),
+                "used_error_analysis": (
+                    bool(context.hint_context.mistake_analysis)
+                    if context.hint_context is not None
+                    else False
+                ),
+                "direct_answer_given": getattr(reply.payload, "direct_answer_given", False),
+                "learner_profile_id": context.session.learner_profile_id,
+            },
+        )
+        await self._audit_service.record(
+            event_type="memory.events.recorded",
+            resource_type="learning_session",
+            resource_id=context.session.id,
+            actor="system",
+            event_data={
+                "session_id": context.session.id,
+                "learner_profile_id": context.session.learner_profile_id,
+                "count": len(memory_events),
+                "memory_scopes": [item.memory_scope for item in memory_events],
+                "memory_levels": [item.memory_level for item in memory_events],
+            },
+        )
+        await self._audit_service.record(
+            event_type="session.message.assistant_created",
+            resource_type="learning_session",
+            resource_id=context.session.id,
+            actor="system",
+            event_data={
+                "message_id": artifacts.assistant_message.id,
+                "role": "assistant",
+                "mode": payload.mode,
+                "skill_trace": context.skills,
+                "hint_level": context.hint_context.hint_level if context.hint_context is not None else None,
+                "learner_profile_id": context.session.learner_profile_id,
+            },
+        )
+
+    async def _post_turn_side_effects(
+        self,
+        *,
+        context: _ChatRuntimeContext,
+        artifacts: _ChatTurnArtifacts,
+        payload: MessageRequest,
+    ) -> None:
+        if self._reflection_evidence_service is not None and context.session.learner_goal_id is not None:
+            await self._reflection_evidence_service.derive_from_session_turn(
+                learner_profile_id=context.session.learner_profile_id,
+                learner_goal_id=context.session.learner_goal_id,
+                session_id=context.session.id,
+                turn_metrics=artifacts.turn_metrics.model_dump(),
+                learner_message=artifacts.user_message,
+            )
+        if (
+            self._rollout_observation_scheduler is not None
+            and context.session.learner_goal_id is not None
+            and payload.mode in {"chat", "hint"}
+        ):
+            await self._rollout_observation_scheduler.schedule_active(
+                learner_goal_id=context.session.learner_goal_id,
+                surface=payload.mode,
+                trigger_source="session_turn_completed",
+                source_ref=artifacts.assistant_message.id,
+            )
 
     async def _resolve_skill_for_runtime(
         self,

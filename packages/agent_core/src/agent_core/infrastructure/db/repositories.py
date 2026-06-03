@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import and_, case, desc, distinct, func, or_, select, update
+from sqlalchemy import Integer, and_, cast, desc, distinct, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -135,6 +135,29 @@ class SessionRepository:
         )
         if limit is not None:
             query = query.limit(limit)
+        result = await self._session.execute(query)
+        return [self._to_entity(model) for model in result.scalars().all()]
+
+    async def list_recent_by_goal(
+        self,
+        learner_goal_id: str | None,
+        *,
+        limit: int = 10,
+        exclude_id: str | None = None,
+    ) -> list[LearningSession]:
+        if learner_goal_id is None:
+            return []
+        query = (
+            select(LearningSessionModel)
+            .where(LearningSessionModel.learner_goal_id == learner_goal_id)
+            .order_by(
+                desc(LearningSessionModel.last_activity_at),
+                desc(LearningSessionModel.created_at),
+            )
+            .limit(limit)
+        )
+        if exclude_id is not None:
+            query = query.where(LearningSessionModel.id != exclude_id)
         result = await self._session.execute(query)
         return [self._to_entity(model) for model in result.scalars().all()]
 
@@ -294,6 +317,34 @@ class SkillArtifactRepository:
         )
         await self._session.flush()
 
+    async def update(self, entity: SkillArtifact) -> None:
+        model = await self._session.get(SkillArtifactModel, entity.id)
+        if model is None:
+            return
+        model.name = entity.name
+        model.version = entity.version
+        model.lineage_id = entity.lineage_id
+        model.parent_artifact_id = entity.parent_artifact_id
+        model.supersedes_artifact_id = entity.supersedes_artifact_id
+        model.skill_type = entity.skill_type
+        model.scope = entity.scope
+        model.status = entity.status
+        model.description = entity.description
+        model.definition = dict(entity.definition)
+        model.runtime_directives = dict(entity.runtime_directives)
+        model.tool_plan = [dict(item) for item in entity.tool_plan]
+        model.compatibility_contract = dict(entity.compatibility_contract)
+        model.source_reflection_ids = list(entity.source_reflection_ids)
+        model.source_memory_ids = list(entity.source_memory_ids)
+        model.source_proposal_id = entity.source_proposal_id
+        model.quality_score = entity.quality_score
+        model.created_by = entity.created_by
+        model.approved_by = entity.approved_by
+        model.approved_at = entity.approved_at
+        model.created_at = entity.created_at
+        model.updated_at = entity.updated_at
+        await self._session.flush()
+
     async def get_by_id(self, artifact_id: str) -> SkillArtifact | None:
         model = await self._session.get(SkillArtifactModel, artifact_id)
         if model is None:
@@ -312,18 +363,20 @@ class SkillArtifactRepository:
         return self._to_entity(model)
 
     async def get_selectable_by_name_scope(self, *, name: str, scope: str) -> SkillArtifact | None:
+        stable = await self._get_latest_by_name_scope_status(name=name, scope=scope, status="stable")
+        if stable is not None:
+            return stable
+        return await self._get_latest_by_name_scope_status(name=name, scope=scope, status="active")
+
+    async def _get_latest_by_name_scope_status(self, *, name: str, scope: str, status: str) -> SkillArtifact | None:
         result = await self._session.execute(
             select(SkillArtifactModel)
             .where(
                 SkillArtifactModel.name == name,
                 SkillArtifactModel.scope == scope,
-                SkillArtifactModel.status.in_(["active", "stable"]),
+                SkillArtifactModel.status == status,
             )
-            .order_by(
-                desc(case((SkillArtifactModel.status == "stable", 1), else_=0)),
-                desc(SkillArtifactModel.updated_at),
-                desc(SkillArtifactModel.id),
-            )
+            .order_by(desc(SkillArtifactModel.updated_at), desc(SkillArtifactModel.id))
         )
         model = result.scalars().first()
         if model is None:
@@ -376,6 +429,16 @@ class SkillArtifactRepository:
             .limit(limit)
         )
         return [self._to_entity(model) for model in result.scalars().all()]
+
+    async def max_candidate_patch_version(self, name: str) -> int:
+        result = await self._session.execute(
+            select(func.max(cast(func.substr(SkillArtifactModel.version, 5), Integer))).where(
+                SkillArtifactModel.name == name,
+                SkillArtifactModel.version.like("0.1.%"),
+            )
+        )
+        max_patch = result.scalar_one()
+        return int(max_patch) if max_patch is not None else -1
 
     async def list_by_lineage(self, lineage_id: str, *, limit: int = 50) -> list[SkillArtifact]:
         result = await self._session.execute(
@@ -464,16 +527,20 @@ class SkillUsageEventRepository:
         self,
         *,
         artifact_id: str | None = None,
+        skill_name: str | None = None,
         learner_goal_id: str | None = None,
         session_id: str | None = None,
         surface: str | None = None,
         outcome_status: str | None = None,
         resolver_status: str | None = None,
+        created_at_from: datetime | None = None,
         limit: int = 50,
     ) -> list[SkillUsageEvent]:
         query = select(SkillUsageEventModel)
         if artifact_id is not None:
             query = query.where(SkillUsageEventModel.skill_artifact_id == artifact_id)
+        if skill_name is not None:
+            query = query.where(SkillUsageEventModel.skill_name == skill_name)
         if learner_goal_id is not None:
             query = query.where(SkillUsageEventModel.learner_goal_id == learner_goal_id)
         if session_id is not None:
@@ -484,6 +551,8 @@ class SkillUsageEventRepository:
             query = query.where(SkillUsageEventModel.outcome_status == outcome_status)
         if resolver_status is not None:
             query = query.where(SkillUsageEventModel.resolver_status == resolver_status)
+        if created_at_from is not None:
+            query = query.where(SkillUsageEventModel.created_at >= created_at_from)
         result = await self._session.execute(
             query.order_by(desc(SkillUsageEventModel.created_at), desc(SkillUsageEventModel.id)).limit(limit)
         )
@@ -3373,6 +3442,9 @@ class ReflectionProposalRepository:
         self,
         *,
         statuses: set[str] | None = None,
+        learner_goal_id: str | None = None,
+        proposal_type: str | None = None,
+        target_scope: str | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> list[ReflectionProposal]:
@@ -3381,6 +3453,12 @@ class ReflectionProposalRepository:
             query = query.where(ReflectionProposalModel.status.in_(sorted(statuses)))
         else:
             query = query.where(ReflectionProposalModel.status.in_(["proposed", "sandbox_queued", "sandbox_running", "sandbox_completed"]))
+        if learner_goal_id is not None:
+            query = query.where(ReflectionProposalModel.learner_goal_id == learner_goal_id)
+        if proposal_type is not None:
+            query = query.where(ReflectionProposalModel.proposal_type == proposal_type)
+        if target_scope is not None:
+            query = query.where(ReflectionProposalModel.target_scope == target_scope)
         query = query.order_by(
             desc(ReflectionProposalModel.priority_score),
             desc(ReflectionProposalModel.created_at),
@@ -3389,12 +3467,25 @@ class ReflectionProposalRepository:
         result = await self._session.execute(query)
         return [self._to_entity(model) for model in result.scalars().all()]
 
-    async def count_queue(self, *, statuses: set[str] | None = None) -> int:
+    async def count_queue(
+        self,
+        *,
+        statuses: set[str] | None = None,
+        learner_goal_id: str | None = None,
+        proposal_type: str | None = None,
+        target_scope: str | None = None,
+    ) -> int:
         query = select(func.count()).select_from(ReflectionProposalModel)
         if statuses:
             query = query.where(ReflectionProposalModel.status.in_(sorted(statuses)))
         else:
             query = query.where(ReflectionProposalModel.status.in_(["proposed", "sandbox_queued", "sandbox_running", "sandbox_completed"]))
+        if learner_goal_id is not None:
+            query = query.where(ReflectionProposalModel.learner_goal_id == learner_goal_id)
+        if proposal_type is not None:
+            query = query.where(ReflectionProposalModel.proposal_type == proposal_type)
+        if target_scope is not None:
+            query = query.where(ReflectionProposalModel.target_scope == target_scope)
         result = await self._session.execute(query)
         return int(result.scalar_one())
 

@@ -1674,7 +1674,7 @@ async def test_skill_package_rollout_creates_goal_skill_binding():
         change_summary="Create quiz skill package.",
         structured_patch_payload={
             "artifact_kind": "declarative_skill_package",
-            "skill_name": "quiz_knowledge_gap",
+            "skill_name": "create_quiz",
             "bundle_id": "bundle-1",
             "surface": "quiz",
             "match_rules": {"required_root_causes": ["knowledge_gap"]},

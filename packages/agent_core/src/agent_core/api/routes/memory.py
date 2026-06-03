@@ -315,7 +315,7 @@ async def suppress_memory(
     memory_type: str,
     memory_id: str,
     payload: SuppressMemoryRequest,
-    _: str = Depends(require_operator_api_key),
+    operator_id: str = Depends(require_operator_api_key),
     session: AsyncSession = Depends(get_db_session),
 ):
     service = get_memory_service(session)
@@ -324,7 +324,7 @@ async def suppress_memory(
         memory_id=memory_id,
         reason_code=payload.reason_code,
         note=payload.note,
-        actor_id="operator",
+        actor_id=operator_id,
     )
     await session.commit()
     if memory_type == "knowledge":
@@ -337,7 +337,7 @@ async def restore_memory(
     memory_type: str,
     memory_id: str,
     payload: RestoreMemoryRequest,
-    _: str = Depends(require_operator_api_key),
+    operator_id: str = Depends(require_operator_api_key),
     session: AsyncSession = Depends(get_db_session),
 ):
     service = get_memory_service(session)
@@ -346,7 +346,7 @@ async def restore_memory(
         memory_id=memory_id,
         restore_to_status=payload.restore_to_status,
         reason=payload.reason,
-        actor_id="operator",
+        actor_id=operator_id,
     )
     await session.commit()
     if memory_type == "knowledge":
@@ -359,7 +359,7 @@ async def annotate_memory(
     memory_type: str,
     memory_id: str,
     payload: AnnotateMemoryRequest,
-    _: str = Depends(require_operator_api_key),
+    operator_id: str = Depends(require_operator_api_key),
     session: AsyncSession = Depends(get_db_session),
 ) -> MemoryAnnotationResponse:
     service = get_memory_service(session)
@@ -368,7 +368,7 @@ async def annotate_memory(
         memory_id=memory_id,
         annotation_code=payload.annotation_code,
         note=payload.note,
-        actor_id="operator",
+        actor_id=operator_id,
     )
     await session.commit()
     return MemoryAnnotationResponse.model_validate(annotation)

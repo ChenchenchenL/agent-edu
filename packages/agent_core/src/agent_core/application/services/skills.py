@@ -1,16 +1,25 @@
 from __future__ import annotations
 
 from hashlib import sha256
-import re
 from typing import Any
 
 from agent_core.application.services.audit import AuditService
 from agent_core.application.skills.registry import SkillRegistry
-from agent_core.domain.entities.reflection_closure import ReflectionProposal
+from agent_core.domain.entities.reflection_closure import (
+    GoalSkillBinding,
+    ReflectionProposal,
+    ReflectionProposalEvaluation,
+    ReflectionProposalRollout,
+    ReflectionProposalRolloutObservation,
+)
 from agent_core.domain.entities.skill import SkillArtifact, SkillResolution, SkillUsageEvent
 from agent_core.domain.errors import NotFoundError, ValidationError
+from agent_core.domain.value_objects.pagination import bounded_limit
 from agent_core.infrastructure.db.repositories import (
+    GoalSkillBindingRepository,
     ReflectionProposalEvaluationRepository,
+    ReflectionProposalRolloutObservationRepository,
+    ReflectionProposalRolloutRepository,
     ReflectionProposalRepository,
     SkillArtifactRepository,
     SkillUsageEventRepository,
@@ -19,10 +28,6 @@ from agent_core.infrastructure.db.repositories import (
 
 ALLOWED_SKILL_PACKAGE_TOOLS = {"review_scheduling", "assessment_generation", "partial_replan"}
 CANDIDATE_MIN_SCORE_DELTA = 0.1
-
-
-def _bounded_limit(limit: int) -> int:
-    return max(1, min(limit, 200))
 
 
 class SkillCatalogService:
@@ -51,7 +56,7 @@ class SkillCatalogService:
             name=name,
             scope=scope,
             lineage_id=lineage_id,
-            limit=_bounded_limit(limit),
+            limit=bounded_limit(limit),
         )
 
     async def get_artifact(self, artifact_id: str) -> SkillArtifact:
@@ -64,7 +69,7 @@ class SkillCatalogService:
         artifact = await self.get_artifact(artifact_id)
         return await self._artifact_repository.list_by_lineage(
             artifact.lineage_id,
-            limit=_bounded_limit(limit),
+            limit=bounded_limit(limit),
         )
 
 
@@ -90,7 +95,11 @@ class SkillCandidateService:
     ) -> SkillArtifact:
         existing = await self._artifact_repository.get_by_source_proposal_id(proposal_id)
         if existing is not None:
-            await self._audit_candidate(existing, event_type="skill.artifact.candidate_reused")
+            await self._audit_candidate(
+                existing,
+                event_type="skill.artifact.candidate_reused",
+                operator_id=operator_id,
+            )
             return existing
 
         proposal = await self._proposal_repository.get_by_id(proposal_id)
@@ -99,8 +108,7 @@ class SkillCandidateService:
         evaluation = await self._evaluation_repository.get_by_proposal(proposal_id)
         self._validate_candidate_source(
             proposal=proposal,
-            evaluation_status=evaluation.evaluation_status if evaluation else None,
-            score_delta=evaluation.score_delta if evaluation else None,
+            evaluation=evaluation,
         )
         payload = self._validated_payload(proposal)
         skill_name = str(payload["skill_name"])
@@ -150,16 +158,15 @@ class SkillCandidateService:
     def _validate_candidate_source(
         *,
         proposal: ReflectionProposal,
-        evaluation_status: str | None,
-        score_delta: float | None,
+        evaluation: ReflectionProposalEvaluation | None,
     ) -> None:
         if proposal.proposal_type != "skill_package":
             raise ValidationError("Only skill_package proposals can create skill candidates.")
         if proposal.status != "approved":
             raise ValidationError("Only approved skill_package proposals can create skill candidates.")
-        if evaluation_status != "effective":
+        if evaluation is None or evaluation.evaluation_status != "effective":
             raise ValidationError("Skill candidate creation requires an effective evaluation.")
-        if score_delta is None or score_delta < CANDIDATE_MIN_SCORE_DELTA:
+        if evaluation.score_delta is None or evaluation.score_delta < CANDIDATE_MIN_SCORE_DELTA:
             raise ValidationError("Skill candidate creation requires sufficient evaluation score_delta.")
 
     @staticmethod
@@ -196,12 +203,7 @@ class SkillCandidateService:
         }
 
     async def _next_candidate_version(self, name: str) -> str:
-        artifacts = await self._artifact_repository.list_by_name(name, limit=200)
-        max_patch = -1
-        for artifact in artifacts:
-            match = re.fullmatch(r"0\.1\.(\d+)", artifact.version)
-            if match is not None:
-                max_patch = max(max_patch, int(match.group(1)))
+        max_patch = await self._artifact_repository.max_candidate_patch_version(name)
         return f"0.1.{max_patch + 1}"
 
     @staticmethod
@@ -231,7 +233,7 @@ class SkillCandidateService:
             event_type=event_type,
             resource_type="skill_artifact",
             resource_id=artifact.id,
-            actor="system",
+            actor=operator_id or "system",
             event_data={
                 "artifact_id": artifact.id,
                 "skill_name": artifact.name,
@@ -243,6 +245,342 @@ class SkillCandidateService:
                 "source_memory_ids": artifact.source_memory_ids,
                 "quality_score": artifact.quality_score,
                 "operator_id": operator_id,
+            },
+        )
+
+
+class SkillArtifactLifecycleService:
+    def __init__(
+        self,
+        *,
+        artifact_repository: SkillArtifactRepository,
+        proposal_repository: ReflectionProposalRepository,
+        evaluation_repository: ReflectionProposalEvaluationRepository,
+        rollout_repository: ReflectionProposalRolloutRepository,
+        rollout_observation_repository: ReflectionProposalRolloutObservationRepository,
+        goal_skill_binding_repository: GoalSkillBindingRepository,
+        usage_repository: SkillUsageEventRepository,
+        skill_registry: SkillRegistry,
+        audit_service: AuditService,
+    ) -> None:
+        self._artifact_repository = artifact_repository
+        self._proposal_repository = proposal_repository
+        self._evaluation_repository = evaluation_repository
+        self._rollout_repository = rollout_repository
+        self._rollout_observation_repository = rollout_observation_repository
+        self._goal_skill_binding_repository = goal_skill_binding_repository
+        self._usage_repository = usage_repository
+        self._skill_registry = skill_registry
+        self._audit_service = audit_service
+
+    async def stage_candidate(
+        self,
+        *,
+        artifact_id: str,
+        operator_id: str,
+        reason_code: str,
+        reason_note: str | None,
+    ) -> SkillArtifact:
+        if not operator_id.strip():
+            raise ValidationError("operator_id is required.")
+        if not reason_code.strip():
+            raise ValidationError("reason_code is required.")
+
+        artifact = await self._artifact_repository.get_by_id(artifact_id)
+        if artifact is None:
+            raise NotFoundError(f"Skill artifact '{artifact_id}' was not found.")
+        if artifact.status == "staged":
+            await self._audit_stage(
+                artifact,
+                event_type="skill.artifact.stage_reused",
+                operator_id=operator_id,
+                reason_code=reason_code,
+                reason_note=reason_note,
+                evaluation_id=None,
+                score_delta=None,
+            )
+            return artifact
+        if artifact.status != "candidate":
+            raise ValidationError("Only candidate skill artifacts can be staged.")
+        if artifact.source_proposal_id is None:
+            raise ValidationError("Skill artifact staging requires a source proposal.")
+
+        proposal = await self._proposal_repository.get_by_id(artifact.source_proposal_id)
+        if proposal is None:
+            raise ValidationError("Skill artifact staging requires an existing source proposal.")
+        evaluation = await self._evaluation_repository.get_by_proposal(proposal.id)
+        SkillCandidateService._validate_candidate_source(
+            proposal=proposal,
+            evaluation=evaluation,
+        )
+        payload = SkillCandidateService._validated_payload(proposal)
+        self._validate_artifact_against_source(artifact, payload)
+
+        staged = artifact.mark_staged()
+        await self._artifact_repository.update(staged)
+        await self._audit_stage(
+            staged,
+            event_type="skill.artifact.staged",
+            operator_id=operator_id,
+            reason_code=reason_code,
+            reason_note=reason_note,
+            evaluation_id=evaluation.id if evaluation else None,
+            score_delta=evaluation.score_delta if evaluation else None,
+        )
+        return staged
+
+    async def activate_staged(
+        self,
+        *,
+        artifact_id: str,
+        operator_id: str,
+        reason_code: str,
+        reason_note: str | None,
+    ) -> SkillArtifact:
+        if not operator_id.strip():
+            raise ValidationError("operator_id is required.")
+        if not reason_code.strip():
+            raise ValidationError("reason_code is required.")
+
+        artifact = await self._artifact_repository.get_by_id(artifact_id)
+        if artifact is None:
+            raise NotFoundError(f"Skill artifact '{artifact_id}' was not found.")
+        if artifact.status == "active":
+            await self._audit_activate(
+                artifact,
+                event_type="skill.artifact.activate_reused",
+                operator_id=operator_id,
+                reason_code=reason_code,
+                reason_note=reason_note,
+                evaluation_id=None,
+                score_delta=None,
+                rollout_id=None,
+                binding_id=None,
+                observation_id=None,
+                usage_event_ids=[],
+            )
+            return artifact
+        if artifact.status != "staged":
+            raise ValidationError("Only staged skill artifacts can be activated.")
+        if not self._skill_registry.has_skill(artifact.name):
+            raise ValidationError("Skill artifact activation requires an enabled skill name.")
+
+        existing_selectable = await self._artifact_repository.get_selectable_by_name_scope(
+            name=artifact.name,
+            scope=artifact.scope,
+        )
+        if existing_selectable is not None and existing_selectable.id != artifact.id:
+            raise ValidationError("A selectable skill artifact already exists for this name and scope.")
+        if artifact.source_proposal_id is None:
+            raise ValidationError("Skill artifact activation requires a source proposal.")
+
+        proposal = await self._proposal_repository.get_by_id(artifact.source_proposal_id)
+        if proposal is None:
+            raise ValidationError("Skill artifact activation requires an existing source proposal.")
+        evaluation = await self._evaluation_repository.get_by_proposal(proposal.id)
+        SkillCandidateService._validate_candidate_source(
+            proposal=proposal,
+            evaluation=evaluation,
+        )
+        payload = SkillCandidateService._validated_payload(proposal)
+        self._validate_artifact_against_source(artifact, payload)
+        rollout, binding, observation = await self._validate_activation_rollout_evidence(artifact)
+        usage_events = await self._activation_usage_events(
+            artifact=artifact,
+            proposal_id=proposal.id,
+            rollout_id=rollout.id,
+            binding_id=binding.id,
+            learner_goal_id=rollout.learner_goal_id,
+            activated_at=rollout.activated_at,
+        )
+        if not usage_events:
+            raise ValidationError("Skill artifact activation requires successful attributed rollout usage.")
+
+        activated = artifact.mark_active(operator_id=operator_id)
+        await self._artifact_repository.update(activated)
+        await self._audit_activate(
+            activated,
+            event_type="skill.artifact.activated",
+            operator_id=operator_id,
+            reason_code=reason_code,
+            reason_note=reason_note,
+            evaluation_id=evaluation.id if evaluation else None,
+            score_delta=evaluation.score_delta if evaluation else None,
+            rollout_id=rollout.id,
+            binding_id=binding.id,
+            observation_id=observation.id,
+            usage_event_ids=[item.id for item in usage_events],
+        )
+        return activated
+
+    @staticmethod
+    def _validate_artifact_against_source(artifact: SkillArtifact, payload: dict[str, object]) -> None:
+        if not artifact.source_reflection_ids:
+            raise ValidationError("Skill artifact staging requires source reflections.")
+        if artifact.name != payload["skill_name"] or artifact.scope != payload["surface"]:
+            raise ValidationError("Skill artifact does not match its source proposal.")
+        if artifact.runtime_directives != payload["runtime_directives"]:
+            raise ValidationError("Skill artifact runtime_directives do not match its source proposal.")
+        if artifact.tool_plan != payload["tool_plan"]:
+            raise ValidationError("Skill artifact tool_plan does not match its source proposal.")
+        if artifact.definition.get("match_rules") != payload["match_rules"]:
+            raise ValidationError("Skill artifact match_rules do not match its source proposal.")
+        if artifact.definition.get("scoring_contract") != payload["scoring_contract"]:
+            raise ValidationError("Skill artifact scoring_contract does not match its source proposal.")
+
+        contract = artifact.compatibility_contract
+        surfaces = contract.get("surfaces")
+        if contract.get("dynamic_execution") is not False:
+            raise ValidationError("Skill artifact staging requires static compatibility contract execution.")
+        if not isinstance(surfaces, list) or not all(isinstance(item, str) for item in surfaces):
+            raise ValidationError("Skill artifact compatibility contract surfaces are invalid.")
+        if surfaces != [artifact.scope]:
+            raise ValidationError("In V2, artifact surfaces must exactly match artifact scope.")
+        if contract.get("implementation_binding") != artifact.name:
+            raise ValidationError("Skill artifact implementation binding must match artifact name.")
+
+    async def _validate_activation_rollout_evidence(
+        self,
+        artifact: SkillArtifact,
+    ) -> tuple[ReflectionProposalRollout, GoalSkillBinding, ReflectionProposalRolloutObservation]:
+        if artifact.source_proposal_id is None:
+            raise ValidationError("Skill artifact activation requires a source proposal.")
+        rollout = await self._rollout_repository.get_by_proposal(artifact.source_proposal_id)
+        if rollout is None:
+            raise ValidationError("Skill artifact activation requires rollout evidence.")
+        if rollout.status != "rolled_out":
+            raise ValidationError("Skill artifact activation requires a promoted rollout.")
+        if rollout.surface != artifact.scope:
+            raise ValidationError("Skill artifact rollout surface does not match artifact scope.")
+        binding = await self._goal_skill_binding_repository.get_by_rollout(rollout.id)
+        if binding is None:
+            raise ValidationError("Skill artifact activation requires a rollout skill binding.")
+        if binding.status != "rolled_out":
+            raise ValidationError("Skill artifact activation requires a promoted skill binding.")
+        if (
+            binding.proposal_id != artifact.source_proposal_id
+            or binding.rollout_id != rollout.id
+            or binding.surface != artifact.scope
+        ):
+            raise ValidationError("Skill artifact activation rollout binding does not match artifact.")
+        if rollout.latest_observation_id is None:
+            raise ValidationError("Skill artifact activation requires rollout observation evidence.")
+        observation = await self._rollout_observation_repository.get_by_id(rollout.latest_observation_id)
+        if observation is None:
+            raise ValidationError("Skill artifact activation requires existing rollout observation evidence.")
+        if (
+            observation.rollout_id != rollout.id
+            or observation.proposal_id != artifact.source_proposal_id
+            or observation.surface != artifact.scope
+        ):
+            raise ValidationError("Skill artifact activation observation does not match rollout.")
+        if observation.recommendation != "promote":
+            raise ValidationError("Skill artifact activation requires promote rollout observation.")
+        return rollout, binding, observation
+
+    async def _activation_usage_events(
+        self,
+        *,
+        artifact: SkillArtifact,
+        proposal_id: str,
+        rollout_id: str,
+        binding_id: str,
+        learner_goal_id: str,
+        activated_at,
+    ) -> list[SkillUsageEvent]:
+        events = await self._usage_repository.list_events(
+            skill_name=artifact.name,
+            learner_goal_id=learner_goal_id,
+            surface=artifact.scope,
+            created_at_from=activated_at,
+            limit=200,
+        )
+        matching: list[SkillUsageEvent] = []
+        for event in events:
+            if event.skill_name != artifact.name or event.surface != artifact.scope:
+                continue
+            if event.outcome_status not in {"completed", "partial_success"}:
+                continue
+            rollout_metadata = event.metadata.get("skill_package_rollout")
+            if not isinstance(rollout_metadata, dict):
+                continue
+            if (
+                rollout_metadata.get("proposal_id") == proposal_id
+                and rollout_metadata.get("rollout_id") == rollout_id
+                and rollout_metadata.get("binding_id") == binding_id
+                and rollout_metadata.get("skill_name") == artifact.name
+                and rollout_metadata.get("surface") == artifact.scope
+            ):
+                matching.append(event)
+        return matching
+
+    async def _audit_stage(
+        self,
+        artifact: SkillArtifact,
+        *,
+        event_type: str,
+        operator_id: str,
+        reason_code: str,
+        reason_note: str | None,
+        evaluation_id: str | None,
+        score_delta: float | None,
+    ) -> None:
+        await self._audit_service.record(
+            event_type=event_type,
+            resource_type="skill_artifact",
+            resource_id=artifact.id,
+            actor=operator_id,
+            event_data={
+                "artifact_id": artifact.id,
+                "skill_name": artifact.name,
+                "version": artifact.version,
+                "scope": artifact.scope,
+                "status": artifact.status,
+                "source_proposal_id": artifact.source_proposal_id,
+                "evaluation_id": evaluation_id,
+                "score_delta": score_delta,
+                "operator_id": operator_id,
+                "reason_code": reason_code,
+                "reason_note": reason_note,
+            },
+        )
+
+    async def _audit_activate(
+        self,
+        artifact: SkillArtifact,
+        *,
+        event_type: str,
+        operator_id: str,
+        reason_code: str,
+        reason_note: str | None,
+        evaluation_id: str | None,
+        score_delta: float | None,
+        rollout_id: str | None,
+        binding_id: str | None,
+        observation_id: str | None,
+        usage_event_ids: list[str],
+    ) -> None:
+        await self._audit_service.record(
+            event_type=event_type,
+            resource_type="skill_artifact",
+            resource_id=artifact.id,
+            actor=operator_id,
+            event_data={
+                "artifact_id": artifact.id,
+                "skill_name": artifact.name,
+                "version": artifact.version,
+                "scope": artifact.scope,
+                "status": artifact.status,
+                "source_proposal_id": artifact.source_proposal_id,
+                "evaluation_id": evaluation_id,
+                "score_delta": score_delta,
+                "rollout_id": rollout_id,
+                "binding_id": binding_id,
+                "observation_id": observation_id,
+                "usage_event_ids": list(usage_event_ids),
+                "operator_id": operator_id,
+                "reason_code": reason_code,
+                "reason_note": reason_note,
             },
         )
 
@@ -313,7 +651,7 @@ class SkillResolver:
             artifact.compatibility_contract.get("dynamic_execution") is not False
             or implementation_binding != skill_name
             or not isinstance(surfaces, list)
-            or surface not in surfaces
+            or surfaces != [surface]
         ):
             resolution = SkillResolution.build(
                 skill_name=skill_name,
@@ -392,8 +730,8 @@ class SkillUsageService:
             surface=surface,
             resource_id=resource_id,
         )
-        if resolution.resolver_status == "blocked":
-            raise ValidationError("Skill resolution is blocked.")
+        if resolution.resolver_status in {"blocked", "incompatible"}:
+            raise ValidationError(f"Skill resolution is {resolution.resolver_status}.")
         return resolution
 
     async def record_usage(
@@ -420,16 +758,28 @@ class SkillUsageService:
         outcome_signals: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> SkillUsageEvent | None:
+        resolution_error_code: str | None = None
         if resolution is None:
-            resolution = await self.resolve_for_runtime(
-                skill_name=skill_name,
-                surface=surface,
-                resource_id=session_id or daily_task_id or workflow_run_id,
-            )
+            try:
+                resolution = await self._skill_resolver.resolve(
+                    skill_name=skill_name,
+                    surface=surface,
+                    resource_id=session_id or daily_task_id or workflow_run_id,
+                )
+            except ValidationError:
+                resolution = SkillResolution.build(
+                    skill_name=skill_name,
+                    surface=surface,
+                    artifact_id=None,
+                    skill_version=None,
+                    artifact_status=None,
+                    resolver_status="blocked",
+                    selection_reason="runtime_resolution_failed",
+                    implementation_binding=skill_name,
+                )
+                resolution_error_code = "SkillResolutionValidationError"
         elif resolution.skill_name != skill_name or resolution.surface != surface:
             raise ValidationError("Skill resolution does not match usage context.")
-        elif resolution.resolver_status == "blocked":
-            raise ValidationError("Skill resolution is blocked.")
         event = SkillUsageEvent.build(
             skill_artifact_id=resolution.artifact_id,
             skill_name=resolution.skill_name,
@@ -450,7 +800,7 @@ class SkillUsageService:
             input_fingerprint=input_fingerprint or self._fingerprint(input_summary),
             output_summary=self._truncate(output_summary),
             output_fingerprint=output_fingerprint or self._fingerprint(output_summary),
-            error_code=error_code,
+            error_code=error_code or resolution_error_code,
             resolver_status=resolution.resolver_status,
             selection_reason=resolution.selection_reason,
             outcome_signals=outcome_signals,
@@ -509,7 +859,7 @@ class SkillUsageService:
         )
 
     async def list_usage_by_artifact(self, artifact_id: str, *, limit: int = 50) -> list[SkillUsageEvent]:
-        return await self._usage_repository.list_by_artifact(artifact_id, limit=_bounded_limit(limit))
+        return await self._usage_repository.list_by_artifact(artifact_id, limit=bounded_limit(limit))
 
     async def list_usage(
         self,
@@ -529,7 +879,7 @@ class SkillUsageService:
             surface=surface,
             outcome_status=outcome_status,
             resolver_status=resolver_status,
-            limit=_bounded_limit(limit),
+            limit=bounded_limit(limit),
         )
 
     @staticmethod
@@ -547,5 +897,5 @@ class SkillUsageService:
             return None
         normalized = " ".join(value.strip().split())
         if not normalized:
-            return None
+            return sha256(b"").hexdigest()
         return sha256(normalized.encode("utf-8")).hexdigest()

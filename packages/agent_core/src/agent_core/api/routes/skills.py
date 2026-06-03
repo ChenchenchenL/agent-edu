@@ -5,7 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_core.api.dependencies import (
     get_access_context,
+    get_audit_service,
     get_db_session,
+    get_skill_artifact_lifecycle_service,
     get_skill_candidate_service,
     get_skill_catalog_service,
     get_skill_registry,
@@ -13,12 +15,22 @@ from agent_core.api.dependencies import (
     get_skill_usage_service,
     require_operator_api_key,
 )
-from agent_core.application.services.skills import SkillCandidateService, SkillCatalogService, SkillResolver, SkillUsageService
+from agent_core.application.services.audit import AuditService
+from agent_core.application.services.skills import (
+    SkillArtifactLifecycleService,
+    SkillCandidateService,
+    SkillCatalogService,
+    SkillResolver,
+    SkillUsageService,
+)
+from agent_core.application.skills.registry import SkillRegistry
 from agent_core.domain.schemas.skill import (
+    ActivateSkillArtifactRequest,
     CreateSkillCandidateFromProposalRequest,
     SkillArtifactResponse,
     SkillDescriptorResponse,
     SkillResolutionResponse,
+    StageSkillArtifactRequest,
     SkillUsageEventResponse,
 )
 
@@ -30,8 +42,10 @@ router = APIRouter(tags=["skills"])
     response_model=list[SkillDescriptorResponse],
     dependencies=[Depends(get_access_context)],
 )
-async def list_skills() -> list[SkillDescriptorResponse]:
-    return [SkillDescriptorResponse.model_validate(skill) for skill in get_skill_registry().list_skills()]
+async def list_skills(
+    registry: SkillRegistry = Depends(get_skill_registry),
+) -> list[SkillDescriptorResponse]:
+    return [SkillDescriptorResponse.model_validate(skill) for skill in registry.list_skills()]
 
 
 @router.get(
@@ -60,16 +74,58 @@ async def list_skill_artifacts(
 @router.post(
     "/skill-artifacts/from-reflection-proposal",
     response_model=SkillArtifactResponse,
-    dependencies=[Depends(require_operator_api_key)],
 )
 async def create_skill_candidate_from_reflection_proposal(
     payload: CreateSkillCandidateFromProposalRequest,
     session: AsyncSession = Depends(get_db_session),
     service: SkillCandidateService = Depends(get_skill_candidate_service),
+    operator_id: str = Depends(require_operator_api_key),
 ) -> SkillArtifactResponse:
     artifact = await service.create_candidate_from_proposal(
         proposal_id=payload.proposal_id,
-        operator_id="operator",
+        operator_id=operator_id,
+    )
+    await session.commit()
+    return SkillArtifactResponse.model_validate(artifact)
+
+
+@router.post(
+    "/skill-artifacts/{artifact_id}/stage",
+    response_model=SkillArtifactResponse,
+)
+async def stage_skill_artifact(
+    artifact_id: str,
+    payload: StageSkillArtifactRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: SkillArtifactLifecycleService = Depends(get_skill_artifact_lifecycle_service),
+    operator_id: str = Depends(require_operator_api_key),
+) -> SkillArtifactResponse:
+    artifact = await service.stage_candidate(
+        artifact_id=artifact_id,
+        operator_id=operator_id,
+        reason_code=payload.reason_code,
+        reason_note=payload.reason_note,
+    )
+    await session.commit()
+    return SkillArtifactResponse.model_validate(artifact)
+
+
+@router.post(
+    "/skill-artifacts/{artifact_id}/activate",
+    response_model=SkillArtifactResponse,
+)
+async def activate_skill_artifact(
+    artifact_id: str,
+    payload: ActivateSkillArtifactRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: SkillArtifactLifecycleService = Depends(get_skill_artifact_lifecycle_service),
+    operator_id: str = Depends(require_operator_api_key),
+) -> SkillArtifactResponse:
+    artifact = await service.activate_staged(
+        artifact_id=artifact_id,
+        operator_id=operator_id,
+        reason_code=payload.reason_code,
+        reason_note=payload.reason_note,
     )
     await session.commit()
     return SkillArtifactResponse.model_validate(artifact)
@@ -146,14 +202,32 @@ async def list_skill_usage(
 @router.get(
     "/skill-resolution",
     response_model=SkillResolutionResponse,
-    dependencies=[Depends(require_operator_api_key)],
 )
 async def resolve_skill(
     skill_name: str = Query(max_length=128),
     surface: str = Query(max_length=64),
+    audit: bool = Query(default=False),
     session: AsyncSession = Depends(get_db_session),
+    service: SkillResolver = Depends(get_skill_resolver),
+    audit_service: AuditService = Depends(get_audit_service),
+    operator_id: str = Depends(require_operator_api_key),
 ) -> SkillResolutionResponse:
-    service: SkillResolver = get_skill_resolver(session)
-    resolution = await service.resolve(skill_name=skill_name, surface=surface)
+    resolution = await service.resolve(skill_name=skill_name, surface=surface, audit=audit)
+    if audit:
+        await audit_service.record(
+            event_type="skill.resolution.probed",
+            resource_type="skill",
+            resource_id=resolution.artifact_id,
+            actor=operator_id,
+            event_data={
+                "skill_name": resolution.skill_name,
+                "surface": resolution.surface,
+                "resolver_status": resolution.resolver_status,
+                "selection_reason": resolution.selection_reason,
+                "artifact_id": resolution.artifact_id,
+                "operator_id": operator_id,
+                "audit_resolution": audit,
+            },
+        )
     await session.commit()
     return SkillResolutionResponse.model_validate(resolution)

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent_core.application.services.audit import AuditService
 from agent_core.application.services.autonomy_jobs import AutonomyJobService
 from agent_core.application.services.chat import ChatService
-from agent_core.application.services.goal_skill_binding_resolver import GoalSkillBindingResolver
+from agent_core.application.services.goal_skill_binding_resolver import ActiveGoalSkillBinding, GoalSkillBindingResolver
 from agent_core.application.services.long_term_memory_materialization import LongTermMemoryMaterializationService
 from agent_core.application.services.long_term_memory_materialization_replay import (
     LONG_TERM_MEMORY_MATERIALIZATION_REPLAY_JOB_TYPE,
@@ -1984,7 +1984,9 @@ class AutonomousTaskService:
         *,
         topic_key: str | None,
         task_type: str | None,
-    ):
+        trigger_source: str | None = None,
+        include_staged: bool = False,
+    ) -> ActiveGoalSkillBinding | None:
         if self._goal_skill_binding_resolver is None:
             return None
         return await self._goal_skill_binding_resolver.get_active_binding(
@@ -1992,7 +1994,8 @@ class AutonomousTaskService:
             surface=surface,
             topic_key=topic_key,
             task_type=task_type,
-            include_staged=False,
+            trigger_source=trigger_source,
+            include_staged=include_staged,
         )
 
     async def _ensure_daily_materialization_job(
@@ -2405,6 +2408,14 @@ class AutonomousTaskService:
             goal=goal,
             source_task=source_task,
         )
+        skill_binding = await self._get_skill_binding(
+            goal.id,
+            "review_scheduling",
+            topic_key=source_task.topic_focus,
+            task_type="review",
+            trigger_source="task_completed",
+            include_staged=True,
+        )
         run = await self._workflow_run_service.create_run(
             workflow_type="review_scheduling",
             trigger_source="task_completed",
@@ -2473,7 +2484,14 @@ class AutonomousTaskService:
                 outcome_status="completed",
                 output_summary=f"{len(review_tasks)} review tasks",
                 resolution=skill_resolution,
-                metadata={"created_review_task_ids": [task.id for task in review_tasks]},
+                metadata=(
+                    skill_binding.with_usage_metadata(
+                        {"created_review_task_ids": [task.id for task in review_tasks]},
+                        skill_name="schedule_review",
+                    )
+                    if skill_binding is not None
+                    else {"created_review_task_ids": [task.id for task in review_tasks]}
+                ),
             )
             run = await self._workflow_run_service.complete_run(
                 run=run,
@@ -2488,7 +2506,14 @@ class AutonomousTaskService:
                 outcome_status="failed",
                 error_code=type(exc).__name__,
                 resolution=skill_resolution,
-                metadata={"error": str(exc)},
+                metadata=(
+                    skill_binding.with_usage_metadata(
+                        {"error": str(exc)},
+                        skill_name="schedule_review",
+                    )
+                    if skill_binding is not None
+                    else {"error": str(exc)}
+                ),
             )
             await self._workflow_run_service.fail_run(run=run, error_code=type(exc).__name__)
             raise

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from hashlib import sha256
 import secrets
 
 from fastapi import Depends, Header, HTTPException
@@ -39,7 +40,13 @@ from agent_core.application.services.reflection_proposal_sandbox import Reflecti
 from agent_core.application.services.reflection_proposals import ReflectionProposalService
 from agent_core.application.services.reflection_replay import ReflectionReplayService
 from agent_core.application.services.session import SessionService
-from agent_core.application.services.skills import SkillCandidateService, SkillCatalogService, SkillResolver, SkillUsageService
+from agent_core.application.services.skills import (
+    SkillArtifactLifecycleService,
+    SkillCandidateService,
+    SkillCatalogService,
+    SkillResolver,
+    SkillUsageService,
+)
 from agent_core.application.services.strategy_cards import StrategyCardService
 from agent_core.application.services.task import AutonomousTaskService
 from agent_core.application.services.workflow import WorkflowRunService
@@ -188,10 +195,14 @@ def _operator_key_is_valid(value: str | None) -> bool:
     return bool(configured and provided and secrets.compare_digest(provided, configured))
 
 
+def _operator_actor_id(operator_key: str) -> str:
+    return f"operator:{sha256(operator_key.encode('utf-8')).hexdigest()[:12]}"
+
+
 def require_operator_api_key(x_operator_key: str | None = Header(default=None, alias="X-Operator-Key")) -> str:
     if not _operator_key_is_valid(x_operator_key):
         raise HTTPException(status_code=403, detail="Invalid operator API key.")
-    return x_operator_key.strip()
+    return _operator_actor_id(x_operator_key.strip())
 
 
 async def get_access_context(
@@ -211,7 +222,7 @@ async def get_access_context(
     raise HTTPException(status_code=401, detail="Missing or invalid access credentials.")
 
 
-def get_audit_service(session: AsyncSession) -> AuditService:
+def get_audit_service(session: AsyncSession = Depends(get_db_session)) -> AuditService:
     return AuditService(AuditRepository(session), get_session_factory())
 
 
@@ -298,7 +309,7 @@ def get_planner_service(session: AsyncSession) -> PlannerService:
         strategy_card_service=get_strategy_card_service(session),
         rollout_resolver=get_reflection_proposal_rollout_resolver(session),
         goal_skill_binding_resolver=get_goal_skill_binding_resolver(session),
-        skill_usage_service=get_skill_usage_service(session),
+        skill_usage_service=_build_skill_usage_service(session),
     )
 
 
@@ -351,7 +362,7 @@ def get_chat_service(session: AsyncSession) -> ChatService:
         audit_service=audit_service,
         llm_provider=get_llm_provider(),
         skill_registry=get_skill_registry(),
-        skill_usage_service=get_skill_usage_service(session),
+        skill_usage_service=_build_skill_usage_service(session),
     )
 
 
@@ -364,7 +375,7 @@ def get_quiz_service(session: AsyncSession) -> QuizService:
         llm_provider=get_llm_provider(),
         skill_registry=get_skill_registry(),
         goal_skill_binding_resolver=get_goal_skill_binding_resolver(session),
-        skill_usage_service=get_skill_usage_service(session),
+        skill_usage_service=_build_skill_usage_service(session),
     )
 
 
@@ -385,20 +396,61 @@ def get_skill_candidate_service(session: AsyncSession = Depends(get_db_session))
     )
 
 
-def get_skill_resolver(session: AsyncSession = Depends(get_db_session)) -> SkillResolver:
+def get_skill_artifact_lifecycle_service(
+    session: AsyncSession = Depends(get_db_session),
+) -> SkillArtifactLifecycleService:
+    return SkillArtifactLifecycleService(
+        artifact_repository=SkillArtifactRepository(session),
+        proposal_repository=ReflectionProposalRepository(session),
+        evaluation_repository=ReflectionProposalEvaluationRepository(session),
+        rollout_repository=ReflectionProposalRolloutRepository(session),
+        rollout_observation_repository=ReflectionProposalRolloutObservationRepository(session),
+        goal_skill_binding_repository=GoalSkillBindingRepository(session),
+        usage_repository=SkillUsageEventRepository(session),
+        skill_registry=get_skill_registry(),
+        audit_service=get_audit_service(session),
+    )
+
+
+def _build_skill_resolver(
+    session: AsyncSession,
+    *,
+    audit_service: AuditService | None = None,
+) -> SkillResolver:
     return SkillResolver(
         artifact_repository=SkillArtifactRepository(session),
-        audit_service=get_audit_service(session),
+        audit_service=audit_service or get_audit_service(session),
         skill_registry=get_skill_registry(),
     )
 
 
-def get_skill_usage_service(session: AsyncSession = Depends(get_db_session)) -> SkillUsageService:
+def _build_skill_usage_service(
+    session: AsyncSession,
+    *,
+    skill_resolver: SkillResolver | None = None,
+    audit_service: AuditService | None = None,
+) -> SkillUsageService:
+    resolved_audit_service = audit_service or get_audit_service(session)
     return SkillUsageService(
         usage_repository=SkillUsageEventRepository(session),
-        skill_resolver=get_skill_resolver(session),
-        audit_service=get_audit_service(session),
+        skill_resolver=skill_resolver or _build_skill_resolver(session, audit_service=resolved_audit_service),
+        audit_service=resolved_audit_service,
     )
+
+
+def get_skill_resolver(
+    session: AsyncSession = Depends(get_db_session),
+    audit_service: AuditService = Depends(get_audit_service),
+) -> SkillResolver:
+    return _build_skill_resolver(session, audit_service=audit_service)
+
+
+def get_skill_usage_service(
+    session: AsyncSession = Depends(get_db_session),
+    skill_resolver: SkillResolver = Depends(get_skill_resolver),
+    audit_service: AuditService = Depends(get_audit_service),
+) -> SkillUsageService:
+    return _build_skill_usage_service(session, skill_resolver=skill_resolver, audit_service=audit_service)
 
 
 def get_autonomy_job_service(session: AsyncSession) -> AutonomyJobService:
@@ -626,7 +678,7 @@ def get_task_service(session: AsyncSession) -> AutonomousTaskService:
         long_term_memory_materialization_service=get_long_term_memory_materialization_service(session),
         long_term_memory_replay_executor=get_long_term_memory_materialization_replay_executor(session),
         internal_tool_registry=tool_registry,
-        skill_usage_service=get_skill_usage_service(session),
+        skill_usage_service=_build_skill_usage_service(session),
         audit_service=audit_service,
     )
 

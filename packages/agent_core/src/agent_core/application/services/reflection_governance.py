@@ -48,7 +48,7 @@ class ReflectionGovernanceService:
             event_type="reflection.reviewed",
             resource_type="reflection_record",
             resource_id=reflection.id,
-            actor="operator",
+            actor=operator_id,
             event_data={"operator_id": operator_id, "reason_code": reason_code},
         )
         return decision
@@ -75,7 +75,7 @@ class ReflectionGovernanceService:
             event_type="reflection.resolved",
             resource_type="reflection_record",
             resource_id=reflection.id,
-            actor="operator",
+            actor=operator_id,
             event_data={"operator_id": operator_id, "new_status": new_status, "reason_code": reason_code},
         )
         return decision
@@ -117,7 +117,7 @@ class ReflectionGovernanceService:
             event_type="reflection.root_cause.overridden",
             resource_type="reflection_record",
             resource_id=reflection.id,
-            actor="operator",
+            actor=operator_id,
             event_data={"operator_id": operator_id, "new_root_cause": new_root_cause, "reason_code": reason_code},
         )
         return decision
@@ -165,7 +165,7 @@ class ReflectionGovernanceService:
             event_type="reflection.action.overridden",
             resource_type="reflection_action",
             resource_id=target.id,
-            actor="operator",
+            actor=operator_id,
             event_data={"operator_id": operator_id, "action_type": action_type, "reason_code": reason_code},
         )
         return decision

@@ -1,10 +1,11 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_core.application.services.audit import AuditService
-from agent_core.application.services.goal_skill_binding_resolver import GoalSkillBindingResolver
+from agent_core.application.services.goal_skill_binding_resolver import ActiveGoalSkillBinding, GoalSkillBindingResolver
 from agent_core.application.services.skills import SkillUsageService
 from agent_core.application.skills.registry import SkillRegistry
 from agent_core.domain.entities.quiz import SessionQuiz, SessionQuizQuestion
+from agent_core.domain.entities.session import LearningSession
 from agent_core.domain.entities.skill import SkillResolution
 from agent_core.domain.errors import NotFoundError, ValidationError
 from agent_core.domain.schemas.quiz import (
@@ -59,6 +60,7 @@ class QuizService:
                 learner_goal_id=session.learner_goal_id,
                 surface="quiz",
                 topic_key=payload.topic,
+                trigger_source="quiz_generation",
                 include_staged=True,
             )
 
@@ -134,15 +136,30 @@ class QuizService:
                 input_summary=payload.topic,
                 output_summary=f"{len(quiz.questions)} questions",
                 resolution=skill_resolution,
-                metadata={
-                    "quiz_id": session_quiz.id,
-                    "difficulty": quiz.difficulty,
-                    "question_count": len(quiz.questions),
-                    "response_shape_valid": quiz.response_shape_valid,
-                    "retry_count": quiz.retry_count,
-                    "provider": quiz.provider,
-                    "model": quiz.model,
-                },
+                metadata=(
+                    skill_binding.with_usage_metadata(
+                        {
+                            "quiz_id": session_quiz.id,
+                            "difficulty": quiz.difficulty,
+                            "question_count": len(quiz.questions),
+                            "response_shape_valid": quiz.response_shape_valid,
+                            "retry_count": quiz.retry_count,
+                            "provider": quiz.provider,
+                            "model": quiz.model,
+                        },
+                        skill_name="create_quiz",
+                    )
+                    if skill_binding is not None
+                    else {
+                        "quiz_id": session_quiz.id,
+                        "difficulty": quiz.difficulty,
+                        "question_count": len(quiz.questions),
+                        "response_shape_valid": quiz.response_shape_valid,
+                        "retry_count": quiz.retry_count,
+                        "provider": quiz.provider,
+                        "model": quiz.model,
+                    }
+                ),
             )
             if commit:
                 await self._db_session.commit()
@@ -180,11 +197,22 @@ class QuizService:
                 input_summary=payload.topic,
                 error_code=type(exc).__name__,
                 resolution=skill_resolution,
-                metadata={
-                    "quiz_id": session_quiz.id if session_quiz is not None else None,
-                    "difficulty": payload.difficulty,
-                    "question_count": payload.question_count,
-                },
+                metadata=(
+                    skill_binding.with_usage_metadata(
+                        {
+                            "quiz_id": session_quiz.id if session_quiz is not None else None,
+                            "difficulty": payload.difficulty,
+                            "question_count": payload.question_count,
+                        },
+                        skill_name="create_quiz",
+                    )
+                    if skill_binding is not None
+                    else {
+                        "quiz_id": session_quiz.id if session_quiz is not None else None,
+                        "difficulty": payload.difficulty,
+                        "question_count": payload.question_count,
+                    }
+                ),
             )
             if commit:
                 await self._db_session.commit()
@@ -250,7 +278,7 @@ class QuizService:
     async def _record_skill_usage(
         self,
         *,
-        session,
+        session: LearningSession,
         topic: str,
         outcome_status: str,
         latency_ms: int | None,
