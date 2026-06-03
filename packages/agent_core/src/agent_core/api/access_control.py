@@ -21,6 +21,7 @@ from agent_core.infrastructure.db.repositories import WorkflowRunRepository
 class AccessContext:
     actor_type: Literal["learner", "operator"]
     learner_profile_id: str | None
+    actor_id: str | None = None
 
 
 def require_profile_access(profile_id: str, context: AccessContext) -> None:

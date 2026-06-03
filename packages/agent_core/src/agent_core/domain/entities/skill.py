@@ -211,6 +211,11 @@ class SkillArtifact:
             updated_at=now,
         )
 
+    def mark_deprecated(self) -> "SkillArtifact":
+        if self.status != "active":
+            raise ValidationError("Only active skill artifacts can be deprecated.")
+        return replace(self, status="deprecated", updated_at=_utcnow())
+
 
 @dataclass(frozen=True)
 class SkillResolution:

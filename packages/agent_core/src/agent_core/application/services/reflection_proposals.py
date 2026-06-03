@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from agent_core.application.services.audit import AuditService
 from agent_core.application.services.autonomy_jobs import AutonomyJobService
+from agent_core.application.services.skills import ALLOWED_SKILL_PACKAGE_TOOLS
 from agent_core.domain.entities.reflection import ReflectionRecord
 from agent_core.domain.entities.reflection_closure import (
     ReflectionProposal,
@@ -441,7 +442,7 @@ class ReflectionProposalService:
                 if not isinstance(item, dict):
                     raise ValidationError("Skill package tool_plan items must be objects.")
                 tool_name = str(item.get("tool_name") or "")
-                if tool_name not in {"review_scheduling", "assessment_generation", "partial_replan"}:
+                if tool_name not in ALLOWED_SKILL_PACKAGE_TOOLS:
                     raise ValidationError("Unsupported skill package tool.")
 
     async def _find_equivalent_active_proposal(

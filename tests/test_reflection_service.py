@@ -10,7 +10,9 @@ from agent_core.application.services.reflection import ReflectionService, Reflec
 from agent_core.application.services.reflection_evidence import ReflectionEvidenceService
 from agent_core.application.services.reflection_governance import ReflectionGovernanceService
 from agent_core.application.services.reflection_outcomes import ReflectionOutcomeService
+from agent_core.application.services.goal_skill_binding_resolver import GoalSkillBindingResolver
 from agent_core.application.services.reflection_proposal_sandbox import ReflectionProposalSandboxService
+from agent_core.application.services.reflection_proposal_rollout_resolver import ReflectionProposalRolloutResolver
 from agent_core.application.services.reflection_proposal_rollout_observation_scheduler import (
     ReflectionProposalRolloutObservationScheduler,
 )
@@ -240,10 +242,17 @@ class StubProposalRolloutRepository:
                 return item
         return None
 
-    async def get_active_by_goal_and_surface(self, learner_goal_id: str, surface: str):
+    async def get_active_by_goal_and_surface(
+        self,
+        learner_goal_id: str,
+        surface: str,
+        *,
+        include_staged: bool = True,
+    ):
+        statuses = {"staged", "rolled_out"} if include_staged else {"rolled_out"}
         active = [
             item for item in self.items.values()
-            if item.learner_goal_id == learner_goal_id and item.surface == surface and item.status in {"staged", "rolled_out"}
+            if item.learner_goal_id == learner_goal_id and item.surface == surface and item.status in statuses
         ]
         return active[-1] if active else None
 
@@ -295,18 +304,154 @@ class StubGoalSkillBindingRepository:
                 return item
         return None
 
-    async def get_active_by_goal_and_surface(self, learner_goal_id: str, surface: str):
+    async def get_active_by_goal_and_surface(
+        self,
+        learner_goal_id: str,
+        surface: str,
+        *,
+        include_staged: bool = True,
+    ):
+        active = await self.list_active_by_goal_and_surface(
+            learner_goal_id,
+            surface,
+            include_staged=include_staged,
+        )
+        return active[0] if active else None
+
+    async def list_active_by_goal_and_surface(
+        self,
+        learner_goal_id: str,
+        surface: str,
+        *,
+        include_staged: bool = True,
+    ):
+        statuses = {"staged", "rolled_out"} if include_staged else {"rolled_out"}
         active = [
             item for item in self.items.values()
-            if item.learner_goal_id == learner_goal_id and item.surface == surface and item.status in {"staged", "rolled_out"}
+            if item.learner_goal_id == learner_goal_id and item.surface == surface and item.status in statuses
         ]
-        return active[-1] if active else None
+        return sorted(active, key=lambda item: (item.priority_score, item.updated_at), reverse=True)
 
     async def list_by_goal(self, learner_goal_id: str):
         return [item for item in self.items.values() if item.learner_goal_id == learner_goal_id]
 
     async def update(self, entity: GoalSkillBinding):
         self.items[entity.id] = entity
+
+
+async def test_rollout_resolver_skips_staged_overlay_when_not_included():
+    repository = StubProposalRolloutRepository()
+    rolled_out = ReflectionProposalRollout.build(
+        proposal_id="proposal-rolled-out",
+        learner_goal_id="goal-1",
+        surface="quiz",
+        baseline_snapshot={},
+        runtime_overlay_payload={"mode": "rolled_out"},
+        activated_by="operator",
+    ).with_status("rolled_out")
+    staged = ReflectionProposalRollout.build(
+        proposal_id="proposal-staged",
+        learner_goal_id="goal-1",
+        surface="quiz",
+        baseline_snapshot={},
+        runtime_overlay_payload={"mode": "staged"},
+        activated_by="operator",
+    )
+    await repository.create(rolled_out)
+    await repository.create(staged)
+    resolver = ReflectionProposalRolloutResolver(rollout_repository=repository)
+
+    default_overlay = await resolver.get_active_overlay(learner_goal_id="goal-1", surface="quiz")
+    staged_overlay = await resolver.get_active_overlay(
+        learner_goal_id="goal-1",
+        surface="quiz",
+        include_staged=True,
+    )
+
+    assert default_overlay is not None
+    assert default_overlay.rollout_id == rolled_out.id
+    assert default_overlay.status == "rolled_out"
+    assert staged_overlay is not None
+    assert staged_overlay.rollout_id == staged.id
+    assert staged_overlay.status == "staged"
+
+
+async def test_goal_skill_binding_resolver_skips_staged_binding_when_not_included():
+    repository = StubGoalSkillBindingRepository()
+    rolled_out = GoalSkillBinding.build(
+        proposal_id="proposal-rolled-out",
+        rollout_id="rollout-rolled-out",
+        learner_goal_id="goal-1",
+        surface="quiz",
+        priority_score=0.2,
+        match_rules={},
+        runtime_directives={"mode": "rolled_out"},
+        tool_plan=[],
+    ).with_status("rolled_out")
+    staged = GoalSkillBinding.build(
+        proposal_id="proposal-staged",
+        rollout_id="rollout-staged",
+        learner_goal_id="goal-1",
+        surface="quiz",
+        priority_score=0.9,
+        match_rules={},
+        runtime_directives={"mode": "staged"},
+        tool_plan=[],
+    )
+    await repository.create(rolled_out)
+    await repository.create(staged)
+    resolver = GoalSkillBindingResolver(repository=repository)
+
+    default_binding = await resolver.get_active_binding(learner_goal_id="goal-1", surface="quiz")
+    staged_binding = await resolver.get_active_binding(
+        learner_goal_id="goal-1",
+        surface="quiz",
+        include_staged=True,
+    )
+
+    assert default_binding is not None
+    assert default_binding.binding_id == rolled_out.id
+    assert default_binding.status == "rolled_out"
+    assert staged_binding is not None
+    assert staged_binding.binding_id == staged.id
+    assert staged_binding.status == "staged"
+
+
+async def test_goal_skill_binding_resolver_falls_back_to_next_matching_binding():
+    repository = StubGoalSkillBindingRepository()
+    high_priority_non_match = GoalSkillBinding.build(
+        proposal_id="proposal-non-match",
+        rollout_id="rollout-non-match",
+        learner_goal_id="goal-1",
+        surface="quiz",
+        priority_score=0.9,
+        match_rules={"topic_keys": ["calculus"]},
+        runtime_directives={"mode": "wrong-topic"},
+        tool_plan=[],
+    ).with_status("rolled_out")
+    lower_priority_match = GoalSkillBinding.build(
+        proposal_id="proposal-match",
+        rollout_id="rollout-match",
+        learner_goal_id="goal-1",
+        surface="quiz",
+        priority_score=0.4,
+        match_rules={"topic_keys": ["algebra"]},
+        runtime_directives={"mode": "right-topic"},
+        tool_plan=[],
+    ).with_status("rolled_out")
+    await repository.create(high_priority_non_match)
+    await repository.create(lower_priority_match)
+    resolver = GoalSkillBindingResolver(repository=repository)
+
+    binding = await resolver.get_active_binding(
+        learner_goal_id="goal-1",
+        surface="quiz",
+        topic_key="algebra",
+    )
+
+    assert binding is not None
+    assert binding.binding_id == lower_priority_match.id
+    assert binding.runtime_directives == {"mode": "right-topic"}
 
 
 class StubTaskAttemptRepository:

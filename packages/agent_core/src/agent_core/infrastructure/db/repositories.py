@@ -3705,13 +3705,16 @@ class ReflectionProposalRolloutRepository:
         self,
         learner_goal_id: str,
         surface: str,
+        *,
+        include_staged: bool = True,
     ) -> ReflectionProposalRollout | None:
+        statuses = ["staged", "rolled_out"] if include_staged else ["rolled_out"]
         result = await self._session.execute(
             select(ReflectionProposalRolloutModel)
             .where(
                 ReflectionProposalRolloutModel.learner_goal_id == learner_goal_id,
                 ReflectionProposalRolloutModel.surface == surface,
-                ReflectionProposalRolloutModel.status.in_(["staged", "rolled_out"]),
+                ReflectionProposalRolloutModel.status.in_(statuses),
             )
             .order_by(desc(ReflectionProposalRolloutModel.created_at), desc(ReflectionProposalRolloutModel.id))
         )
@@ -3864,20 +3867,34 @@ class GoalSkillBindingRepository:
         self,
         learner_goal_id: str,
         surface: str,
+        *,
+        include_staged: bool = True,
     ) -> GoalSkillBinding | None:
+        bindings = await self.list_active_by_goal_and_surface(
+            learner_goal_id,
+            surface,
+            include_staged=include_staged,
+        )
+        return bindings[0] if bindings else None
+
+    async def list_active_by_goal_and_surface(
+        self,
+        learner_goal_id: str,
+        surface: str,
+        *,
+        include_staged: bool = True,
+    ) -> list[GoalSkillBinding]:
+        statuses = ["staged", "rolled_out"] if include_staged else ["rolled_out"]
         result = await self._session.execute(
             select(GoalSkillBindingModel)
             .where(
                 GoalSkillBindingModel.learner_goal_id == learner_goal_id,
                 GoalSkillBindingModel.surface == surface,
-                GoalSkillBindingModel.status.in_(["staged", "rolled_out"]),
+                GoalSkillBindingModel.status.in_(statuses),
             )
             .order_by(desc(GoalSkillBindingModel.priority_score), desc(GoalSkillBindingModel.updated_at))
         )
-        model = result.scalars().first()
-        if model is None:
-            return None
-        return self._to_entity(model)
+        return [self._to_entity(model) for model in result.scalars().all()]
 
     async def list_by_goal(self, learner_goal_id: str) -> list[GoalSkillBinding]:
         result = await self._session.execute(

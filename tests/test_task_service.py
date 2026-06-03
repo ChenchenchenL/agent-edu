@@ -488,11 +488,18 @@ class StubProposalRolloutRepository:
     async def create(self, entity):
         self.items[entity.id] = entity
 
-    async def get_active_by_goal_and_surface(self, learner_goal_id: str, surface: str):
+    async def get_active_by_goal_and_surface(
+        self,
+        learner_goal_id: str,
+        surface: str,
+        *,
+        include_staged: bool = True,
+    ):
+        statuses = {"staged", "rolled_out"} if include_staged else {"rolled_out"}
         active = [
             item
             for item in self.items.values()
-            if item.learner_goal_id == learner_goal_id and item.surface == surface and item.status in {"staged", "rolled_out"}
+            if item.learner_goal_id == learner_goal_id and item.surface == surface and item.status in statuses
         ]
         return active[-1] if active else None
 
@@ -833,13 +840,14 @@ async def test_generate_plan_execute_task_and_schedule_reviews():
         payload=UpdateDailyTaskStatusRequest(status="completed", result_note="Done"),
     )
     assert completed.status == "completed"
+    await task_service.run_due_autonomy_jobs(raise_on_error=True)
 
     all_tasks = await task_service.list_tasks(goal.id)
     assert any(task.task_type == "review" for task in all_tasks)
     assert any(event.event_type == "review.tasks.scheduled" for event in audit_repository.events)
 
 
-async def test_update_task_status_failure_writes_durable_audit():
+async def test_update_task_status_queues_review_and_worker_failure_is_audited():
     profile = LearnerProfile.build()
     goal = LearnerGoal.build(
         learner_profile_id=profile.id,
@@ -874,18 +882,62 @@ async def test_update_task_status_failure_writes_durable_audit():
         workflow_run_id="run-1",
     )
 
+    updated = await task_service.update_task_status(
+        task_id=task.id,
+        payload=UpdateDailyTaskStatusRequest(status="completed", result_note="Done"),
+    )
+    assert updated.status == "completed"
+
+    assert plan.version == 1
+    assert any(event.event_type == "daily_task.status.updated" for event in audit_repository.events)
+    assert not any(event.event_type == "autonomy.job.failed" for event in audit_repository.events)
+
     try:
-        await task_service.update_task_status(
-            task_id=task.id,
-            payload=UpdateDailyTaskStatusRequest(status="completed", result_note="Done"),
-        )
+        await task_service.run_due_autonomy_jobs(raise_on_error=True)
         assert False, "Expected RuntimeError"
     except RuntimeError as exc:
         assert "review scheduling failed" in str(exc)
-
-    assert plan.version == 1
     assert any(event.event_type == "autonomy.job.failed" for event in audit_repository.events)
-    assert any(event.event_type == "daily_task.status.updated" for event in audit_repository.events)
+
+
+async def test_update_task_status_queues_replan_without_inline_worker_side_effects():
+    profile = LearnerProfile.build()
+    goal = LearnerGoal.build(
+        learner_profile_id=profile.id,
+        title="Master matrices",
+        subject="Linear Algebra",
+        target_outcome="Solve core matrix exercises independently",
+        baseline_note=None,
+        deadline_date=date.today() + timedelta(days=21),
+        weekly_study_minutes=180,
+    )
+    fake_session = FakeSession()
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(audit_repository)
+    workflow_run_repository = StubWorkflowRunRepository()
+    task_service, _, _, _ = _build_task_service(
+        goal=goal,
+        profile=profile,
+        fake_session=fake_session,
+        audit_service=audit_service,
+        workflow_run_repository=workflow_run_repository,
+    )
+
+    await task_service.generate_plan(goal_id=goal.id, trigger_source="initial")
+    task = (await task_service.list_tasks(goal.id))[0]
+    await task_service.update_task_status(
+        task_id=task.id,
+        payload=UpdateDailyTaskStatusRequest(status="failed", result_note="Still confused"),
+    )
+
+    plans_before_worker = await task_service.list_plans(goal.id)
+    assert [item.version for item in plans_before_worker] == [1]
+    jobs = await task_service.list_autonomy_jobs(goal.id)
+    assert any(job.job_type == "replan" and job.status == "scheduled" for job in jobs)
+
+    await task_service.run_due_autonomy_jobs(raise_on_error=True)
+    plans_after_worker = await task_service.list_plans(goal.id)
+    assert sorted(item.version for item in plans_after_worker) == [1, 2]
 
 
 async def test_task_materialization_failure_is_audited_without_blocking_status_update():
@@ -1301,6 +1353,7 @@ async def test_materialization_and_milestone_jobs_create_followup_tasks():
         task_id=first_task.id,
         payload=UpdateDailyTaskStatusRequest(status="completed", result_note="Done"),
     )
+    await task_service.run_due_autonomy_jobs(raise_on_error=True)
 
     await task_service.materialize_today(goal.id)
     jobs = await task_service.list_autonomy_jobs(goal.id)
@@ -1416,6 +1469,7 @@ async def test_milestone_gate_blocks_downstream_until_completed():
             task_id=task.id,
             payload=UpdateDailyTaskStatusRequest(status="completed", result_note="Done"),
         )
+        await task_service.run_due_autonomy_jobs(raise_on_error=True)
     await task_service.materialize_today(goal.id)
     await task_service.run_due_autonomy_jobs(raise_on_error=True)
 

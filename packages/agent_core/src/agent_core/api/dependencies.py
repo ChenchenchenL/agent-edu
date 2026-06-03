@@ -3,8 +3,9 @@ from __future__ import annotations
 from functools import lru_cache
 from hashlib import sha256
 import secrets
+from typing import Any
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -199,26 +200,94 @@ def _operator_actor_id(operator_key: str) -> str:
     return f"operator:{sha256(operator_key.encode('utf-8')).hexdigest()[:12]}"
 
 
-def require_operator_api_key(x_operator_key: str | None = Header(default=None, alias="X-Operator-Key")) -> str:
+def _request_audit_metadata(request: Request) -> dict[str, Any]:
+    return {
+        "path": request.url.path,
+        "method": request.method,
+        "client_host": request.client.host if request.client is not None else None,
+    }
+
+
+async def _record_auth_failure(
+    *,
+    request: Request,
+    event_type: str,
+    reason_code: str,
+    credential_scope: str,
+    operator_key_present: bool,
+    learner_key_present: bool,
+) -> None:
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        audit_service = AuditService(AuditRepository(session))
+        try:
+            await audit_service.record(
+                event_type=event_type,
+                resource_type="auth",
+                resource_id=None,
+                actor="anonymous",
+                event_data={
+                    **_request_audit_metadata(request),
+                    "reason_code": reason_code,
+                    "credential_scope": credential_scope,
+                    "operator_key_present": operator_key_present,
+                    "learner_key_present": learner_key_present,
+                },
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+
+
+async def require_operator_api_key(
+    request: Request,
+    x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
+) -> str:
     if not _operator_key_is_valid(x_operator_key):
+        await _record_auth_failure(
+            request=request,
+            event_type="auth.operator_api_key.rejected",
+            reason_code="missing_or_invalid_operator_key",
+            credential_scope="operator",
+            operator_key_present=bool((x_operator_key or "").strip()),
+            learner_key_present=False,
+        )
         raise HTTPException(status_code=403, detail="Invalid operator API key.")
     return _operator_actor_id(x_operator_key.strip())
 
 
 async def get_access_context(
+    request: Request,
     x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
     x_learner_key: str | None = Header(default=None, alias="X-Learner-Key"),
     session: AsyncSession = Depends(get_db_session),
 ) -> AccessContext:
     if _operator_key_is_valid(x_operator_key):
-        return AccessContext(actor_type="operator", learner_profile_id=None)
+        operator_key = x_operator_key.strip() if x_operator_key is not None else ""
+        return AccessContext(
+            actor_type="operator",
+            learner_profile_id=None,
+            actor_id=_operator_actor_id(operator_key),
+        )
 
     learner_key = x_learner_key.strip() if x_learner_key is not None else ""
     if learner_key:
         profile = await LearnerProfileRepository(session).get_by_access_key_hash(hash_profile_access_key(learner_key))
         if profile is not None:
-            return AccessContext(actor_type="learner", learner_profile_id=profile.id)
+            return AccessContext(
+                actor_type="learner",
+                learner_profile_id=profile.id,
+                actor_id=f"learner:{profile.id}",
+            )
 
+    await _record_auth_failure(
+        request=request,
+        event_type="auth.access_context.rejected",
+        reason_code="missing_or_invalid_access_credentials",
+        credential_scope="access_context",
+        operator_key_present=bool((x_operator_key or "").strip()),
+        learner_key_present=bool(learner_key),
+    )
     raise HTTPException(status_code=401, detail="Missing or invalid access credentials.")
 
 

@@ -27,6 +27,7 @@ from agent_core.application.skills.registry import SkillRegistry
 from agent_core.domain.schemas.skill import (
     ActivateSkillArtifactRequest,
     CreateSkillCandidateFromProposalRequest,
+    DeactivateSkillArtifactRequest,
     SkillArtifactResponse,
     SkillDescriptorResponse,
     SkillResolutionResponse,
@@ -122,6 +123,27 @@ async def activate_skill_artifact(
     operator_id: str = Depends(require_operator_api_key),
 ) -> SkillArtifactResponse:
     artifact = await service.activate_staged(
+        artifact_id=artifact_id,
+        operator_id=operator_id,
+        reason_code=payload.reason_code,
+        reason_note=payload.reason_note,
+    )
+    await session.commit()
+    return SkillArtifactResponse.model_validate(artifact)
+
+
+@router.post(
+    "/skill-artifacts/{artifact_id}/deactivate",
+    response_model=SkillArtifactResponse,
+)
+async def deactivate_skill_artifact(
+    artifact_id: str,
+    payload: DeactivateSkillArtifactRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: SkillArtifactLifecycleService = Depends(get_skill_artifact_lifecycle_service),
+    operator_id: str = Depends(require_operator_api_key),
+) -> SkillArtifactResponse:
+    artifact = await service.deactivate_active(
         artifact_id=artifact_id,
         operator_id=operator_id,
         reason_code=payload.reason_code,

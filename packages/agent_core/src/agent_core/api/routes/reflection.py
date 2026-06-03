@@ -396,10 +396,12 @@ async def list_reflection_proposal_rollouts(
 @router.get("/goals/{goal_id}/skill-bindings", response_model=list[GoalSkillBindingResponse])
 async def list_goal_skill_bindings(
     goal_id: str,
-    _: str = Depends(require_operator_api_key),
+    context: AccessContext = Depends(get_access_context),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[GoalSkillBindingResponse]:
-    await require_goal_access(goal_id, AccessContext(actor_type="operator", learner_profile_id=None), session)
+    if context.actor_type != "operator":
+        raise HTTPException(status_code=403, detail="Operator access is required.")
+    await require_goal_access(goal_id, context, session)
     _ = get_goal_skill_binding_resolver(session)
     repository = GoalSkillBindingRepository(session)
     items = await repository.list_by_goal(goal_id)

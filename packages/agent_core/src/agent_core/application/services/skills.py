@@ -413,6 +413,45 @@ class SkillArtifactLifecycleService:
         )
         return activated
 
+    async def deactivate_active(
+        self,
+        *,
+        artifact_id: str,
+        operator_id: str,
+        reason_code: str,
+        reason_note: str | None,
+    ) -> SkillArtifact:
+        if not operator_id.strip():
+            raise ValidationError("operator_id is required.")
+        if not reason_code.strip():
+            raise ValidationError("reason_code is required.")
+
+        artifact = await self._artifact_repository.get_by_id(artifact_id)
+        if artifact is None:
+            raise NotFoundError(f"Skill artifact '{artifact_id}' was not found.")
+        if artifact.status == "deprecated":
+            await self._audit_deactivate(
+                artifact,
+                event_type="skill.artifact.deactivate_reused",
+                operator_id=operator_id,
+                reason_code=reason_code,
+                reason_note=reason_note,
+            )
+            return artifact
+        if artifact.status != "active":
+            raise ValidationError("Only active skill artifacts can be deactivated.")
+
+        deactivated = artifact.mark_deprecated()
+        await self._artifact_repository.update(deactivated)
+        await self._audit_deactivate(
+            deactivated,
+            event_type="skill.artifact.deactivated",
+            operator_id=operator_id,
+            reason_code=reason_code,
+            reason_note=reason_note,
+        )
+        return deactivated
+
     @staticmethod
     def _validate_artifact_against_source(artifact: SkillArtifact, payload: dict[str, object]) -> None:
         if not artifact.source_reflection_ids:
@@ -578,6 +617,33 @@ class SkillArtifactLifecycleService:
                 "binding_id": binding_id,
                 "observation_id": observation_id,
                 "usage_event_ids": list(usage_event_ids),
+                "operator_id": operator_id,
+                "reason_code": reason_code,
+                "reason_note": reason_note,
+            },
+        )
+
+    async def _audit_deactivate(
+        self,
+        artifact: SkillArtifact,
+        *,
+        event_type: str,
+        operator_id: str,
+        reason_code: str,
+        reason_note: str | None,
+    ) -> None:
+        await self._audit_service.record(
+            event_type=event_type,
+            resource_type="skill_artifact",
+            resource_id=artifact.id,
+            actor=operator_id,
+            event_data={
+                "artifact_id": artifact.id,
+                "skill_name": artifact.name,
+                "version": artifact.version,
+                "scope": artifact.scope,
+                "status": artifact.status,
+                "source_proposal_id": artifact.source_proposal_id,
                 "operator_id": operator_id,
                 "reason_code": reason_code,
                 "reason_note": reason_note,

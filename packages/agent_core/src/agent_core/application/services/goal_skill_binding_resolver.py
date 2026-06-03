@@ -59,20 +59,21 @@ class GoalSkillBindingResolver:
         goal_active_root_causes: set[str] | None = None,
         include_staged: bool = False,
     ) -> ActiveGoalSkillBinding | None:
-        binding = await self._repository.get_active_by_goal_and_surface(learner_goal_id, surface)
-        if binding is None:
-            return None
-        if binding.status == "staged" and not include_staged:
-            return None
-        if not self._matches(
-            binding,
-            topic_key=topic_key,
-            task_type=task_type,
-            trigger_source=trigger_source,
-            goal_active_root_causes=goal_active_root_causes,
-        ):
-            return None
-        return self._to_active(binding)
+        bindings = await self._repository.list_active_by_goal_and_surface(
+            learner_goal_id,
+            surface,
+            include_staged=include_staged,
+        )
+        for binding in bindings:
+            if self._matches(
+                binding,
+                topic_key=topic_key,
+                task_type=task_type,
+                trigger_source=trigger_source,
+                goal_active_root_causes=goal_active_root_causes,
+            ):
+                return self._to_active(binding)
+        return None
 
     @staticmethod
     def _matches(

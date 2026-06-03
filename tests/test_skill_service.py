@@ -764,7 +764,7 @@ async def test_skill_candidate_service_rejects_unapproved_or_ineffective_sources
     )
 
     with pytest.raises(ValidationError):
-        await service.create_candidate_from_proposal(proposal_id=proposal.id, operator_id="operator")
+        await service.create_candidate_from_proposal(proposal_id=unapproved.id, operator_id="operator")
 
     proposal, evaluation = _approved_skill_package_proposal(evaluation_status="inconclusive")
     service = SkillCandidateService(
@@ -1314,6 +1314,122 @@ async def test_skill_artifact_lifecycle_service_rejects_activation_conflict_or_d
             reason_code="rollout_promoted",
             reason_note=None,
         )
+
+
+async def test_skill_artifact_lifecycle_service_deactivates_active_artifact():
+    active = SkillArtifact.build(
+        name="create_quiz",
+        version="0.1.0",
+        skill_type="learned",
+        scope="quiz",
+        status="active",
+        description="Active learned quiz skill.",
+        source_proposal_id="proposal-1",
+        quality_score=0.8,
+        approved_by="operator",
+        approved_at=datetime.now(timezone.utc),
+    )
+    artifact_repository = StubSkillArtifactRepository(active)
+    audit_repository = StubAuditRepository()
+
+    deactivated = await _skill_artifact_lifecycle_service(
+        artifact_repository,
+        None,
+        None,
+        audit_repository,
+    ).deactivate_active(
+        artifact_id=active.id,
+        operator_id="operator",
+        reason_code="rollout_rollback",
+        reason_note="Rollback source rollout.",
+    )
+
+    assert deactivated.id == active.id
+    assert deactivated.status == "deprecated"
+    assert deactivated.approved_by == active.approved_by
+    assert deactivated.approved_at == active.approved_at
+    assert deactivated.updated_at > active.updated_at
+    assert artifact_repository.artifacts == [deactivated]
+    event = audit_repository.events[-1]
+    assert event.event_type == "skill.artifact.deactivated"
+    assert event.event_data["artifact_id"] == active.id
+    assert event.event_data["source_proposal_id"] == "proposal-1"
+    assert event.event_data["operator_id"] == "operator"
+    assert event.event_data["reason_code"] == "rollout_rollback"
+
+
+async def test_skill_artifact_lifecycle_service_reuses_deactivated_artifact():
+    deprecated = SkillArtifact.build(
+        name="create_quiz",
+        version="0.1.0",
+        skill_type="learned",
+        scope="quiz",
+        status="deprecated",
+        description="Deprecated learned quiz skill.",
+        quality_score=0.8,
+    )
+    artifact_repository = StubSkillArtifactRepository(deprecated)
+    audit_repository = StubAuditRepository()
+
+    reused = await _skill_artifact_lifecycle_service(
+        artifact_repository,
+        None,
+        None,
+        audit_repository,
+    ).deactivate_active(
+        artifact_id=deprecated.id,
+        operator_id="operator",
+        reason_code="rollout_rollback",
+        reason_note=None,
+    )
+
+    assert reused == deprecated
+    assert artifact_repository.artifacts == [deprecated]
+    assert audit_repository.events[-1].event_type == "skill.artifact.deactivate_reused"
+
+
+async def test_skill_artifact_lifecycle_service_rejects_deactivation_for_non_active_artifact():
+    staged = SkillArtifact.build(
+        name="create_quiz",
+        version="0.1.0",
+        skill_type="learned",
+        scope="quiz",
+        status="staged",
+        description="Staged learned quiz skill.",
+        quality_score=0.8,
+    )
+
+    with pytest.raises(ValidationError):
+        await _skill_artifact_lifecycle_service(
+            StubSkillArtifactRepository(staged),
+            None,
+            None,
+            StubAuditRepository(),
+        ).deactivate_active(
+            artifact_id=staged.id,
+            operator_id="operator",
+            reason_code="rollout_rollback",
+            reason_note=None,
+        )
+
+
+async def test_skill_resolver_ignores_deprecated_artifact_after_deactivation():
+    deprecated = SkillArtifact.build(
+        name="explain_concept",
+        version="1.0.0",
+        skill_type="baseline",
+        scope="chat",
+        status="deprecated",
+        description="Deprecated skill.",
+        quality_score=1.0,
+    )
+    audit_repository = StubAuditRepository()
+    resolver = _skill_resolver(deprecated, audit_repository)
+
+    resolution = await resolver.resolve(skill_name="explain_concept", surface="chat")
+
+    assert resolution.resolver_status == "missing_artifact"
+    assert resolution.artifact_id is None
 
 
 async def test_skill_usage_service_records_active_artifact_usage():

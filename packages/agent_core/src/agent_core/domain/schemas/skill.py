@@ -53,6 +53,11 @@ class ActivateSkillArtifactRequest(BaseModel):
     reason_note: str | None = Field(default=None, max_length=2000)
 
 
+class DeactivateSkillArtifactRequest(BaseModel):
+    reason_code: str = Field(min_length=1, max_length=128)
+    reason_note: str | None = Field(default=None, max_length=2000)
+
+
 class SkillUsageEventResponse(BaseModel):
     id: str
     skill_artifact_id: str | None

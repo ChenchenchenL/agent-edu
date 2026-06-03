@@ -33,6 +33,10 @@ from agent_core.infrastructure.observability.metrics import (
 )
 
 
+CHAT_HISTORY_LIMIT = 8
+CROSS_SESSION_CONTEXT_LIMIT = 10
+
+
 @dataclass(frozen=True)
 class _ChatRuntimeContext:
     session: LearningSession
@@ -141,12 +145,12 @@ class ChatService:
         )
         history = await self._message_repository.list_history(
             session_id=session.id,
-            limit=8,
+            limit=CHAT_HISTORY_LIMIT,
             before_id=None,
         )
         past_sessions = await self._session_repository.list_recent_by_goal(
             learner_goal_id=session.learner_goal_id,
-            limit=10,
+            limit=CROSS_SESSION_CONTEXT_LIMIT,
             exclude_id=session.id,
         )
         cross_session_context = self._build_cross_session_context(past_sessions=past_sessions)
@@ -325,7 +329,7 @@ class ChatService:
                 subject=context.session.subject,
                 learner_message=payload.content,
                 mode=payload.mode,
-                history=context.history[-8:],
+                history=context.history[-CHAT_HISTORY_LIMIT:],
                 memory_contexts=[item.summary for item in context.retrieval_result.memories],
                 learner_profile=learner_profile,
                 hint_context=context.hint_context,
