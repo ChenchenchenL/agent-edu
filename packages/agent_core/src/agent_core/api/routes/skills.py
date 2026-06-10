@@ -10,7 +10,10 @@ from agent_core.api.dependencies import (
     get_skill_artifact_lifecycle_service,
     get_skill_candidate_service,
     get_skill_catalog_service,
+    get_skill_curator_recommendation_service,
+    get_skill_replacement_readiness_service,
     get_skill_registry,
+    get_skill_replacement_staging_service,
     get_skill_resolver,
     get_skill_usage_service,
     require_operator_api_key,
@@ -20,18 +23,31 @@ from agent_core.application.services.skills import (
     SkillArtifactLifecycleService,
     SkillCandidateService,
     SkillCatalogService,
+    SkillCuratorRecommendationService,
+    SkillReplacementReadinessService,
+    SkillReplacementStagingService,
     SkillResolver,
     SkillUsageService,
 )
 from agent_core.application.skills.registry import SkillRegistry
 from agent_core.domain.schemas.skill import (
+    AcceptSkillCuratorRecommendationRequest,
+    ArchiveSkillArtifactRequest,
     ActivateSkillArtifactRequest,
     CreateSkillCandidateFromProposalRequest,
     DeactivateSkillArtifactRequest,
+    DismissSkillCuratorRecommendationRequest,
+    ReplaceSkillArtifactRequest,
+    RestoreSkillArtifactRequest,
     SkillArtifactResponse,
+    SkillCuratorRecommendationResponse,
     SkillDescriptorResponse,
+    SkillReplacementReadinessResponse,
     SkillResolutionResponse,
     StageSkillArtifactRequest,
+    StageSkillReplacementFromProposalRequest,
+    StabilizeSkillArtifactRequest,
+    SuppressSkillArtifactRequest,
     SkillUsageEventResponse,
 )
 
@@ -72,6 +88,98 @@ async def list_skill_artifacts(
     return [SkillArtifactResponse.model_validate(item) for item in artifacts]
 
 
+@router.get(
+    "/skill-curator-recommendations",
+    response_model=list[SkillCuratorRecommendationResponse],
+    dependencies=[Depends(require_operator_api_key)],
+)
+async def list_skill_curator_recommendations(
+    status: str | None = Query(default=None, max_length=32),
+    recommendation_type: str | None = Query(default=None, max_length=64),
+    recommended_action: str | None = Query(default=None, max_length=64),
+    artifact_id: str | None = Query(default=None, max_length=36),
+    skill_name: str | None = Query(default=None, max_length=128),
+    scope: str | None = Query(default=None, max_length=64),
+    surface: str | None = Query(default=None, max_length=64),
+    limit: int = Query(default=50, ge=1, le=200),
+    service: SkillCuratorRecommendationService = Depends(get_skill_curator_recommendation_service),
+) -> list[SkillCuratorRecommendationResponse]:
+    recommendations = await service.list_recommendations(
+        status=status,
+        recommendation_type=recommendation_type,
+        recommended_action=recommended_action,
+        artifact_id=artifact_id,
+        skill_name=skill_name,
+        scope=scope,
+        surface=surface,
+        limit=limit,
+    )
+    return [SkillCuratorRecommendationResponse.model_validate(item) for item in recommendations]
+
+
+@router.get(
+    "/skill-curator-recommendations/{recommendation_id}",
+    response_model=SkillCuratorRecommendationResponse,
+    dependencies=[Depends(require_operator_api_key)],
+)
+async def get_skill_curator_recommendation(
+    recommendation_id: str,
+    service: SkillCuratorRecommendationService = Depends(get_skill_curator_recommendation_service),
+) -> SkillCuratorRecommendationResponse:
+    recommendation = await service.get_recommendation(recommendation_id)
+    return SkillCuratorRecommendationResponse.model_validate(recommendation)
+
+
+@router.post(
+    "/skill-curator-recommendations/{recommendation_id}/accept",
+    response_model=SkillCuratorRecommendationResponse,
+)
+async def accept_skill_curator_recommendation(
+    recommendation_id: str,
+    payload: AcceptSkillCuratorRecommendationRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: SkillCuratorRecommendationService = Depends(get_skill_curator_recommendation_service),
+    operator_id: str = Depends(require_operator_api_key),
+) -> SkillCuratorRecommendationResponse:
+    try:
+        recommendation = await service.accept_recommendation(
+            recommendation_id=recommendation_id,
+            operator_id=operator_id,
+            reason_code=payload.reason_code,
+            reason_note=payload.reason_note,
+        )
+        await session.commit()
+        return SkillCuratorRecommendationResponse.model_validate(recommendation)
+    except Exception:
+        await session.rollback()
+        raise
+
+
+@router.post(
+    "/skill-curator-recommendations/{recommendation_id}/dismiss",
+    response_model=SkillCuratorRecommendationResponse,
+)
+async def dismiss_skill_curator_recommendation(
+    recommendation_id: str,
+    payload: DismissSkillCuratorRecommendationRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: SkillCuratorRecommendationService = Depends(get_skill_curator_recommendation_service),
+    operator_id: str = Depends(require_operator_api_key),
+) -> SkillCuratorRecommendationResponse:
+    try:
+        recommendation = await service.dismiss_recommendation(
+            recommendation_id=recommendation_id,
+            operator_id=operator_id,
+            reason_code=payload.reason_code,
+            reason_note=payload.reason_note,
+        )
+        await session.commit()
+        return SkillCuratorRecommendationResponse.model_validate(recommendation)
+    except Exception:
+        await session.rollback()
+        raise
+
+
 @router.post(
     "/skill-artifacts/from-reflection-proposal",
     response_model=SkillArtifactResponse,
@@ -88,6 +196,30 @@ async def create_skill_candidate_from_reflection_proposal(
     )
     await session.commit()
     return SkillArtifactResponse.model_validate(artifact)
+
+
+@router.post(
+    "/skill-artifacts/staged-replacements/from-reflection-proposal",
+    response_model=SkillArtifactResponse,
+)
+async def stage_skill_replacement_from_reflection_proposal(
+    payload: StageSkillReplacementFromProposalRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: SkillReplacementStagingService = Depends(get_skill_replacement_staging_service),
+    operator_id: str = Depends(require_operator_api_key),
+) -> SkillArtifactResponse:
+    try:
+        artifact = await service.stage_replacement_from_proposal(
+            proposal_id=payload.proposal_id,
+            operator_id=operator_id,
+            reason_code=payload.reason_code,
+            reason_note=payload.reason_note,
+        )
+        await session.commit()
+        return SkillArtifactResponse.model_validate(artifact)
+    except Exception:
+        await session.rollback()
+        raise
 
 
 @router.post(
@@ -133,6 +265,127 @@ async def activate_skill_artifact(
 
 
 @router.post(
+    "/skill-artifacts/{artifact_id}/replace",
+    response_model=SkillArtifactResponse,
+)
+async def replace_skill_artifact(
+    artifact_id: str,
+    payload: ReplaceSkillArtifactRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: SkillArtifactLifecycleService = Depends(get_skill_artifact_lifecycle_service),
+    operator_id: str = Depends(require_operator_api_key),
+) -> SkillArtifactResponse:
+    try:
+        artifact = await service.replace_selectable(
+            artifact_id=artifact_id,
+            operator_id=operator_id,
+            reason_code=payload.reason_code,
+            reason_note=payload.reason_note,
+        )
+        await session.commit()
+        return SkillArtifactResponse.model_validate(artifact)
+    except Exception:
+        await session.rollback()
+        raise
+
+
+@router.post(
+    "/skill-artifacts/{artifact_id}/stabilize",
+    response_model=SkillArtifactResponse,
+)
+async def stabilize_skill_artifact(
+    artifact_id: str,
+    payload: StabilizeSkillArtifactRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: SkillArtifactLifecycleService = Depends(get_skill_artifact_lifecycle_service),
+    operator_id: str = Depends(require_operator_api_key),
+) -> SkillArtifactResponse:
+    artifact = await service.stabilize_active(
+        artifact_id=artifact_id,
+        operator_id=operator_id,
+        reason_code=payload.reason_code,
+        reason_note=payload.reason_note,
+    )
+    await session.commit()
+    return SkillArtifactResponse.model_validate(artifact)
+
+
+@router.post(
+    "/skill-artifacts/{artifact_id}/suppress",
+    response_model=SkillArtifactResponse,
+)
+async def suppress_skill_artifact(
+    artifact_id: str,
+    payload: SuppressSkillArtifactRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: SkillArtifactLifecycleService = Depends(get_skill_artifact_lifecycle_service),
+    operator_id: str = Depends(require_operator_api_key),
+) -> SkillArtifactResponse:
+    try:
+        artifact = await service.suppress_selectable(
+            artifact_id=artifact_id,
+            operator_id=operator_id,
+            reason_code=payload.reason_code,
+            reason_note=payload.reason_note,
+        )
+        await session.commit()
+        return SkillArtifactResponse.model_validate(artifact)
+    except Exception:
+        await session.rollback()
+        raise
+
+
+@router.post(
+    "/skill-artifacts/{artifact_id}/restore",
+    response_model=SkillArtifactResponse,
+)
+async def restore_skill_artifact(
+    artifact_id: str,
+    payload: RestoreSkillArtifactRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: SkillArtifactLifecycleService = Depends(get_skill_artifact_lifecycle_service),
+    operator_id: str = Depends(require_operator_api_key),
+) -> SkillArtifactResponse:
+    try:
+        artifact = await service.restore_suppressed(
+            artifact_id=artifact_id,
+            operator_id=operator_id,
+            reason_code=payload.reason_code,
+            reason_note=payload.reason_note,
+        )
+        await session.commit()
+        return SkillArtifactResponse.model_validate(artifact)
+    except Exception:
+        await session.rollback()
+        raise
+
+
+@router.post(
+    "/skill-artifacts/{artifact_id}/archive",
+    response_model=SkillArtifactResponse,
+)
+async def archive_skill_artifact(
+    artifact_id: str,
+    payload: ArchiveSkillArtifactRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: SkillArtifactLifecycleService = Depends(get_skill_artifact_lifecycle_service),
+    operator_id: str = Depends(require_operator_api_key),
+) -> SkillArtifactResponse:
+    try:
+        artifact = await service.archive_deprecated(
+            artifact_id=artifact_id,
+            operator_id=operator_id,
+            reason_code=payload.reason_code,
+            reason_note=payload.reason_note,
+        )
+        await session.commit()
+        return SkillArtifactResponse.model_validate(artifact)
+    except Exception:
+        await session.rollback()
+        raise
+
+
+@router.post(
     "/skill-artifacts/{artifact_id}/deactivate",
     response_model=SkillArtifactResponse,
 )
@@ -143,14 +396,18 @@ async def deactivate_skill_artifact(
     service: SkillArtifactLifecycleService = Depends(get_skill_artifact_lifecycle_service),
     operator_id: str = Depends(require_operator_api_key),
 ) -> SkillArtifactResponse:
-    artifact = await service.deactivate_active(
-        artifact_id=artifact_id,
-        operator_id=operator_id,
-        reason_code=payload.reason_code,
-        reason_note=payload.reason_note,
-    )
-    await session.commit()
-    return SkillArtifactResponse.model_validate(artifact)
+    try:
+        artifact = await service.deactivate_active(
+            artifact_id=artifact_id,
+            operator_id=operator_id,
+            reason_code=payload.reason_code,
+            reason_note=payload.reason_note,
+        )
+        await session.commit()
+        return SkillArtifactResponse.model_validate(artifact)
+    except Exception:
+        await session.rollback()
+        raise
 
 
 @router.get(
@@ -164,6 +421,19 @@ async def get_skill_artifact(
 ) -> SkillArtifactResponse:
     artifact = await service.get_artifact(artifact_id)
     return SkillArtifactResponse.model_validate(artifact)
+
+
+@router.get(
+    "/skill-artifacts/{artifact_id}/replacement-readiness",
+    response_model=SkillReplacementReadinessResponse,
+    dependencies=[Depends(require_operator_api_key)],
+)
+async def get_skill_artifact_replacement_readiness(
+    artifact_id: str,
+    service: SkillReplacementReadinessService = Depends(get_skill_replacement_readiness_service),
+) -> SkillReplacementReadinessResponse:
+    readiness = await service.get_replacement_readiness(artifact_id=artifact_id)
+    return SkillReplacementReadinessResponse.model_validate(readiness)
 
 
 @router.get(

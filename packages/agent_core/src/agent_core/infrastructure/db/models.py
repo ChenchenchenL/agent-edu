@@ -616,6 +616,13 @@ class SkillArtifactModel(Base):
     created_by: Mapped[str] = mapped_column(String(128), nullable=False)
     approved_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deprecated_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    suppressed_reason_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    suppressed_reason_note: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    suppressed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    suppressed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    suppressed_previous_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -630,6 +637,14 @@ Index(
     unique=True,
     postgresql_where=SkillArtifactModel.status.in_(["active", "stable"]),
     sqlite_where=SkillArtifactModel.status.in_(["active", "stable"]),
+)
+Index(
+    "uq_skill_artifacts_suppressed_name_scope",
+    SkillArtifactModel.name,
+    SkillArtifactModel.scope,
+    unique=True,
+    postgresql_where=SkillArtifactModel.status == "suppressed",
+    sqlite_where=SkillArtifactModel.status == "suppressed",
 )
 
 
@@ -672,6 +687,59 @@ Index(
     SkillUsageEventModel.created_at,
 )
 Index("ix_skill_usage_events_session_created", SkillUsageEventModel.session_id, SkillUsageEventModel.created_at)
+
+
+class SkillCuratorRecommendationModel(Base):
+    __tablename__ = "skill_curator_recommendations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    artifact_id: Mapped[str | None] = mapped_column(ForeignKey("skill_artifacts.id"), nullable=True)
+    skill_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    skill_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    artifact_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lineage_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    scope: Mapped[str] = mapped_column(String(64), nullable=False)
+    surface: Mapped[str] = mapped_column(String(64), nullable=False)
+    recommendation_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    recommended_action: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason_note: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    evidence_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    metrics_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    related_artifact_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    source_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    accepted_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    dismissed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision_reason_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    decision_reason_note: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    action_result: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+Index(
+    "ix_skill_curator_recs_status_type_created",
+    SkillCuratorRecommendationModel.status,
+    SkillCuratorRecommendationModel.recommendation_type,
+    SkillCuratorRecommendationModel.created_at,
+)
+Index(
+    "ix_skill_curator_recs_artifact_status_created",
+    SkillCuratorRecommendationModel.artifact_id,
+    SkillCuratorRecommendationModel.status,
+    SkillCuratorRecommendationModel.created_at,
+)
+Index(
+    "ix_skill_curator_recs_skill_scope_surface_status",
+    SkillCuratorRecommendationModel.skill_name,
+    SkillCuratorRecommendationModel.scope,
+    SkillCuratorRecommendationModel.surface,
+    SkillCuratorRecommendationModel.status,
+)
 
 
 class AuditEventModel(Base):

@@ -16,10 +16,16 @@ from agent_core.application.services.reflection_proposal_rollout_resolver import
 from agent_core.application.services.reflection_proposal_rollout_observation_scheduler import (
     ReflectionProposalRolloutObservationScheduler,
 )
+from agent_core.application.services.reflection_proposal_rollout_auto_governance import (
+    ReflectionProposalRolloutDecisionOrchestrator,
+    ReflectionProposalRolloutDecisionScheduler,
+)
 from agent_core.application.services.reflection_proposal_rollouts import ReflectionProposalRolloutService
 from agent_core.application.services.reflection_proposals import ReflectionProposalService
 from agent_core.application.services.reflection_replay import ReflectionReplayService
+from agent_core.application.services.skills import SkillCandidateService
 from agent_core.application.services.strategy_cards import StrategyCardService
+from agent_core.application.services.tool_plan_runtime import ToolPlanRuntimeExecutor
 from agent_core.application.services.workflow import WorkflowRunService
 from agent_core.domain.entities.autonomy import GoalAutonomyState, TaskAttempt
 from agent_core.domain.entities.autonomy import ScheduledAutonomyJob
@@ -40,6 +46,7 @@ from agent_core.domain.entities.reflection_closure import (
 )
 from agent_core.domain.entities.reflection import ReflectionAction, ReflectionRecord
 from agent_core.domain.entities.reflection_v2 import ReflectionOutcomeEvaluation
+from agent_core.domain.entities.skill import SkillArtifact, SkillUsageEvent
 from agent_core.domain.errors import ValidationError
 from agent_core.infrastructure.llm.mock_provider import MockLLMProvider
 
@@ -263,6 +270,43 @@ class StubProposalRolloutRepository:
         self.items[entity.id] = entity
 
 
+class StubSkillUsageEventRepository:
+    def __init__(self, events: list[SkillUsageEvent] | None = None):
+        self.events: list[SkillUsageEvent] = list(events or [])
+
+    async def list_events(
+        self,
+        *,
+        artifact_id=None,
+        skill_name=None,
+        learner_goal_id=None,
+        session_id=None,
+        surface=None,
+        outcome_status=None,
+        resolver_status=None,
+        created_at_from=None,
+        limit=50,
+    ):
+        events = list(self.events)
+        if artifact_id is not None:
+            events = [item for item in events if item.skill_artifact_id == artifact_id]
+        if skill_name is not None:
+            events = [item for item in events if item.skill_name == skill_name]
+        if learner_goal_id is not None:
+            events = [item for item in events if item.learner_goal_id == learner_goal_id]
+        if session_id is not None:
+            events = [item for item in events if item.session_id == session_id]
+        if surface is not None:
+            events = [item for item in events if item.surface == surface]
+        if outcome_status is not None:
+            events = [item for item in events if item.outcome_status == outcome_status]
+        if resolver_status is not None:
+            events = [item for item in events if item.resolver_status == resolver_status]
+        if created_at_from is not None:
+            events = [item for item in events if item.created_at >= created_at_from]
+        return events[:limit]
+
+
 class StubProposalRolloutObservationRepository:
     def __init__(self):
         self.items: dict[str, ReflectionProposalRolloutObservation] = {}
@@ -336,6 +380,44 @@ class StubGoalSkillBindingRepository:
         return [item for item in self.items.values() if item.learner_goal_id == learner_goal_id]
 
     async def update(self, entity: GoalSkillBinding):
+        self.items[entity.id] = entity
+
+
+class StubSkillArtifactRepository:
+    def __init__(
+        self,
+        artifact: SkillArtifact | None = None,
+        items: list[SkillArtifact] | None = None,
+    ):
+        self.items: dict[str, SkillArtifact] = {}
+        if artifact is not None:
+            self.items[artifact.id] = artifact
+        for item in items or []:
+            self.items[item.id] = item
+
+    async def create(self, entity):
+        self.items[entity.id] = entity
+
+    async def get_by_id(self, artifact_id: str):
+        return self.items.get(artifact_id)
+
+    async def get_by_source_proposal_id(self, proposal_id: str):
+        for item in self.items.values():
+            if item.source_proposal_id == proposal_id:
+                return item
+        return None
+
+    async def max_candidate_patch_version(self, name: str):
+        max_patch = -1
+        for artifact in self.items.values():
+            if artifact.name != name or not artifact.version.startswith("0.1."):
+                continue
+            patch = artifact.version.removeprefix("0.1.")
+            if patch.isdecimal():
+                max_patch = max(max_patch, int(patch))
+        return max_patch
+
+    async def update(self, entity: SkillArtifact):
         self.items[entity.id] = entity
 
 
@@ -643,6 +725,318 @@ class StubDbSession:
     def begin_nested(self):
         self.nested_transactions += 1
         return StubTransaction()
+
+
+def _approved_rollout_proposal(
+    *,
+    learner_goal_id: str,
+    proposal_type: str = "skill_package",
+    target_scope: str = "quiz",
+) -> ReflectionProposal:
+    if proposal_type == "skill_package":
+        structured_patch_payload = {
+            "artifact_kind": "declarative_skill_package",
+            "skill_name": "create_quiz",
+            "bundle_id": "bundle-1",
+            "surface": target_scope,
+            "match_rules": {"required_root_causes": ["knowledge_gap"]},
+            "runtime_directives": {"question_count": 3, "feedback_style": "guided_correction"},
+            "tool_plan": [],
+            "scoring_contract": {"mode": "rule_replay_live_llm"},
+        }
+    elif proposal_type == "workflow_optimization":
+        structured_patch_payload = {
+            "review_interval_policy": "denser",
+            "assessment_threshold_policy": "earlier",
+            "replan_mode_policy": "more_aggressive",
+        }
+    else:
+        structured_patch_payload = {
+            "response_preference_bias": "scaffold_first",
+            "hint_level_preference": "targeted",
+            "teaching_goal_override": "reduce_direct_answers",
+        }
+    return ReflectionProposal.build(
+        reflection_record_id="reflection-1",
+        learner_goal_id=learner_goal_id,
+        proposal_type=proposal_type,
+        target_scope=target_scope,
+        priority_score=0.8,
+        hypothesis="Reusable rollout improvement helps.",
+        change_summary="Apply rollout improvement.",
+        structured_patch_payload=structured_patch_payload,
+        expected_improvement="Improve learner outcomes.",
+        risk_level="low",
+        evidence_snapshot={},
+    ).enqueue_sandbox(
+        sandbox_run_id="sandbox-1",
+    ).start_sandbox(
+        sandbox_run_id="sandbox-1",
+    ).complete_sandbox(
+        sandbox_run_id="sandbox-1",
+        evaluation_status="effective",
+        evaluation_summary="sandbox:0.20",
+    ).approve(
+        operator_id="operator",
+        reason_code="validated",
+        reason_note=None,
+    )
+
+
+def _rollout_service_for_tests(
+    *,
+    audit_repository: StubAuditRepository,
+    goal: LearnerGoal,
+    proposal_repository: StubProposalRepository,
+    rollout_repository: StubProposalRolloutRepository,
+    observation_repository: StubProposalRolloutObservationRepository | None = None,
+    decision_repository: StubProposalRolloutDecisionRepository | None = None,
+    binding_repository: StubGoalSkillBindingRepository | None = None,
+    artifact_repository: StubSkillArtifactRepository | None = None,
+    usage_repository: StubSkillUsageEventRepository | None = None,
+    observation_scheduler: ReflectionProposalRolloutObservationScheduler | None = None,
+) -> ReflectionProposalRolloutService:
+    audit_service = AuditService(repository=audit_repository)
+    workflow_repository = StubWorkflowRunRepository([])
+    return ReflectionProposalRolloutService(
+        proposal_repository=proposal_repository,
+        rollout_repository=rollout_repository,
+        rollout_observation_repository=observation_repository or StubProposalRolloutObservationRepository(),
+        rollout_decision_repository=decision_repository or StubProposalRolloutDecisionRepository(),
+        goal_repository=StubGoalRepository(goal),
+        study_plan_repository=StubStudyPlanRepository([]),
+        plan_stage_repository=StubPlanStageRepository(),
+        daily_task_repository=StubDailyTaskRepository([]),
+        workflow_run_repository=workflow_repository,
+        goal_autonomy_state_repository=None,
+        goal_skill_binding_repository=binding_repository or StubGoalSkillBindingRepository(),
+        skill_artifact_repository=artifact_repository or StubSkillArtifactRepository(),
+        session_repository=StubSessionRepository([]),
+        message_repository=StubSessionMessageRepository([]),
+        reflection_record_repository=StubReflectionRecordRepository(),
+        reflection_evidence_repository=StubReflectionEvidenceRepository(),
+        task_attempt_repository=StubTaskAttemptRepository([]),
+        usage_repository=usage_repository or StubSkillUsageEventRepository(),
+        planner_service=PlannerService(llm_provider=MockLLMProvider("mock-tutor-v1"), audit_service=audit_service),
+        workflow_run_service=WorkflowRunService(
+            repository=workflow_repository,
+            db_session=StubDbSession(),
+            audit_service=audit_service,
+        ),
+        observation_scheduler=observation_scheduler,
+        audit_service=audit_service,
+    )
+
+
+def _skill_package_artifact_for_proposal(
+    proposal: ReflectionProposal,
+    *,
+    status: str,
+) -> SkillArtifact:
+    artifact = SkillArtifact.build(
+        name="create_quiz",
+        version="0.1.0",
+        skill_type="learned",
+        scope=proposal.target_scope,
+        status="staged" if status in {"active", "stable", "suppressed"} else status,
+        description="Learned quiz skill package.",
+        definition={
+            "artifact_kind": "declarative_skill_package",
+            "skill_name": "create_quiz",
+            "surface": proposal.target_scope,
+            "match_rules": {"required_root_causes": ["knowledge_gap"]},
+            "runtime_directives": {"question_count": 3, "feedback_style": "guided_correction"},
+            "tool_plan": [],
+            "scoring_contract": {"mode": "rule_replay_live_llm"},
+        },
+        runtime_directives={"question_count": 3, "feedback_style": "guided_correction"},
+        tool_plan=[],
+        source_reflection_ids=[proposal.reflection_record_id],
+        source_proposal_id=proposal.id,
+        quality_score=0.8,
+        created_by="reflection_proposal",
+    )
+    if status == "active":
+        return artifact.mark_active(operator_id="operator")
+    if status == "stable":
+        return artifact.mark_active(operator_id="operator").mark_stable(operator_id="operator")
+    if status == "suppressed":
+        return artifact.mark_active(operator_id="operator").mark_suppressed(
+            operator_id="operator-suppress",
+            reason_code="operator_request",
+            reason_note="Temporarily suppress rollout artifact.",
+        )
+    return artifact
+
+
+def _realizable_source_artifact() -> SkillArtifact:
+    return SkillArtifact.build(
+        name="create_quiz",
+        version="0.1.8",
+        skill_type="learned",
+        scope="quiz",
+        status="stable",
+        description="Current quiz skill package.",
+        definition={
+            "artifact_kind": "declarative_skill_package",
+            "match_rules": {"task_types": ["practice"], "topic_keys": ["matrices"]},
+            "scoring_contract": {"mode": "rule_replay_live_llm", "minimum_sample_count": 2},
+        },
+        runtime_directives={"question_count": 3, "feedback_style": "guided_correction"},
+        tool_plan=[],
+        compatibility_contract={
+            "surfaces": ["quiz"],
+            "implementation_binding": "create_quiz",
+            "input_schema_version": "1.0",
+            "output_schema_version": "1.0",
+            "dynamic_execution": False,
+        },
+        source_reflection_ids=["reflection-source"],
+        source_memory_ids=["memory-source"],
+        source_proposal_id="proposal-source",
+        quality_score=0.8,
+        created_by="operator",
+        approved_by="operator",
+    )
+
+
+def _related_merge_artifact(
+    *,
+    source: SkillArtifact,
+    status: str = "stable",
+    name: str | None = None,
+    scope: str | None = None,
+    implementation_binding: str | None = None,
+) -> SkillArtifact:
+    artifact_name = name or source.name
+    artifact_scope = scope or source.scope
+    return SkillArtifact.build(
+        name=artifact_name,
+        version="0.1.9",
+        skill_type="learned",
+        scope=artifact_scope,
+        status=status,
+        description="Related merge skill package.",
+        definition={
+            "artifact_kind": "declarative_skill_package",
+            "match_rules": {
+                "task_types": ["review", "practice"],
+                "topic_keys": ["matrices", "linear-systems"],
+                "non_list_rule": "ignored",
+            },
+            "scoring_contract": {"mode": "rule_replay_live_llm", "minimum_sample_count": 4},
+        },
+        runtime_directives={"question_count": 5, "feedback_style": "direct"},
+        tool_plan=[],
+        compatibility_contract={
+            "surfaces": [artifact_scope],
+            "implementation_binding": implementation_binding or artifact_name,
+            "input_schema_version": "1.0",
+            "output_schema_version": "1.0",
+            "dynamic_execution": False,
+        },
+        source_reflection_ids=["reflection-related"],
+        quality_score=0.75,
+        created_by="operator",
+        approved_by="operator",
+    )
+
+
+def _skill_patch_request_proposal(
+    *,
+    artifact: SkillArtifact,
+    status: str = "approved",
+    evaluation_status: str = "effective",
+) -> ReflectionProposal:
+    proposal = ReflectionProposal.build(
+        reflection_record_id="reflection-patch-1",
+        learner_goal_id="goal-1",
+        proposal_type="skill_patch_request",
+        target_scope=artifact.scope,
+        priority_score=0.8,
+        hypothesis=f"Curator evidence indicates {artifact.name} needs a patch.",
+        change_summary="Create governed patch request.",
+        structured_patch_payload={
+            "artifact_id": artifact.id,
+            "skill_name": artifact.name,
+            "skill_version": artifact.version,
+            "scope": artifact.scope,
+            "surface": artifact.scope,
+            "recommendation_id": "recommendation-1",
+            "recommendation_reason_code": "quality_regression",
+            "usage_event_ids": ["usage-1", "usage-2"],
+            "related_artifact_ids": ["artifact-related"],
+            "evidence_snapshot": {"usage_event_ids": ["usage-1", "usage-2"]},
+            "metrics_snapshot": {"negative_usage_rate": 0.5},
+        },
+        expected_improvement="Route patch evidence through governed review.",
+        risk_level="medium",
+        evidence_snapshot={"source": "skill_curator_recommendation"},
+    )
+    if status == "proposed":
+        return proposal
+    completed = proposal.enqueue_sandbox(
+        sandbox_run_id="sandbox-patch-1",
+    ).start_sandbox(
+        sandbox_run_id="sandbox-patch-1",
+    ).complete_sandbox(
+        sandbox_run_id="sandbox-patch-1",
+        evaluation_status=evaluation_status,
+        evaluation_summary=f"sandbox:{evaluation_status}",
+    )
+    if status == "sandbox_completed":
+        return completed
+    if status == "approved":
+        return completed.approve(
+            operator_id="operator",
+            reason_code="validated",
+            reason_note=None,
+        )
+    return completed.with_status(status)
+
+
+def _effective_patch_request_evaluation(proposal: ReflectionProposal) -> ReflectionProposalEvaluation:
+    return ReflectionProposalEvaluation.build(
+        proposal_id=proposal.id,
+        comparison_window_size=2,
+        baseline_policy_snapshot={"artifact_id": proposal.structured_patch_payload["artifact_id"]},
+        candidate_policy_snapshot={"usage_event_ids": proposal.structured_patch_payload["usage_event_ids"]},
+        evaluator_type="rule",
+        sandbox_run_id=proposal.latest_sandbox_run_id,
+    ).with_result(
+        evaluation_status="effective",
+        simulated_outcome_summary={"score_delta": 0.15},
+        score_delta=0.15,
+        sandbox_run_id=proposal.latest_sandbox_run_id,
+    )
+
+
+def _rolled_out_rollout_for_proposal(proposal: ReflectionProposal) -> ReflectionProposalRollout:
+    return ReflectionProposalRollout.build(
+        proposal_id=proposal.id,
+        learner_goal_id=proposal.learner_goal_id,
+        surface=proposal.target_scope,
+        baseline_snapshot=proposal.structured_patch_payload,
+        runtime_overlay_payload={},
+        activated_by="operator",
+    ).with_status("rolled_out")
+
+
+def _rolled_out_binding_for_rollout(
+    *,
+    proposal: ReflectionProposal,
+    rollout: ReflectionProposalRollout,
+) -> GoalSkillBinding:
+    return GoalSkillBinding.build(
+        proposal_id=proposal.id,
+        rollout_id=rollout.id,
+        learner_goal_id=proposal.learner_goal_id,
+        surface=proposal.target_scope,
+        priority_score=proposal.priority_score,
+        match_rules=dict(proposal.structured_patch_payload.get("match_rules") or {}),
+        runtime_directives=dict(proposal.structured_patch_payload.get("runtime_directives") or {}),
+        tool_plan=[dict(item) for item in proposal.structured_patch_payload.get("tool_plan") or []],
+    ).with_status("rolled_out")
 
 
 class StubMemoryService:
@@ -1554,7 +1948,7 @@ async def test_effective_reflection_creates_skill_package_proposals():
         repository=proposal_repository,
         approval_decision_repository=StubProposalApprovalDecisionRepository(),
         evaluation_repository=StubProposalEvaluationRepository(),
-        autonomy_job_service=AutonomyJobService(repository=None, audit_service=audit_service),
+        autonomy_job_service=None,
         audit_service=audit_service,
     )
     reflection = ReflectionRecord.build(
@@ -1589,6 +1983,685 @@ async def test_effective_reflection_creates_skill_package_proposals():
     assert proposals
     assert all(item.proposal_type == "skill_package" for item in proposals)
     assert {item.target_scope for item in proposals} == {"chat", "hint", "quiz"}
+
+
+async def test_proposal_service_creates_reference_only_skill_patch_request_from_recommendation():
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(repository=audit_repository)
+    proposal_repository = StubProposalRepository()
+    proposal_service = ReflectionProposalService(
+        repository=proposal_repository,
+        approval_decision_repository=StubProposalApprovalDecisionRepository(),
+        evaluation_repository=StubProposalEvaluationRepository(),
+        autonomy_job_service=None,
+        audit_service=audit_service,
+    )
+
+    proposal = await proposal_service.create_skill_patch_request_from_recommendation(
+        recommendation_id="recommendation-1",
+        artifact_id="artifact-1",
+        skill_name="create_quiz",
+        skill_version="0.1.0",
+        scope="quiz",
+        surface="quiz",
+        recommendation_reason_code="quality_regression",
+        evidence_snapshot={
+            "usage_event_ids": ["usage-1", "usage-2"],
+            "negative_usage_event_ids": ["usage-2", "usage-3"],
+            "learner_goal_id": "goal-1",
+            "reflection_record_id": "reflection-1",
+        },
+        metrics_snapshot={"negative_usage_rate": 0.5},
+        related_artifact_ids=["artifact-related"],
+        reflection_record_id="reflection-1",
+        learner_goal_id="goal-1",
+        operator_id="operator",
+    )
+    described = await proposal_service.describe(proposal)
+
+    assert proposal.proposal_type == "skill_patch_request"
+    assert proposal.status == "proposed"
+    assert proposal.target_scope == "quiz"
+    assert proposal.structured_patch_payload == {
+        "artifact_id": "artifact-1",
+        "skill_name": "create_quiz",
+        "skill_version": "0.1.0",
+        "scope": "quiz",
+        "surface": "quiz",
+        "recommendation_id": "recommendation-1",
+        "recommendation_reason_code": "quality_regression",
+        "usage_event_ids": ["usage-1", "usage-2", "usage-3"],
+        "related_artifact_ids": ["artifact-related"],
+        "evidence_snapshot": {
+            "usage_event_ids": ["usage-1", "usage-2"],
+            "negative_usage_event_ids": ["usage-2", "usage-3"],
+            "learner_goal_id": "goal-1",
+            "reflection_record_id": "reflection-1",
+        },
+        "metrics_snapshot": {"negative_usage_rate": 0.5},
+    }
+    assert "runtime_directives" not in proposal.structured_patch_payload
+    assert "tool_plan" not in proposal.structured_patch_payload
+    assert described["rollout_eligible"] is False
+    assert described["activation_surface"] is None
+    assert [event.event_type for event in audit_repository.events] == [
+        "reflection.proposal.created",
+        "reflection.proposal.manual_review_required",
+    ]
+
+    reused = await proposal_service.create_skill_patch_request_from_recommendation(
+        recommendation_id="recommendation-1",
+        artifact_id="artifact-1",
+        skill_name="create_quiz",
+        skill_version="0.1.0",
+        scope="quiz",
+        surface="quiz",
+        recommendation_reason_code="quality_regression",
+        evidence_snapshot={
+            "usage_event_ids": ["usage-1", "usage-2"],
+            "negative_usage_event_ids": ["usage-2", "usage-3"],
+            "learner_goal_id": "goal-1",
+            "reflection_record_id": "reflection-1",
+        },
+        metrics_snapshot={"negative_usage_rate": 0.5},
+        related_artifact_ids=["artifact-related"],
+        reflection_record_id="reflection-1",
+        learner_goal_id="goal-1",
+        operator_id="operator",
+    )
+
+    assert reused.id == proposal.id
+    assert sum(1 for item in proposal_repository.items.values() if item.proposal_type == "skill_patch_request") == 1
+    assert audit_repository.events[-1].event_type == "reflection.proposal.deduplicated"
+
+
+async def test_proposal_service_extracts_usage_event_ids_from_coverage_regression_evidence():
+    proposal_service = ReflectionProposalService(
+        repository=StubProposalRepository(),
+        approval_decision_repository=StubProposalApprovalDecisionRepository(),
+        evaluation_repository=StubProposalEvaluationRepository(),
+        autonomy_job_service=None,
+        audit_service=AuditService(repository=StubAuditRepository()),
+    )
+
+    proposal = await proposal_service.create_skill_patch_request_from_recommendation(
+        recommendation_id="recommendation-coverage-1",
+        artifact_id="artifact-1",
+        skill_name="create_quiz",
+        skill_version="0.1.0",
+        scope="quiz",
+        surface="quiz",
+        recommendation_reason_code="coverage_regression",
+        evidence_snapshot={
+            "learner_goal_id": "goal-1",
+            "reflection_record_id": "reflection-1",
+            "coverage_regression": {
+                "attributed_usage_event_ids_by_topic": {"geometry": ["usage-1", "usage-2"]},
+                "binding_gap_event_ids_by_topic": {"geometry": ["usage-2", "usage-3"]},
+                "unresolved_usage_event_ids_by_topic": {"geometry": ["usage-4"]},
+            },
+        },
+        metrics_snapshot={"coverage_drift_topic_count": 1},
+        related_artifact_ids=[],
+        reflection_record_id="reflection-1",
+        learner_goal_id="goal-1",
+        operator_id="operator",
+    )
+
+    assert proposal.structured_patch_payload["usage_event_ids"] == [
+        "usage-1",
+        "usage-2",
+        "usage-3",
+        "usage-4",
+    ]
+    assert proposal.structured_patch_payload["recommendation_reason_code"] == "coverage_regression"
+
+
+async def test_proposal_service_creates_skill_merge_package_from_recommendation():
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(repository=audit_repository)
+    proposal_repository = StubProposalRepository()
+    source_artifact = _realizable_source_artifact()
+    related_artifact = _related_merge_artifact(source=source_artifact)
+    proposal_service = ReflectionProposalService(
+        repository=proposal_repository,
+        approval_decision_repository=StubProposalApprovalDecisionRepository(),
+        evaluation_repository=StubProposalEvaluationRepository(),
+        artifact_repository=StubSkillArtifactRepository(items=[source_artifact, related_artifact]),
+        autonomy_job_service=None,
+        audit_service=audit_service,
+    )
+
+    proposal = await proposal_service.create_skill_merge_package_from_recommendation(
+        recommendation_id="recommendation-merge-1",
+        artifact_id=source_artifact.id,
+        skill_name=source_artifact.name,
+        skill_version=source_artifact.version,
+        scope=source_artifact.scope,
+        surface=source_artifact.scope,
+        recommendation_reason_code="merge_candidate",
+        evidence_snapshot={"learner_goal_id": "goal-1", "reflection_record_id": "reflection-merge-1"},
+        metrics_snapshot={"overlap_score": 0.8},
+        related_artifact_ids=[related_artifact.id, related_artifact.id, source_artifact.id],
+        reflection_record_id="reflection-merge-1",
+        learner_goal_id="goal-1",
+        operator_id="operator",
+    )
+    described = await proposal_service.describe(proposal)
+
+    assert proposal.proposal_type == "skill_package"
+    assert proposal.status == "proposed"
+    assert proposal.target_scope == source_artifact.scope
+    assert proposal.priority_score == pytest.approx(0.85)
+    assert proposal.structured_patch_payload == {
+        "artifact_kind": "declarative_skill_package",
+        "skill_name": source_artifact.name,
+        "surface": source_artifact.scope,
+        "match_rules": {
+            "task_types": ["practice", "review"],
+            "topic_keys": ["matrices", "linear-systems"],
+        },
+        "runtime_directives": source_artifact.runtime_directives,
+        "tool_plan": source_artifact.tool_plan,
+        "scoring_contract": source_artifact.definition["scoring_contract"],
+    }
+    assert proposal.evidence_snapshot["source"] == "skill_curator_merge_recommendation"
+    assert proposal.evidence_snapshot["recommendation_id"] == "recommendation-merge-1"
+    assert proposal.evidence_snapshot["source_artifact_id"] == source_artifact.id
+    assert proposal.evidence_snapshot["source_artifact_lineage_id"] == source_artifact.lineage_id
+    assert proposal.evidence_snapshot["merge_source_artifact_ids"] == [related_artifact.id]
+    assert described["rollout_eligible"] is True
+    assert described["activation_surface"] == "quiz"
+    assert [event.event_type for event in audit_repository.events] == [
+        "reflection.proposal.created",
+        "reflection.proposal.skill_merge_created",
+        "reflection.proposal.manual_review_required",
+    ]
+
+    reused = await proposal_service.create_skill_merge_package_from_recommendation(
+        recommendation_id="recommendation-merge-1",
+        artifact_id=source_artifact.id,
+        skill_name=source_artifact.name,
+        skill_version=source_artifact.version,
+        scope=source_artifact.scope,
+        surface=source_artifact.scope,
+        recommendation_reason_code="merge_candidate",
+        evidence_snapshot={"learner_goal_id": "goal-1", "reflection_record_id": "reflection-merge-1"},
+        metrics_snapshot={"overlap_score": 0.8},
+        related_artifact_ids=[related_artifact.id],
+        reflection_record_id="reflection-merge-1",
+        learner_goal_id="goal-1",
+        operator_id="operator",
+    )
+
+    assert reused.id == proposal.id
+    assert sum(1 for item in proposal_repository.items.values() if item.proposal_type == "skill_package") == 1
+    assert audit_repository.events[-1].event_type == "reflection.proposal.deduplicated"
+
+
+async def test_proposal_service_accepts_skill_merge_artifacts_with_same_implementation_binding():
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(repository=audit_repository)
+    proposal_repository = StubProposalRepository()
+    source_artifact = _realizable_source_artifact()
+    related_artifact = _related_merge_artifact(
+        source=source_artifact,
+        name="quiz_practice_variant",
+        implementation_binding="create_quiz",
+    )
+    proposal_service = ReflectionProposalService(
+        repository=proposal_repository,
+        approval_decision_repository=StubProposalApprovalDecisionRepository(),
+        evaluation_repository=StubProposalEvaluationRepository(),
+        artifact_repository=StubSkillArtifactRepository(items=[source_artifact, related_artifact]),
+        autonomy_job_service=None,
+        audit_service=audit_service,
+    )
+
+    proposal = await proposal_service.create_skill_merge_package_from_recommendation(
+        recommendation_id="recommendation-merge-2",
+        artifact_id=source_artifact.id,
+        skill_name=source_artifact.name,
+        skill_version=source_artifact.version,
+        scope=source_artifact.scope,
+        surface=source_artifact.scope,
+        recommendation_reason_code="merge_candidate",
+        evidence_snapshot={"learner_goal_id": "goal-1", "reflection_record_id": "reflection-merge-2"},
+        metrics_snapshot={"overlap_score": 0.8},
+        related_artifact_ids=[related_artifact.id],
+        reflection_record_id="reflection-merge-2",
+        learner_goal_id="goal-1",
+        operator_id="operator",
+    )
+
+    assert proposal.proposal_type == "skill_package"
+    assert proposal.structured_patch_payload["skill_name"] == source_artifact.name
+    assert proposal.structured_patch_payload["match_rules"] == {
+        "task_types": ["practice", "review"],
+        "topic_keys": ["matrices", "linear-systems"],
+    }
+    assert proposal.evidence_snapshot["merge_source_artifact_ids"] == [related_artifact.id]
+
+
+@pytest.mark.parametrize(
+    ("related_artifact", "error"),
+    [
+        (None, "related_artifact_ids"),
+        ("suppressed", "governed candidate"),
+        ("archived", "governed candidate"),
+        ("rejected", "governed candidate"),
+        ("wrong-name", "match source skill/scope or implementation binding"),
+    ],
+)
+async def test_proposal_service_rejects_invalid_skill_merge_artifacts(related_artifact, error: str):
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(repository=audit_repository)
+    source_artifact = _realizable_source_artifact()
+    if related_artifact in {"suppressed", "archived", "rejected"}:
+        related = _related_merge_artifact(source=source_artifact, status=related_artifact)
+    elif related_artifact == "wrong-name":
+        related = _related_merge_artifact(source=source_artifact, name="adaptive_hint")
+    else:
+        related = None
+    artifacts = [source_artifact] + ([related] if related is not None else [])
+    proposal_service = ReflectionProposalService(
+        repository=StubProposalRepository(),
+        approval_decision_repository=StubProposalApprovalDecisionRepository(),
+        evaluation_repository=StubProposalEvaluationRepository(),
+        artifact_repository=StubSkillArtifactRepository(items=artifacts),
+        autonomy_job_service=None,
+        audit_service=audit_service,
+    )
+
+    with pytest.raises(ValidationError, match=error):
+        await proposal_service.create_skill_merge_package_from_recommendation(
+            recommendation_id="recommendation-merge-1",
+            artifact_id=source_artifact.id,
+            skill_name=source_artifact.name,
+            skill_version=source_artifact.version,
+            scope=source_artifact.scope,
+            surface=source_artifact.scope,
+            recommendation_reason_code="merge_candidate",
+            evidence_snapshot={"learner_goal_id": "goal-1", "reflection_record_id": "reflection-merge-1"},
+            metrics_snapshot={"overlap_score": 0.8},
+            related_artifact_ids=[related.id] if related is not None else [],
+            reflection_record_id="reflection-merge-1",
+            learner_goal_id="goal-1",
+            operator_id="operator",
+        )
+
+    assert audit_repository.events == []
+
+
+async def test_proposal_service_realizes_approved_skill_patch_request_as_replacement_skill_package():
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(repository=audit_repository)
+    proposal_repository = StubProposalRepository()
+    evaluation_repository = StubProposalEvaluationRepository()
+    artifact = _realizable_source_artifact()
+    patch_request = _skill_patch_request_proposal(artifact=artifact)
+    evaluation = _effective_patch_request_evaluation(patch_request)
+    await proposal_repository.create(patch_request)
+    await evaluation_repository.create(evaluation)
+    proposal_service = ReflectionProposalService(
+        repository=proposal_repository,
+        approval_decision_repository=StubProposalApprovalDecisionRepository(),
+        evaluation_repository=evaluation_repository,
+        artifact_repository=StubSkillArtifactRepository(artifact),
+        autonomy_job_service=None,
+        audit_service=audit_service,
+    )
+
+    realized = await proposal_service.realize_skill_patch_request(
+        proposal_id=patch_request.id,
+        operator_id="operator",
+        reason_code="operator_reviewed",
+        reason_note="Create replacement proposal.",
+    )
+    described = await proposal_service.describe(realized)
+
+    assert realized.proposal_type == "skill_package"
+    assert realized.status == "proposed"
+    assert realized.target_scope == artifact.scope
+    assert realized.structured_patch_payload == {
+        "artifact_kind": "declarative_skill_package",
+        "skill_name": artifact.name,
+        "surface": artifact.scope,
+        "match_rules": artifact.definition["match_rules"],
+        "runtime_directives": artifact.runtime_directives,
+        "tool_plan": artifact.tool_plan,
+        "scoring_contract": artifact.definition["scoring_contract"],
+    }
+    assert realized.evidence_snapshot["source"] == "skill_patch_request_realization"
+    assert realized.evidence_snapshot["source_skill_patch_request_id"] == patch_request.id
+    assert realized.evidence_snapshot["source_artifact_id"] == artifact.id
+    assert realized.evidence_snapshot["source_artifact_lineage_id"] == artifact.lineage_id
+    assert realized.evidence_snapshot["recommendation_id"] == "recommendation-1"
+    assert realized.evidence_snapshot["usage_event_ids"] == ["usage-1", "usage-2"]
+    assert realized.evidence_snapshot["patch_request_evaluation"]["id"] == evaluation.id
+    assert described["rollout_eligible"] is True
+    assert described["activation_surface"] == "quiz"
+    assert artifact.status == "stable"
+    assert [event.event_type for event in audit_repository.events] == [
+        "reflection.proposal.created",
+        "reflection.proposal.skill_patch_realized",
+        "reflection.proposal.manual_review_required",
+    ]
+
+
+async def test_proposal_service_reuses_realized_skill_patch_request():
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(repository=audit_repository)
+    proposal_repository = StubProposalRepository()
+    evaluation_repository = StubProposalEvaluationRepository()
+    artifact = _realizable_source_artifact()
+    patch_request = _skill_patch_request_proposal(artifact=artifact)
+    await proposal_repository.create(patch_request)
+    await evaluation_repository.create(_effective_patch_request_evaluation(patch_request))
+    proposal_service = ReflectionProposalService(
+        repository=proposal_repository,
+        approval_decision_repository=StubProposalApprovalDecisionRepository(),
+        evaluation_repository=evaluation_repository,
+        artifact_repository=StubSkillArtifactRepository(artifact),
+        autonomy_job_service=None,
+        audit_service=audit_service,
+    )
+
+    first = await proposal_service.realize_skill_patch_request(
+        proposal_id=patch_request.id,
+        operator_id="operator",
+        reason_code="operator_reviewed",
+        reason_note=None,
+    )
+    reused = await proposal_service.realize_skill_patch_request(
+        proposal_id=patch_request.id,
+        operator_id="operator",
+        reason_code="operator_reviewed",
+        reason_note="Repeat.",
+    )
+
+    assert reused.id == first.id
+    assert sum(1 for item in proposal_repository.items.values() if item.proposal_type == "skill_package") == 1
+    assert audit_repository.events[-1].event_type == "reflection.proposal.skill_patch_realize_reused"
+
+
+async def test_proposal_service_rejects_skill_patch_realization_without_required_gates():
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(repository=audit_repository)
+    artifact = _realizable_source_artifact()
+    unapproved = _skill_patch_request_proposal(artifact=artifact, status="sandbox_completed")
+    missing_evaluation = _skill_patch_request_proposal(artifact=artifact)
+    inconclusive = _skill_patch_request_proposal(artifact=artifact, evaluation_status="inconclusive")
+    for patch_request, evaluation, error in [
+        (
+            unapproved,
+            _effective_patch_request_evaluation(unapproved),
+            "Only approved",
+        ),
+        (
+            missing_evaluation,
+            None,
+            "effective evaluation",
+        ),
+        (
+            inconclusive,
+            ReflectionProposalEvaluation.build(
+                proposal_id=inconclusive.id,
+                comparison_window_size=1,
+                baseline_policy_snapshot={},
+                candidate_policy_snapshot={},
+                evaluator_type="rule",
+            ).with_result(
+                evaluation_status="inconclusive",
+                simulated_outcome_summary={},
+                score_delta=0.0,
+            ),
+            "effective patch request",
+        ),
+    ]:
+        proposal_repository = StubProposalRepository()
+        evaluation_repository = StubProposalEvaluationRepository()
+        await proposal_repository.create(patch_request)
+        if evaluation is not None:
+            await evaluation_repository.create(evaluation)
+        proposal_service = ReflectionProposalService(
+            repository=proposal_repository,
+            approval_decision_repository=StubProposalApprovalDecisionRepository(),
+            evaluation_repository=evaluation_repository,
+            artifact_repository=StubSkillArtifactRepository(artifact),
+            autonomy_job_service=None,
+            audit_service=audit_service,
+        )
+
+        with pytest.raises(ValidationError, match=error):
+            await proposal_service.realize_skill_patch_request(
+                proposal_id=patch_request.id,
+                operator_id="operator",
+                reason_code="operator_reviewed",
+                reason_note=None,
+            )
+
+
+async def test_skill_candidate_from_realized_patch_proposal_inherits_replacement_lineage():
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(repository=audit_repository)
+    proposal_repository = StubProposalRepository()
+    evaluation_repository = StubProposalEvaluationRepository()
+    source_artifact = _realizable_source_artifact()
+    patch_request = _skill_patch_request_proposal(artifact=source_artifact)
+    await proposal_repository.create(patch_request)
+    await evaluation_repository.create(_effective_patch_request_evaluation(patch_request))
+    proposal_service = ReflectionProposalService(
+        repository=proposal_repository,
+        approval_decision_repository=StubProposalApprovalDecisionRepository(),
+        evaluation_repository=evaluation_repository,
+        artifact_repository=StubSkillArtifactRepository(source_artifact),
+        autonomy_job_service=None,
+        audit_service=audit_service,
+    )
+    realized = await proposal_service.realize_skill_patch_request(
+        proposal_id=patch_request.id,
+        operator_id="operator",
+        reason_code="operator_reviewed",
+        reason_note=None,
+    )
+    approved_realized = realized.enqueue_sandbox(
+        sandbox_run_id="sandbox-realized-1",
+    ).start_sandbox(
+        sandbox_run_id="sandbox-realized-1",
+    ).complete_sandbox(
+        sandbox_run_id="sandbox-realized-1",
+        evaluation_status="effective",
+        evaluation_summary="sandbox:0.20",
+    ).approve(
+        operator_id="operator",
+        reason_code="validated",
+        reason_note=None,
+    )
+    await proposal_repository.update(approved_realized)
+    await evaluation_repository.create(
+        ReflectionProposalEvaluation.build(
+            proposal_id=approved_realized.id,
+            comparison_window_size=2,
+            baseline_policy_snapshot={},
+            candidate_policy_snapshot=approved_realized.structured_patch_payload,
+            evaluator_type="rule",
+            sandbox_run_id="sandbox-realized-1",
+        ).with_result(
+            evaluation_status="effective",
+            simulated_outcome_summary={"score_delta": 0.2},
+            score_delta=0.2,
+            sandbox_run_id="sandbox-realized-1",
+        )
+    )
+    artifact_repository = StubSkillArtifactRepository(source_artifact)
+    candidate_service = SkillCandidateService(
+        artifact_repository=artifact_repository,
+        proposal_repository=proposal_repository,
+        evaluation_repository=evaluation_repository,
+        audit_service=audit_service,
+    )
+
+    candidate = await candidate_service.create_candidate_from_proposal(
+        proposal_id=approved_realized.id,
+        operator_id="operator",
+    )
+
+    assert candidate.status == "candidate"
+    assert candidate.lineage_id == source_artifact.lineage_id
+    assert candidate.parent_artifact_id == source_artifact.id
+    assert candidate.supersedes_artifact_id == source_artifact.id
+    assert source_artifact.status == "stable"
+
+
+async def test_sandbox_service_executes_skill_patch_request_without_artifact_side_effects():
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(audit_repository)
+    proposal_repository = StubProposalRepository()
+    evaluation_repository = StubProposalEvaluationRepository()
+    sandbox_run_repository = StubProposalSandboxRunRepository()
+    approval_repository = StubProposalApprovalDecisionRepository()
+    proposal_service = ReflectionProposalService(
+        repository=proposal_repository,
+        approval_decision_repository=approval_repository,
+        audit_service=audit_service,
+    )
+    proposal = ReflectionProposal.build(
+        reflection_record_id="reflection-1",
+        learner_goal_id="goal-1",
+        proposal_type="skill_patch_request",
+        target_scope="quiz",
+        priority_score=0.8,
+        hypothesis="Curator evidence indicates create_quiz needs a patch.",
+        change_summary="Create governed patch request.",
+        structured_patch_payload={
+            "artifact_id": "artifact-1",
+            "skill_name": "create_quiz",
+            "skill_version": "0.1.0",
+            "scope": "quiz",
+            "surface": "quiz",
+            "recommendation_id": "recommendation-1",
+            "recommendation_reason_code": "quality_regression",
+            "usage_event_ids": ["usage-1", "usage-2"],
+            "related_artifact_ids": [],
+            "evidence_snapshot": {"usage_event_ids": ["usage-1", "usage-2"]},
+            "metrics_snapshot": {"negative_usage_rate": 0.5},
+        },
+        expected_improvement="Route patch evidence through governed review.",
+        risk_level="medium",
+        evidence_snapshot={},
+    )
+    await proposal_repository.create(proposal)
+    sandbox_service = ReflectionProposalSandboxService(
+        sandbox_run_repository=sandbox_run_repository,
+        proposal_service=proposal_service,
+        replay_service=ReflectionReplayService(repository=evaluation_repository, audit_service=audit_service),
+        audit_service=audit_service,
+        strategy_card_service=StrategyCardService(repository=StubStrategyCardRepository(), audit_service=audit_service),
+        task_attempt_repository=StubTaskAttemptRepository([]),
+        workflow_run_repository=StubWorkflowRunRepository([]),
+        chat_service=None,
+    )
+
+    result = await sandbox_service.execute(proposal_id=proposal.id)
+
+    assert result.status == "completed"
+    assert result.sample_source_type == "mixed"
+    assert result.sample_count == 2
+    assert result.baseline_snapshot == {
+        "surface": "quiz",
+        "artifact_id": "artifact-1",
+        "skill_name": "create_quiz",
+        "skill_version": "0.1.0",
+        "strategy_summary": None,
+    }
+    assert result.candidate_snapshot["usage_event_ids"] == ["usage-1", "usage-2"]
+    stored_proposal = await proposal_service.get(proposal.id)
+    assert stored_proposal.status == "sandbox_completed"
+    assert stored_proposal.latest_sandbox_run_id == result.id
+    evaluation = await evaluation_repository.get_by_proposal(proposal.id)
+    assert evaluation is not None
+    assert evaluation.evaluation_status == "effective"
+    assert evaluation.score_delta == 0.15000000000000002
+
+
+async def test_skill_patch_request_cannot_rollout_or_create_skill_candidate():
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(repository=audit_repository)
+    goal = LearnerGoal.build(
+        learner_profile_id="profile-1",
+        title="Master matrices",
+        subject="Matrices",
+        target_outcome="Master matrix multiplication",
+        weekly_study_minutes=180,
+        deadline_date=date.today() + timedelta(days=60),
+        baseline_note=None,
+    )
+    proposal_repository = StubProposalRepository()
+    proposal = ReflectionProposal.build(
+        reflection_record_id="reflection-1",
+        learner_goal_id=goal.id,
+        proposal_type="skill_patch_request",
+        target_scope="quiz",
+        priority_score=0.8,
+        hypothesis="Curator evidence indicates create_quiz needs a patch.",
+        change_summary="Create governed patch request.",
+        structured_patch_payload={
+            "artifact_id": "artifact-1",
+            "skill_name": "create_quiz",
+            "skill_version": "0.1.0",
+            "scope": "quiz",
+            "surface": "quiz",
+            "recommendation_id": "recommendation-1",
+            "recommendation_reason_code": "quality_regression",
+            "usage_event_ids": ["usage-1", "usage-2"],
+            "related_artifact_ids": [],
+            "evidence_snapshot": {"usage_event_ids": ["usage-1", "usage-2"]},
+            "metrics_snapshot": {"negative_usage_rate": 0.5},
+        },
+        expected_improvement="Route patch evidence through governed review.",
+        risk_level="medium",
+        evidence_snapshot={},
+    ).enqueue_sandbox(
+        sandbox_run_id="sandbox-1",
+    ).start_sandbox(
+        sandbox_run_id="sandbox-1",
+    ).complete_sandbox(
+        sandbox_run_id="sandbox-1",
+        evaluation_status="effective",
+        evaluation_summary="sandbox:0.15",
+    ).approve(
+        operator_id="operator",
+        reason_code="validated",
+        reason_note=None,
+    )
+    await proposal_repository.create(proposal)
+    rollout_service = _rollout_service_for_tests(
+        audit_repository=audit_repository,
+        goal=goal,
+        proposal_repository=proposal_repository,
+        rollout_repository=StubProposalRolloutRepository(),
+    )
+
+    with pytest.raises(ValidationError, match="not rollout-enabled"):
+        await rollout_service.activate(
+            proposal_id=proposal.id,
+            operator_id="operator",
+            reason_code="activate",
+            reason_note=None,
+        )
+
+    candidate_service = SkillCandidateService(
+        artifact_repository=StubSkillArtifactRepository(),
+        proposal_repository=proposal_repository,
+        evaluation_repository=StubProposalEvaluationRepository(),
+        audit_service=audit_service,
+    )
+    with pytest.raises(ValidationError, match="Only skill_package proposals"):
+        await candidate_service.create_candidate_from_proposal(
+            proposal_id=proposal.id,
+            operator_id="operator",
+        )
 
 
 async def test_sandbox_service_executes_and_persists_run():
@@ -1641,6 +2714,248 @@ async def test_sandbox_service_executes_and_persists_run():
     assert stored_proposal.latest_sandbox_run_id == result.id
     evaluation = await evaluation_repository.get_by_proposal(proposal.id)
     assert evaluation is not None
+
+
+async def test_sandbox_service_records_tool_plan_contract_and_preview_summary() -> None:
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(audit_repository)
+    proposal_repository = StubProposalRepository()
+    evaluation_repository = StubProposalEvaluationRepository()
+    sandbox_run_repository = StubProposalSandboxRunRepository()
+    approval_repository = StubProposalApprovalDecisionRepository()
+    proposal = ReflectionProposal.build(
+        reflection_record_id="reflection-1",
+        learner_goal_id="goal-1",
+        proposal_type="skill_package",
+        target_scope="replan",
+        priority_score=0.8,
+        hypothesis="Need governed multi-step repair and follow-up review.",
+        change_summary="Use partial replan followed by review scheduling.",
+        structured_patch_payload={
+            "artifact_kind": "declarative_skill_package",
+            "skill_name": "plan_study_path",
+            "bundle_id": "bundle-replan-1",
+            "surface": "replan",
+            "match_rules": {"topic_keys": ["algebra"]},
+            "runtime_directives": {"replan_bias": "normal"},
+            "tool_plan": [
+                {"step_id": "repair", "tool_name": "partial_replan", "payload_template": {"source_task_id": "$source_task_id"}},
+                {
+                    "step_id": "followup_review",
+                    "tool_name": "review_scheduling",
+                    "payload_template": {"source_task_id": "$steps.repair.created_task_ids[0]"},
+                },
+            ],
+            "scoring_contract": {"mode": "rule_replay_live_llm"},
+        },
+        expected_improvement="Improve recovery consistency.",
+        risk_level="medium",
+        evidence_snapshot={"task": {"source_task_id": "task-1", "topic_focus": "algebra"}},
+    )
+    await proposal_repository.create(proposal)
+    proposal_service = ReflectionProposalService(
+        repository=proposal_repository,
+        approval_decision_repository=approval_repository,
+        audit_service=audit_service,
+    )
+    sandbox_service = ReflectionProposalSandboxService(
+        sandbox_run_repository=sandbox_run_repository,
+        proposal_service=proposal_service,
+        replay_service=ReflectionReplayService(repository=evaluation_repository, audit_service=audit_service),
+        audit_service=audit_service,
+        strategy_card_service=StrategyCardService(repository=StubStrategyCardRepository(), audit_service=audit_service),
+        task_attempt_repository=StubTaskAttemptRepository([]),
+        workflow_run_repository=StubWorkflowRunRepository([]),
+        chat_service=None,
+        internal_tool_registry=None,
+        tool_plan_runtime_executor=ToolPlanRuntimeExecutor(
+            internal_tool_registry=None,
+            audit_service=audit_service,
+        ),
+    )
+
+    result = await sandbox_service.execute(proposal_id=proposal.id)
+
+    contract_summary = result.result_summary["tool_plan_contract_summary"]
+    preview_summary = result.result_summary["tool_plan_preview_summary"]
+    assert contract_summary["expected_sequence"] == ["partial_replan", "review_scheduling"]
+    assert contract_summary["expected_step_count"] == 2
+    assert preview_summary["preview_matches_contract"] is True
+    assert preview_summary["reason_codes"] == ["tool_plan_sequence_verified"]
+    evaluation = await evaluation_repository.get_by_proposal(proposal.id)
+    assert evaluation is not None
+    assert evaluation.simulated_outcome_summary["tool_plan_preview_summary"]["preview_matches_contract"] is True
+    assert evaluation.evaluation_status == "effective"
+    assert evaluation.score_delta >= 0.11
+
+
+async def test_rollout_observation_rolls_back_on_tool_plan_sequence_mismatch() -> None:
+    audit_repository = StubAuditRepository()
+    goal = LearnerGoal.build(
+        learner_profile_id="profile-1",
+        title="Master matrices",
+        subject="Matrices",
+        target_outcome="Master matrix multiplication",
+        weekly_study_minutes=180,
+        deadline_date=date.today() + timedelta(days=60),
+        baseline_note=None,
+    )
+    proposal = ReflectionProposal.build(
+        reflection_record_id="reflection-1",
+        learner_goal_id=goal.id,
+        proposal_type="skill_package",
+        target_scope="replan",
+        priority_score=0.8,
+        hypothesis="Need governed multi-step repair and follow-up review.",
+        change_summary="Use partial replan followed by review scheduling.",
+        structured_patch_payload={
+            "artifact_kind": "declarative_skill_package",
+            "skill_name": "plan_study_path",
+            "bundle_id": "bundle-replan-1",
+            "surface": "replan",
+            "match_rules": {"topic_keys": ["algebra"]},
+            "runtime_directives": {"replan_bias": "normal"},
+            "tool_plan": [
+                {"step_id": "repair", "tool_name": "partial_replan", "payload_template": {"source_task_id": "$source_task_id"}},
+                {
+                    "step_id": "followup_review",
+                    "tool_name": "review_scheduling",
+                    "payload_template": {"source_task_id": "$steps.repair.created_task_ids[0]"},
+                },
+            ],
+            "scoring_contract": {"mode": "rule_replay_live_llm"},
+        },
+        expected_improvement="Improve recovery consistency.",
+        risk_level="medium",
+        evidence_snapshot={},
+    ).enqueue_sandbox(
+        sandbox_run_id="sandbox-1",
+    ).start_sandbox(
+        sandbox_run_id="sandbox-1",
+    ).complete_sandbox(
+        sandbox_run_id="sandbox-1",
+        evaluation_status="effective",
+        evaluation_summary="sandbox:0.20",
+    ).approve(
+        operator_id="operator",
+        reason_code="validated",
+        reason_note=None,
+    )
+    proposal_repository = StubProposalRepository()
+    await proposal_repository.create(proposal)
+    rollout_repository = StubProposalRolloutRepository()
+    observation_repository = StubProposalRolloutObservationRepository()
+    binding_repository = StubGoalSkillBindingRepository()
+    rollout_service = _rollout_service_for_tests(
+        audit_repository=audit_repository,
+        goal=goal,
+        proposal_repository=proposal_repository,
+        rollout_repository=rollout_repository,
+        observation_repository=observation_repository,
+        binding_repository=binding_repository,
+    )
+    activated = await rollout_service.activate(
+        proposal_id=proposal.id,
+        operator_id="operator",
+        reason_code="activate",
+        reason_note=None,
+    )
+    binding = await binding_repository.get_by_rollout(activated.id)
+    assert binding is not None
+    mismatch_event = SkillUsageEvent.build(
+        skill_artifact_id=None,
+        skill_name="plan_study_path",
+        skill_version=None,
+        skill_status_at_use=None,
+        learner_goal_id=goal.id,
+        surface="replan",
+        outcome_status="completed",
+        resolver_status="resolved",
+        selection_reason="production_default",
+        metadata={
+            "tool_plan_sequence": ["partial_replan"],
+            "tool_plan_step_count": 1,
+            "skill_package_rollout": {
+                "proposal_id": proposal.id,
+                "rollout_id": activated.id,
+                "binding_id": binding.id,
+                "skill_name": "plan_study_path",
+                "surface": "replan",
+            },
+        },
+    )
+    rollout_service = _rollout_service_for_tests(
+        audit_repository=audit_repository,
+        goal=goal,
+        proposal_repository=proposal_repository,
+        rollout_repository=rollout_repository,
+        observation_repository=observation_repository,
+        binding_repository=binding_repository,
+        usage_repository=StubSkillUsageEventRepository([mismatch_event]),
+    )
+
+    observation = await rollout_service.observe(rollout_id=activated.id, trigger_source="test")
+
+    assert observation.recommendation == "rollback"
+    assert "tool_plan_sequence_mismatch" in observation.reason_codes
+    sequence_summary = observation.signal_summary["tool_plan_sequence"]
+    assert sequence_summary["sequence_mismatch_count"] == 1
+    assert sequence_summary["step_count_mismatch_count"] == 1
+
+
+async def test_sandbox_service_rejects_skill_package_preview_with_missing_source_task_id():
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(audit_repository)
+    proposal_repository = StubProposalRepository()
+    evaluation_repository = StubProposalEvaluationRepository()
+    sandbox_run_repository = StubProposalSandboxRunRepository()
+    approval_repository = StubProposalApprovalDecisionRepository()
+    proposal = ReflectionProposal.build(
+        reflection_record_id="reflection-1",
+        learner_goal_id="goal-1",
+        proposal_type="skill_package",
+        target_scope="review_scheduling",
+        priority_score=0.8,
+        hypothesis="Need denser reviews after failures.",
+        change_summary="Tighten review intervals.",
+        structured_patch_payload={
+            "artifact_kind": "declarative_skill_package",
+            "skill_name": "schedule_review",
+            "bundle_id": "bundle-1",
+            "surface": "review_scheduling",
+            "match_rules": {"required_root_causes": ["review_gap"]},
+            "runtime_directives": {"review_bias": "intensive"},
+            "tool_plan": [{"tool_name": "review_scheduling", "payload_template": {"source_task_id": "$source_task_id"}}],
+            "scoring_contract": {"mode": "rule_replay_live_llm"},
+        },
+        expected_improvement="Improve recovery.",
+        risk_level="medium",
+        evidence_snapshot={},
+    )
+    await proposal_repository.create(proposal)
+    proposal_service = ReflectionProposalService(
+        repository=proposal_repository,
+        approval_decision_repository=approval_repository,
+        audit_service=audit_service,
+    )
+    sandbox_service = ReflectionProposalSandboxService(
+        sandbox_run_repository=sandbox_run_repository,
+        proposal_service=proposal_service,
+        replay_service=ReflectionReplayService(repository=evaluation_repository, audit_service=audit_service),
+        audit_service=audit_service,
+        strategy_card_service=StrategyCardService(repository=StubStrategyCardRepository(), audit_service=audit_service),
+        task_attempt_repository=StubTaskAttemptRepository([]),
+        workflow_run_repository=StubWorkflowRunRepository([]),
+        chat_service=None,
+        internal_tool_registry=None,
+        tool_plan_runtime_executor=ToolPlanRuntimeExecutor(
+            internal_tool_registry=None,
+            audit_service=audit_service,
+        ),
+    )
+
+    with pytest.raises(ValidationError):
+        await sandbox_service.execute(proposal_id=proposal.id)
 
 
 async def test_outcome_repository_lists_pending_items():
@@ -1748,11 +3063,13 @@ async def test_rollout_service_activates_promotes_and_rolls_back_plan_generation
         workflow_run_repository=StubWorkflowRunRepository([]),
         goal_autonomy_state_repository=goal_state_repository,
         goal_skill_binding_repository=StubGoalSkillBindingRepository(),
+        skill_artifact_repository=StubSkillArtifactRepository(),
         session_repository=StubSessionRepository([]),
         message_repository=StubSessionMessageRepository([]),
         reflection_record_repository=StubReflectionRecordRepository(),
         reflection_evidence_repository=StubReflectionEvidenceRepository(),
         task_attempt_repository=StubTaskAttemptRepository([]),
+        usage_repository=StubSkillUsageEventRepository(),
         planner_service=planner,
         workflow_run_service=workflow_service,
         observation_scheduler=ReflectionProposalRolloutObservationScheduler(
@@ -1856,11 +3173,13 @@ async def test_skill_package_rollout_creates_goal_skill_binding():
         workflow_run_repository=StubWorkflowRunRepository([]),
         goal_autonomy_state_repository=None,
         goal_skill_binding_repository=binding_repository,
+        skill_artifact_repository=StubSkillArtifactRepository(),
         session_repository=StubSessionRepository([]),
         message_repository=StubSessionMessageRepository([]),
         reflection_record_repository=StubReflectionRecordRepository(),
         reflection_evidence_repository=StubReflectionEvidenceRepository(),
         task_attempt_repository=StubTaskAttemptRepository([]),
+        usage_repository=StubSkillUsageEventRepository(),
         planner_service=PlannerService(llm_provider=MockLLMProvider("mock-tutor-v1"), audit_service=audit_service),
         workflow_run_service=WorkflowRunService(
             repository=StubWorkflowRunRepository([]),
@@ -1882,3 +3201,445 @@ async def test_skill_package_rollout_creates_goal_skill_binding():
     assert binding is not None
     assert binding.surface == "quiz"
     assert binding.status == "staged"
+
+
+@pytest.mark.parametrize("artifact_status", ["active", "stable", "suppressed"])
+async def test_skill_package_rollout_rollback_deprecates_selectable_artifact(artifact_status: str):
+    audit_repository = StubAuditRepository()
+    goal = LearnerGoal.build(
+        learner_profile_id="profile-1",
+        title="Master matrices",
+        subject="Matrices",
+        target_outcome="Master matrix multiplication",
+        weekly_study_minutes=180,
+        deadline_date=date.today() + timedelta(days=60),
+        baseline_note=None,
+    )
+    proposal_repository = StubProposalRepository()
+    proposal = _approved_rollout_proposal(learner_goal_id=goal.id)
+    await proposal_repository.create(proposal)
+    rollout_repository = StubProposalRolloutRepository()
+    binding_repository = StubGoalSkillBindingRepository()
+    rollout = _rolled_out_rollout_for_proposal(proposal)
+    binding = _rolled_out_binding_for_rollout(proposal=proposal, rollout=rollout)
+    await rollout_repository.create(rollout)
+    await binding_repository.create(binding)
+    artifact = _skill_package_artifact_for_proposal(proposal, status=artifact_status)
+    artifact_repository = StubSkillArtifactRepository(artifact)
+    decision_repository = StubProposalRolloutDecisionRepository()
+    rollout_service = _rollout_service_for_tests(
+        audit_repository=audit_repository,
+        goal=goal,
+        proposal_repository=proposal_repository,
+        rollout_repository=rollout_repository,
+        decision_repository=decision_repository,
+        binding_repository=binding_repository,
+        artifact_repository=artifact_repository,
+    )
+
+    rolled_back = await rollout_service.rollback(
+        rollout_id=rollout.id,
+        operator_id="operator",
+        reason_code="rollout_rollback",
+        reason_note="Rollback source rollout.",
+    )
+
+    assert rolled_back.status == "rolled_back"
+    updated_binding = await binding_repository.get_by_rollout(rollout.id)
+    assert updated_binding is not None
+    assert updated_binding.status == "rolled_back"
+    deactivated_artifact = artifact_repository.items[artifact.id]
+    assert deactivated_artifact.status == "deprecated"
+    assert deactivated_artifact.deprecated_by == "operator"
+    assert deactivated_artifact.deprecated_at is not None
+    assert deactivated_artifact.suppressed_reason_code is None
+    assert deactivated_artifact.suppressed_reason_note is None
+    assert deactivated_artifact.suppressed_by is None
+    assert deactivated_artifact.suppressed_at is None
+    assert deactivated_artifact.suppressed_previous_status is None
+    assert len(decision_repository.items) == 1
+    assert decision_repository.items[0].decision_type == "rollback"
+    deactivation_event = next(
+        item for item in audit_repository.events
+        if item.event_type == "skill.artifact.deactivated"
+    )
+    assert deactivation_event.event_data["artifact_id"] == artifact.id
+    assert deactivation_event.event_data["source_proposal_id"] == proposal.id
+    assert deactivation_event.event_data["rollout_id"] == rollout.id
+    assert deactivation_event.event_data["previous_status"] == artifact_status
+    assert deactivation_event.event_data["reason_code"] == "rollout_rollback"
+    rollback_event = next(
+        item for item in audit_repository.events
+        if item.event_type == "reflection.proposal.rollout.rolled_back"
+    )
+    assert rollback_event.event_data["deactivated_skill_artifact_id"] == artifact.id
+    assert rollback_event.event_data["deactivated_skill_artifact_previous_status"] == artifact_status
+    assert rollback_event.event_data["deactivated_skill_artifact_status"] == "deprecated"
+
+
+async def test_skill_package_rollout_rollback_leaves_staged_artifact_unchanged():
+    audit_repository = StubAuditRepository()
+    goal = LearnerGoal.build(
+        learner_profile_id="profile-1",
+        title="Master matrices",
+        subject="Matrices",
+        target_outcome="Master matrix multiplication",
+        weekly_study_minutes=180,
+        deadline_date=date.today() + timedelta(days=60),
+        baseline_note=None,
+    )
+    proposal_repository = StubProposalRepository()
+    proposal = _approved_rollout_proposal(learner_goal_id=goal.id)
+    await proposal_repository.create(proposal)
+    rollout_repository = StubProposalRolloutRepository()
+    binding_repository = StubGoalSkillBindingRepository()
+    rollout = _rolled_out_rollout_for_proposal(proposal)
+    binding = _rolled_out_binding_for_rollout(proposal=proposal, rollout=rollout)
+    await rollout_repository.create(rollout)
+    await binding_repository.create(binding)
+    artifact = _skill_package_artifact_for_proposal(proposal, status="staged")
+    artifact_repository = StubSkillArtifactRepository(artifact)
+    rollout_service = _rollout_service_for_tests(
+        audit_repository=audit_repository,
+        goal=goal,
+        proposal_repository=proposal_repository,
+        rollout_repository=rollout_repository,
+        binding_repository=binding_repository,
+        artifact_repository=artifact_repository,
+    )
+
+    rolled_back = await rollout_service.rollback(
+        rollout_id=rollout.id,
+        operator_id="operator",
+        reason_code="rollout_rollback",
+        reason_note=None,
+    )
+
+    assert rolled_back.status == "rolled_back"
+    unchanged_artifact = artifact_repository.items[artifact.id]
+    assert unchanged_artifact.status == "staged"
+    assert unchanged_artifact.deprecated_by is None
+    assert unchanged_artifact.deprecated_at is None
+    assert not any(item.event_type == "skill.artifact.deactivated" for item in audit_repository.events)
+    rollback_event = next(
+        item for item in audit_repository.events
+        if item.event_type == "reflection.proposal.rollout.rolled_back"
+    )
+    assert rollback_event.event_data["deactivated_skill_artifact_id"] is None
+    assert rollback_event.event_data["deactivated_skill_artifact_previous_status"] is None
+    assert rollback_event.event_data["deactivated_skill_artifact_status"] is None
+
+
+async def test_non_skill_package_rollout_rollback_does_not_deprecate_artifact():
+    audit_repository = StubAuditRepository()
+    goal = LearnerGoal.build(
+        learner_profile_id="profile-1",
+        title="Master matrices",
+        subject="Matrices",
+        target_outcome="Master matrix multiplication",
+        weekly_study_minutes=180,
+        deadline_date=date.today() + timedelta(days=60),
+        baseline_note=None,
+    )
+    proposal_repository = StubProposalRepository()
+    proposal = _approved_rollout_proposal(
+        learner_goal_id=goal.id,
+        proposal_type="workflow_optimization",
+        target_scope="quiz",
+    )
+    await proposal_repository.create(proposal)
+    rollout_repository = StubProposalRolloutRepository()
+    rollout = _rolled_out_rollout_for_proposal(proposal)
+    await rollout_repository.create(rollout)
+    artifact = _skill_package_artifact_for_proposal(proposal, status="active")
+    artifact_repository = StubSkillArtifactRepository(artifact)
+    rollout_service = _rollout_service_for_tests(
+        audit_repository=audit_repository,
+        goal=goal,
+        proposal_repository=proposal_repository,
+        rollout_repository=rollout_repository,
+        artifact_repository=artifact_repository,
+    )
+
+    rolled_back = await rollout_service.rollback(
+        rollout_id=rollout.id,
+        operator_id="operator",
+        reason_code="rollout_rollback",
+        reason_note=None,
+    )
+
+    assert rolled_back.status == "rolled_back"
+    unchanged_artifact = artifact_repository.items[artifact.id]
+    assert unchanged_artifact.status == "active"
+    assert unchanged_artifact.deprecated_by is None
+    assert unchanged_artifact.deprecated_at is None
+    assert not any(item.event_type == "skill.artifact.deactivated" for item in audit_repository.events)
+
+
+async def test_rollout_rollback_is_idempotent_after_artifact_deactivation():
+    audit_repository = StubAuditRepository()
+    goal = LearnerGoal.build(
+        learner_profile_id="profile-1",
+        title="Master matrices",
+        subject="Matrices",
+        target_outcome="Master matrix multiplication",
+        weekly_study_minutes=180,
+        deadline_date=date.today() + timedelta(days=60),
+        baseline_note=None,
+    )
+    proposal_repository = StubProposalRepository()
+    proposal = _approved_rollout_proposal(learner_goal_id=goal.id)
+    await proposal_repository.create(proposal)
+    rollout_repository = StubProposalRolloutRepository()
+    binding_repository = StubGoalSkillBindingRepository()
+    rollout = _rolled_out_rollout_for_proposal(proposal)
+    binding = _rolled_out_binding_for_rollout(proposal=proposal, rollout=rollout)
+    await rollout_repository.create(rollout)
+    await binding_repository.create(binding)
+    artifact = _skill_package_artifact_for_proposal(proposal, status="active")
+    artifact_repository = StubSkillArtifactRepository(artifact)
+    decision_repository = StubProposalRolloutDecisionRepository()
+    rollout_service = _rollout_service_for_tests(
+        audit_repository=audit_repository,
+        goal=goal,
+        proposal_repository=proposal_repository,
+        rollout_repository=rollout_repository,
+        decision_repository=decision_repository,
+        binding_repository=binding_repository,
+        artifact_repository=artifact_repository,
+    )
+
+    first = await rollout_service.rollback(
+        rollout_id=rollout.id,
+        operator_id="operator",
+        reason_code="rollout_rollback",
+        reason_note="First rollback.",
+    )
+    second = await rollout_service.rollback(
+        rollout_id=rollout.id,
+        operator_id="operator",
+        reason_code="rollout_rollback",
+        reason_note="Repeat rollback.",
+    )
+
+    assert first.id == second.id
+    assert second.status == "rolled_back"
+    assert artifact_repository.items[artifact.id].status == "deprecated"
+    assert len(decision_repository.items) == 1
+    assert sum(1 for item in audit_repository.events if item.event_type == "skill.artifact.deactivated") == 1
+    reused_event = next(
+        item for item in audit_repository.events
+        if item.event_type == "reflection.proposal.rollout.rollback_reused"
+    )
+    assert reused_event.event_data["proposal_id"] == proposal.id
+    assert reused_event.event_data["rollout_id"] == rollout.id
+    assert reused_event.event_data["reason_note"] == "Repeat rollback."
+
+
+@pytest.mark.asyncio
+async def test_rollout_observation_schedules_auto_decision_job() -> None:
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(repository=audit_repository)
+    goal = LearnerGoal.build(
+        learner_profile_id="profile-1",
+        title="Master matrices",
+        subject="Matrices",
+        target_outcome="Master matrix multiplication",
+        weekly_study_minutes=180,
+        deadline_date=date.today() + timedelta(days=60),
+        baseline_note=None,
+    )
+    proposal_repository = StubProposalRepository()
+    proposal = _approved_rollout_proposal(learner_goal_id=goal.id, target_scope="review_scheduling")
+    await proposal_repository.create(proposal)
+    rollout_repository = StubProposalRolloutRepository()
+    observation_repository = StubProposalRolloutObservationRepository()
+    autonomy_jobs = StubScheduledAutonomyJobRepository()
+    scheduler = ReflectionProposalRolloutObservationScheduler(
+        rollout_repository=rollout_repository,
+        autonomy_job_service=AutonomyJobService(repository=autonomy_jobs, audit_service=audit_service),
+        audit_service=audit_service,
+        decision_scheduler=ReflectionProposalRolloutDecisionScheduler(
+            rollout_repository=rollout_repository,
+            autonomy_job_service=AutonomyJobService(repository=autonomy_jobs, audit_service=audit_service),
+            audit_service=audit_service,
+        ),
+    )
+    rollout_service = _rollout_service_for_tests(
+        audit_repository=audit_repository,
+        goal=goal,
+        proposal_repository=proposal_repository,
+        rollout_repository=rollout_repository,
+        observation_repository=observation_repository,
+        observation_scheduler=scheduler,
+    )
+    rollout = ReflectionProposalRollout.build(
+        proposal_id=proposal.id,
+        learner_goal_id=goal.id,
+        surface="review_scheduling",
+        baseline_snapshot={},
+        runtime_overlay_payload={},
+        activated_by="operator",
+    )
+    await rollout_repository.create(rollout)
+
+    await rollout_service.observe(
+        rollout_id=rollout.id,
+        trigger_source="worker_tick",
+    )
+
+    assert any(job.job_type == "reflection_proposal_rollout_decision" for job in autonomy_jobs.jobs.values())
+    queued = next(
+        item for item in audit_repository.events
+        if item.event_type == "reflection.proposal.rollout.auto_decision.queued"
+    )
+    assert queued.event_data["rollout_id"] == rollout.id
+
+
+@pytest.mark.asyncio
+async def test_rollout_auto_governance_promotes_staged_rollout() -> None:
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(repository=audit_repository)
+    goal = LearnerGoal.build(
+        learner_profile_id="profile-1",
+        title="Master matrices",
+        subject="Matrices",
+        target_outcome="Master matrix multiplication",
+        weekly_study_minutes=180,
+        deadline_date=date.today() + timedelta(days=60),
+        baseline_note=None,
+    )
+    proposal_repository = StubProposalRepository()
+    proposal = _approved_rollout_proposal(learner_goal_id=goal.id, target_scope="review_scheduling")
+    await proposal_repository.create(proposal)
+    rollout_repository = StubProposalRolloutRepository()
+    observation_repository = StubProposalRolloutObservationRepository()
+    decision_repository = StubProposalRolloutDecisionRepository()
+    binding_repository = StubGoalSkillBindingRepository()
+    rollout_service = _rollout_service_for_tests(
+        audit_repository=audit_repository,
+        goal=goal,
+        proposal_repository=proposal_repository,
+        rollout_repository=rollout_repository,
+        observation_repository=observation_repository,
+        decision_repository=decision_repository,
+        binding_repository=binding_repository,
+    )
+    rollout = ReflectionProposalRollout.build(
+        proposal_id=proposal.id,
+        learner_goal_id=goal.id,
+        surface="review_scheduling",
+        baseline_snapshot={},
+        runtime_overlay_payload={},
+        activated_by="operator",
+    )
+    binding = GoalSkillBinding.build(
+        proposal_id=proposal.id,
+        rollout_id=rollout.id,
+        learner_goal_id=goal.id,
+        surface="review_scheduling",
+        priority_score=proposal.priority_score,
+        match_rules={},
+        runtime_directives={},
+        tool_plan=[],
+    )
+    await rollout_repository.create(rollout)
+    await binding_repository.create(binding)
+    observation = ReflectionProposalRolloutObservation.build(
+        rollout_id=rollout.id,
+        proposal_id=proposal.id,
+        learner_goal_id=goal.id,
+        surface="review_scheduling",
+        recommendation="promote",
+        observed_sample_count=2,
+        positive_score=0.8,
+        negative_score=0.0,
+        signal_summary={},
+        reason_codes=["review_completed"],
+    )
+    await observation_repository.create(observation)
+    await rollout_repository.update(rollout.with_status(rollout.status, latest_observation_id=observation.id))
+    orchestrator = ReflectionProposalRolloutDecisionOrchestrator(
+        rollout_repository=rollout_repository,
+        observation_repository=observation_repository,
+        rollout_service=rollout_service,
+        audit_service=audit_service,
+    )
+
+    result = await orchestrator.evaluate_and_execute(
+        rollout_id=rollout.id,
+        source_ref=observation.id,
+    )
+
+    assert result is not None
+    assert result.status == "rolled_out"
+    assert decision_repository.items[-1].decision_type == "promote"
+    assert decision_repository.items[-1].operator_id == "system:auto_rollout_governor"
+
+
+@pytest.mark.asyncio
+async def test_rollout_auto_governance_rolls_back_staged_rollout() -> None:
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(repository=audit_repository)
+    goal = LearnerGoal.build(
+        learner_profile_id="profile-1",
+        title="Master matrices",
+        subject="Matrices",
+        target_outcome="Master matrix multiplication",
+        weekly_study_minutes=180,
+        deadline_date=date.today() + timedelta(days=60),
+        baseline_note=None,
+    )
+    proposal_repository = StubProposalRepository()
+    proposal = _approved_rollout_proposal(learner_goal_id=goal.id, target_scope="assessment_generation")
+    await proposal_repository.create(proposal)
+    rollout_repository = StubProposalRolloutRepository()
+    observation_repository = StubProposalRolloutObservationRepository()
+    decision_repository = StubProposalRolloutDecisionRepository()
+    rollout_service = _rollout_service_for_tests(
+        audit_repository=audit_repository,
+        goal=goal,
+        proposal_repository=proposal_repository,
+        rollout_repository=rollout_repository,
+        observation_repository=observation_repository,
+        decision_repository=decision_repository,
+    )
+    rollout = ReflectionProposalRollout.build(
+        proposal_id=proposal.id,
+        learner_goal_id=goal.id,
+        surface="assessment_generation",
+        baseline_snapshot={},
+        runtime_overlay_payload={},
+        activated_by="operator",
+    )
+    await rollout_repository.create(rollout)
+    observation = ReflectionProposalRolloutObservation.build(
+        rollout_id=rollout.id,
+        proposal_id=proposal.id,
+        learner_goal_id=goal.id,
+        surface="assessment_generation",
+        recommendation="rollback",
+        observed_sample_count=1,
+        positive_score=0.0,
+        negative_score=1.0,
+        signal_summary={},
+        reason_codes=["assessment_regressed"],
+    )
+    await observation_repository.create(observation)
+    await rollout_repository.update(rollout.with_status(rollout.status, latest_observation_id=observation.id))
+    orchestrator = ReflectionProposalRolloutDecisionOrchestrator(
+        rollout_repository=rollout_repository,
+        observation_repository=observation_repository,
+        rollout_service=rollout_service,
+        audit_service=audit_service,
+    )
+
+    result = await orchestrator.evaluate_and_execute(
+        rollout_id=rollout.id,
+        source_ref=observation.id,
+    )
+
+    assert result is not None
+    assert result.status == "rolled_back"
+    assert decision_repository.items[-1].decision_type == "rollback"
+    assert decision_repository.items[-1].operator_id == "system:auto_rollout_governor"

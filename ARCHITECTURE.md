@@ -316,21 +316,46 @@ The following architectural constraints are mandatory:
       - `ReflectionProposalRolloutObservation`
       - `ReflectionProposalRolloutDecision`
       - goal-scoped staged activation
-      - chat / hint / plan_generation / review_scheduling / assessment_generation / replan rollout surfaces
+      - chat / hint / quiz / plan_generation / review_scheduling / assessment_generation / replan rollout surfaces
       - rollout overlay consumption in chat / planner / task runtime
       - manual promote / rollback
+      - rollout auto-governance V1 via a separate autonomy decision job; observation remains signal-only and does not inline rollout state transitions
+      - current auto-governance allowlist is `review_scheduling / assessment_generation / replan`; `chat / hint / quiz / plan_generation` remain manual-only for rollout promote / rollback
       - planner rollback baseline replan
+    - skill evolution MVP:
+      - `skill_package` and `skill_patch_request` proposal types
+      - `SkillArtifact` versioned lifecycle asset
+      - `SkillUsageEvent` usage attribution
+      - `SkillCuratorRecommendation` review carrier and `SkillCuratorJob` MVP
+      - `patch_needed -> skill_patch_request -> replacement skill_package proposal -> staged replacement` governed path
+      - `merge_candidate -> merge-sourced replacement skill_package proposal -> staged replacement` governed path
+      - artifact overlap / duplicate detection input that emits `merge_candidate / none` recommendations without mutating artifacts
+      - curator governance evidence input from memory conflict summaries, reflection outcome evaluations, and resolver health trends that emits or enriches `flag_for_review / none` recommendations without mutating artifacts
+      - surface / topic coverage regression input that emits `patch_needed / none` recommendations from declared-topic drift and governed binding gaps without mutating artifacts
+      - Prometheus / Grafana / alert baseline for skill usage, resolver failures, artifact status, curator backlog, recommendation rates, and curator job latency
+      - rollout auto-governance observability for auto decision queued / executed / skipped and alerting on elevated auto rollback / skip rates
+      - operator-protected replacement staging that preserves lineage / parent / supersedes provenance without automatic activate / replace
+      - shared staged-replacement readiness evaluation, strict source-anchor gate, and curator ready recommendation before manual activate / replace
+      - readiness read API returns `recommended_action` plus the unified replacement-readiness evidence summary used by operator review and curator recommendation
 - Still pending:
   - deeper prompt / workflow optimization outputs
   - bundle / global rollout governance
-  - auto promote / auto rollback
+  - broader rollout auto-governance beyond allowlisted workflow surfaces
+  - staged replacement auto-activate / auto-replace
   - deeper session-signal evidence extraction
-  - reflection-to-skill proposal handoff
+  - dynamic runtime skill registry V2, including richer multi-step tool-plan orchestration and fuller active-artifact runtime sourcing
 
 ### Phase 5: Skill Evolution
 
 - Generate controlled proposals for new or improved skills.
 - Evaluate proposals in sandboxed conditions before promotion.
+- Current MVP can carry `patch_needed` and `merge_candidate` recommendations through governed replacement `skill_package` proposals and operator-staged replacement artifacts.
+- Curator evidence v1 can incorporate memory conflict summaries, reflection outcome evaluations, and resolver health trends into review recommendations.
+- Replacement staging stops at `staged`; activation or replacement remains governed by later evidence gates.
+- Dynamic runtime registry V1 remains governed configuration sourcing, not dynamic code loading: handler registration and internal tool registration stay code-controlled, while artifacts and bindings provide directives, tool-plan, and rollout metadata.
+- Chat, planner, and task/autonomy paths now share the same runtime-plan contract and usage attribution shape; successful chat / hint / quiz / plan_generation execution can emit rollout observation signals on success without inlining rollout state transitions, while allowlisted workflow-surface auto-governance remains separate.
+- Rollout auto-governance V1 is intentionally narrower than replacement governance: it can auto-promote or auto-rollback allowlisted rollouts, but it does not auto-activate or auto-replace staged replacement artifacts.
+- Replacement governance remains manual execution after evidence gates, and both direct `activate_staged` and `replace_selectable` now re-check readiness under locked artifact/selectable reads before state transition; recommendation accept failure emits durable `accept_failed` audit and leaves the recommendation pending.
 
 ### Phase 6: Multi-Agent Society
 

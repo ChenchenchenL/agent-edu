@@ -36,6 +36,7 @@ from agent_core.domain.schemas.reflection_closure import (
     ReflectionProposalRolloutObservationResponse,
     ReflectionProposalRolloutResponse,
     ReflectionProposalSandboxRunResponse,
+    RealizeSkillPatchRequest,
     RejectReflectionProposalRequest,
     RollbackReflectionProposalRolloutRequest,
     PromoteReflectionProposalRolloutRequest,
@@ -345,6 +346,28 @@ async def approve_reflection_proposal(
     )
     await session.commit()
     return ReflectionProposalResponse.model_validate(await service.describe(proposal))
+
+
+@router.post("/proposals/{proposal_id}/realize-skill-patch", response_model=ReflectionProposalResponse)
+async def realize_skill_patch_request(
+    proposal_id: str,
+    payload: RealizeSkillPatchRequest,
+    operator_id: str = Depends(require_operator_api_key),
+    session: AsyncSession = Depends(get_db_session),
+) -> ReflectionProposalResponse:
+    service = get_reflection_proposal_service(session)
+    try:
+        proposal = await service.realize_skill_patch_request(
+            proposal_id=proposal_id,
+            operator_id=operator_id,
+            reason_code=payload.reason_code,
+            reason_note=payload.reason_note,
+        )
+        await session.commit()
+        return ReflectionProposalResponse.model_validate(await service.describe(proposal))
+    except Exception:
+        await session.rollback()
+        raise
 
 
 @router.post("/proposals/{proposal_id}/reject", response_model=ReflectionProposalResponse)

@@ -1,10 +1,14 @@
 from agent_core.application.services.chat import ChatService
 from agent_core.application.services.audit import AuditService
 from agent_core.application.services.autonomy_jobs import AutonomyJobService
+from agent_core.application.services.dynamic_runtime_registry import DynamicRuntimeRegistryService
 from agent_core.application.services.long_term_memory_materialization_replay import (
     LongTermMemoryMaterializationReplayScheduler,
 )
 from agent_core.application.services.memory import MemoryService
+from agent_core.application.services.reflection_proposal_rollout_observation_scheduler import (
+    ReflectionProposalRolloutObservationScheduler,
+)
 from agent_core.domain.entities.memory import (
     BehaviorMemoryRetrievalResult,
     KnowledgeMemoryRetrievalResult,
@@ -12,15 +16,18 @@ from agent_core.domain.entities.memory import (
     RetrievedMemory,
 )
 from agent_core.application.skills.registry import SkillRegistry
+from agent_core.domain.entities.skill import SkillExecutionPlan, SkillResolution
 from agent_core.domain.entities.autonomy import ScheduledAutonomyJob
 from agent_core.domain.entities.audit import AuditEvent
 from agent_core.domain.entities.memory import MemoryEvent
 from agent_core.domain.entities.message import SessionMessage
 from agent_core.domain.entities.quiz import SessionQuiz, SessionQuizQuestion
+from agent_core.domain.entities.reflection_closure import ReflectionProposalRollout
 from agent_core.domain.entities.session import LearningSession
 from agent_core.domain.errors import NotFoundError, ValidationError
 from agent_core.domain.schemas.session import ExplanationPayload, HintPayload, MessageRequest
 from agent_core.infrastructure.llm.mock_provider import MockLLMProvider
+from agent_core.infrastructure.llm.types import TutorReply
 
 
 class FakeTransaction:
@@ -119,6 +126,32 @@ class StubScheduledAutonomyJobRepository:
         return entity
 
 
+class StubProposalRolloutRepository:
+    def __init__(self):
+        self.items: dict[str, ReflectionProposalRollout] = {}
+
+    async def create(self, entity: ReflectionProposalRollout):
+        self.items[entity.id] = entity
+
+    async def get_by_id(self, rollout_id: str):
+        return self.items.get(rollout_id)
+
+    async def get_active_by_goal_and_surface(
+        self,
+        learner_goal_id: str,
+        surface: str,
+        *,
+        include_staged: bool = True,
+    ):
+        statuses = {"staged", "rolled_out"} if include_staged else {"rolled_out"}
+        active = [
+            item
+            for item in self.items.values()
+            if item.learner_goal_id == learner_goal_id and item.surface == surface and item.status in statuses
+        ]
+        return active[-1] if active else None
+
+
 class StubStrategyCardService:
     async def get_active(self, learner_goal_id: str):
         return None
@@ -145,6 +178,85 @@ class StubRolloutResolver:
                 "baseline_snapshot": {},
             },
         )()
+
+
+class StubSkillUsageService:
+    def __init__(self, execution_plan: SkillExecutionPlan | None = None):
+        self.execution_plan = execution_plan
+        self.events: list[dict[str, object]] = []
+
+    async def resolve_for_runtime(self, *, skill_name: str, surface: str, resource_id: str | None = None):
+        if self.execution_plan is not None:
+            return self.execution_plan.resolution
+        return SkillResolution.build(
+            skill_name=skill_name,
+            surface=surface,
+            implementation_binding=skill_name,
+        )
+
+    async def resolve_execution_plan(
+        self,
+        *,
+        skill_name: str,
+        surface: str,
+        resource_id: str | None = None,
+        skill_binding=None,
+    ):
+        if self.execution_plan is None:
+            resolution = SkillResolution.build(
+                skill_name=skill_name,
+                surface=surface,
+                implementation_binding=skill_name,
+            )
+            return SkillExecutionPlan(
+                resolution=resolution,
+                execution_kind="tutor_reply",
+                runtime_directives={},
+                tool_plan=[],
+                binding_metadata={},
+            )
+        return self.execution_plan
+
+    async def record_usage(self, **kwargs):
+        self.events.append(dict(kwargs))
+        return None
+
+
+class CaptureTutorReplyProvider:
+    provider_name = "capture"
+    model_name = "capture-model"
+
+    def __init__(self):
+        self.last_skill_directives = None
+
+    async def generate_tutor_reply(
+        self,
+        *,
+        session_title,
+        subject,
+        learner_message,
+        mode,
+        history,
+        memory_contexts,
+        learner_profile,
+        hint_context=None,
+    ):
+        self.last_skill_directives = list(learner_profile.skill_directives)
+        return TutorReply(
+            content="captured reply",
+            payload=ExplanationPayload(
+                definition="definition",
+                core_principles=["principle"],
+                worked_example="example",
+                common_mistake="mistake",
+                next_step="next",
+            ),
+            provider="capture",
+            model="capture-model",
+            latency_ms=1,
+            retry_count=0,
+            response_shape_valid=True,
+        )
 
 
 class StubSemanticMemoryService:
@@ -353,6 +465,51 @@ async def test_hint_mode_returns_hint_style_reply():
     assert response.assistant_payload.direct_answer_given is False
     assert response.turn_metrics.llm_retry_count == 0
     assert response.turn_metrics.hint_level == "conceptual"
+
+
+async def test_chat_uses_runtime_execution_plan_skill_directives():
+    session = LearningSession.build(learner_profile_id="profile-1", title="Geometry", subject="Triangles")
+    provider = CaptureTutorReplyProvider()
+    execution_plan = SkillExecutionPlan(
+        resolution=SkillResolution.build(
+            skill_name="explain_concept",
+            surface="chat",
+            implementation_binding="llm_explain_concept_v1",
+            artifact_id="artifact-1",
+            skill_version="1.0.1",
+            artifact_status="active",
+        ),
+        execution_kind="tutor_reply",
+        runtime_directives={"skill_directives": ["be_socratic", "use_counterexample"]},
+        tool_plan=[],
+        binding_metadata={"skill_package_rollout": {"proposal_id": "proposal-1"}},
+    )
+    skill_usage_service = StubSkillUsageService(execution_plan)
+    chat_service = ChatService(
+        db_session=FakeSession(),
+        session_repository=StubSessionRepository(session),
+        message_repository=StubMessageRepository(),
+        quiz_repository=StubQuizRepository(),
+        memory_service=MemoryService(StubMemoryRepository()),
+        audit_service=AuditService(StubAuditRepository()),
+        llm_provider=provider,
+        skill_registry=SkillRegistry.from_allowed_skills(
+            ["explain_concept", "create_quiz", "adaptive_hint"]
+        ),
+        reflection_evidence_service=None,
+        strategy_card_service=StubStrategyCardService(),
+        skill_usage_service=skill_usage_service,
+    )
+
+    response = await chat_service.create_message(
+        session_id=session.id,
+        payload=MessageRequest(content="Explain triangle congruence.", mode="chat"),
+    )
+
+    assert response.skill_trace == ["explain_concept"]
+    assert provider.last_skill_directives == ["be_socratic", "use_counterexample"]
+    assert skill_usage_service.events[-1]["metadata"]["implementation_binding"] == "llm_explain_concept_v1"
+    assert skill_usage_service.events[-1]["metadata"]["execution_kind"] == "tutor_reply"
 
 
 async def test_missing_session_raises_not_found():
@@ -612,6 +769,64 @@ async def test_chat_materialization_failure_without_goal_skips_replay_queue():
     assert job_repository.jobs == {}
 
 
+async def test_chat_schedules_rollout_observation_for_active_surface():
+    session = LearningSession.build(
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+        title="Linear Algebra",
+        subject="Matrices",
+    )
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(audit_repository)
+    job_repository = StubScheduledAutonomyJobRepository()
+    rollout_repository = StubProposalRolloutRepository()
+    await rollout_repository.create(
+        ReflectionProposalRollout.build(
+            proposal_id="proposal-chat-1",
+            learner_goal_id="goal-1",
+            surface="chat",
+            baseline_snapshot={},
+            runtime_overlay_payload={},
+            activated_by="operator",
+        ).with_status("rolled_out")
+    )
+    chat_service = ChatService(
+        db_session=FakeSession(),
+        session_repository=StubSessionRepository(session),
+        message_repository=StubMessageRepository(),
+        quiz_repository=StubQuizRepository(),
+        memory_service=MemoryService(StubMemoryRepository()),
+        audit_service=audit_service,
+        llm_provider=MockLLMProvider("mock-tutor-v1"),
+        skill_registry=SkillRegistry.from_allowed_skills(
+            ["explain_concept", "create_quiz", "adaptive_hint"]
+        ),
+        reflection_evidence_service=None,
+        strategy_card_service=StubStrategyCardService(),
+        rollout_observation_scheduler=ReflectionProposalRolloutObservationScheduler(
+            rollout_repository=rollout_repository,
+            autonomy_job_service=AutonomyJobService(repository=job_repository, audit_service=audit_service),
+            audit_service=audit_service,
+        ),
+    )
+
+    response = await chat_service.create_message(
+        session_id=session.id,
+        payload=MessageRequest(content="Explain matrix multiplication simply.", mode="chat"),
+    )
+
+    observation_jobs = [
+        item
+        for item in job_repository.jobs.values()
+        if item.job_type == "reflection_proposal_rollout_observation"
+    ]
+    assert len(observation_jobs) == 1
+    assert observation_jobs[0].learner_goal_id == "goal-1"
+    assert observation_jobs[0].trigger_source == "session_turn_completed"
+    assert observation_jobs[0].payload["surface"] == "chat"
+    assert observation_jobs[0].payload["source_ref"] == response.assistant_message_id
+
+
 async def test_hint_mode_uses_targeted_level_with_quiz_and_wrong_answer():
     session = LearningSession.build(learner_profile_id="profile-1", title="Algebra", subject="Equations")
     quiz_repository = StubQuizRepository()
@@ -749,3 +964,54 @@ async def test_hint_rollout_overlay_raises_hint_level_floor():
 
     assert response.assistant_payload.hint_level == "scaffolded"
     assert response.turn_metrics.hint_level == "scaffolded"
+
+
+async def test_chat_usage_metadata_includes_dynamic_runtime_registry_summary():
+    session = LearningSession.build(learner_profile_id="profile-1", title="Geometry", subject="Triangles")
+    execution_plan = SkillExecutionPlan(
+        resolution=SkillResolution.build(
+            skill_name="explain_concept",
+            surface="chat",
+            implementation_binding="llm_explain_concept_v1",
+            artifact_id="artifact-1",
+            skill_version="1.0.0",
+            artifact_status="active",
+        ),
+        execution_kind="tutor_reply",
+        runtime_directives={"skill_directives": ["scaffold"]},
+        tool_plan=[],
+        binding_metadata={"skill_package_rollout": {"proposal_id": "proposal-1", "rollout_id": "rollout-1", "binding_id": "binding-1"}},
+    )
+    skill_usage_service = StubSkillUsageService(execution_plan)
+    runtime_registry = DynamicRuntimeRegistryService(
+        goal_skill_binding_resolver=None,
+        skill_usage_service=skill_usage_service,
+    )
+    chat_service = ChatService(
+        db_session=FakeSession(),
+        session_repository=StubSessionRepository(session),
+        message_repository=StubMessageRepository(),
+        quiz_repository=StubQuizRepository(),
+        memory_service=MemoryService(StubMemoryRepository()),
+        audit_service=AuditService(StubAuditRepository()),
+        llm_provider=MockLLMProvider("mock-tutor-v1"),
+        skill_registry=SkillRegistry.from_allowed_skills(
+            ["explain_concept", "create_quiz", "adaptive_hint"]
+        ),
+        reflection_evidence_service=None,
+        strategy_card_service=StubStrategyCardService(),
+        skill_usage_service=skill_usage_service,
+        runtime_registry=runtime_registry,
+    )
+
+    await chat_service.create_message(
+        session_id=session.id,
+        payload=MessageRequest(
+            content="Explain triangles.",
+            mode="chat",
+        ),
+    )
+
+    metadata = skill_usage_service.events[-1]["metadata"]
+    assert metadata["dynamic_registry_version"] == "v1"
+    assert metadata["source_summary"]["artifact_source"] == "artifact"

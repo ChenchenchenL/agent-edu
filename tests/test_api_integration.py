@@ -1,14 +1,43 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import date, timedelta
 from hashlib import sha256
 import os
 
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from agent_core.api.app import create_app
+from agent_core.api.dependencies import (
+    get_db_session,
+    get_skill_artifact_lifecycle_service,
+    get_skill_replacement_staging_service,
+    require_operator_api_key,
+)
+from agent_core.domain.entities.reflection_closure import (
+    GoalSkillBinding,
+    ReflectionProposal,
+    ReflectionProposalEvaluation,
+    ReflectionProposalRollout,
+    ReflectionProposalRolloutObservation,
+)
+from agent_core.domain.entities.reflection import ReflectionRecord
+from agent_core.domain.entities.skill import SkillArtifact, SkillUsageEvent
+from agent_core.domain.errors import ValidationError
 from agent_core.infrastructure.db.models import AuditEventModel
+from agent_core.infrastructure.db.repositories import (
+    GoalSkillBindingRepository,
+    ReflectionRecordRepository,
+    ReflectionProposalEvaluationRepository,
+    ReflectionProposalRepository,
+    ReflectionProposalRolloutObservationRepository,
+    ReflectionProposalRolloutRepository,
+    SkillArtifactRepository,
+    SkillUsageEventRepository,
+)
 
 
 async def _audit_event_types() -> list[str]:
@@ -77,6 +106,597 @@ def _run_autonomy_worker_once() -> None:
         loop.run_until_complete(run_worker_once())
     finally:
         loop.close()
+
+
+async def _seed_replaceable_skill_artifacts(
+    *,
+    learner_profile_id: str,
+    learner_goal_id: str,
+) -> tuple[SkillArtifact, SkillArtifact]:
+    from agent_core.api import dependencies as api_dependencies
+
+    session_factory = api_dependencies.get_session_factory()
+    async with session_factory() as db:
+        current = SkillArtifact.build(
+            name="create_quiz",
+            version="0.1.98",
+            skill_type="learned",
+            scope="quiz",
+            status="stable",
+            description="Current quiz skill package.",
+            quality_score=0.8,
+            approved_by="operator:seed",
+        )
+        await SkillArtifactRepository(db).create(current)
+
+        payload = {
+            "artifact_kind": "declarative_skill_package",
+            "skill_name": "create_quiz",
+            "bundle_id": "replace-bundle",
+            "surface": "quiz",
+            "match_rules": {"task_types": ["practice"]},
+            "runtime_directives": {"feedback_style": "guided_correction"},
+            "tool_plan": [],
+            "scoring_contract": {"mode": "rule_replay_live_llm"},
+        }
+        reflection = ReflectionRecord.build(
+            learner_profile_id=learner_profile_id,
+            learner_goal_id=learner_goal_id,
+            daily_task_id=None,
+            workflow_run_id=None,
+            study_plan_id=None,
+            scope="goal",
+            target_type="learner_goal",
+            target_id=learner_goal_id,
+            trigger_source="consecutive_failure_pattern",
+            reflection_depth=1,
+            dedupe_key=f"replace-skill:{learner_goal_id}",
+            aggregation_key=f"replace-skill:{learner_goal_id}",
+            duplicate_count=1,
+            priority_score=0.8,
+            last_duplicate_at=None,
+            cooldown_until=None,
+            primary_root_cause="knowledge_gap",
+            secondary_root_causes=[],
+            severity="medium",
+            confidence_score=0.8,
+            summary="Seeded replacement skill package reflection.",
+            evidence_summary="Seeded API integration evidence.",
+            recommended_next_step="Replace quiz skill package.",
+            evidence_payload={"source": "api_integration"},
+        )
+        await ReflectionRecordRepository(db).create(reflection)
+        proposal = ReflectionProposal.build(
+            reflection_record_id=reflection.id,
+            learner_goal_id=learner_goal_id,
+            proposal_type="skill_package",
+            target_scope="quiz",
+            priority_score=0.8,
+            hypothesis="Replacement quiz package improves remediation.",
+            change_summary="Replace quiz skill package.",
+            structured_patch_payload=payload,
+            expected_improvement="Better quiz remediation.",
+            risk_level="low",
+            evidence_snapshot={
+                "source": "skill_patch_request_realization",
+                "source_skill_patch_request_id": "patch-request-seed",
+                "source_artifact_id": current.id,
+                "source_artifact_lineage_id": current.lineage_id,
+                "usage_event_ids": ["usage-seed-1", "usage-seed-2", "usage-seed-3"],
+            },
+        ).enqueue_sandbox(
+            sandbox_run_id="sandbox-replace",
+        ).start_sandbox(
+            sandbox_run_id="sandbox-replace",
+        ).complete_sandbox(
+            sandbox_run_id="sandbox-replace",
+            evaluation_status="effective",
+            evaluation_summary="sandbox:0.20",
+        ).approve(
+            operator_id="operator:seed",
+            reason_code="validated",
+            reason_note=None,
+        )
+        await ReflectionProposalRepository(db).create(proposal)
+        evaluation = ReflectionProposalEvaluation.build(
+            proposal_id=proposal.id,
+            comparison_window_size=3,
+            baseline_policy_snapshot={},
+            candidate_policy_snapshot=payload,
+            evaluator_type="rule",
+            sandbox_run_id="sandbox-replace",
+        ).with_result(
+            evaluation_status="effective",
+            simulated_outcome_summary={"score_delta": 0.2},
+            score_delta=0.2,
+            sandbox_run_id="sandbox-replace",
+        )
+        await ReflectionProposalEvaluationRepository(db).create(evaluation)
+
+        replacement = SkillArtifact.build(
+            name="create_quiz",
+            version="0.1.99",
+            lineage_id=current.lineage_id,
+            parent_artifact_id=current.id,
+            supersedes_artifact_id=current.id,
+            skill_type="learned",
+            scope="quiz",
+            status="staged",
+            description=proposal.change_summary,
+            definition={
+                "artifact_kind": payload["artifact_kind"],
+                "hypothesis": proposal.hypothesis,
+                "change_summary": proposal.change_summary,
+                "expected_improvement": proposal.expected_improvement,
+                "match_rules": dict(payload["match_rules"]),
+                "scoring_contract": dict(payload["scoring_contract"]),
+                "source_proposal": {
+                    "id": proposal.id,
+                    "risk_level": proposal.risk_level,
+                    "evaluation_status": evaluation.evaluation_status,
+                    "score_delta": evaluation.score_delta,
+                    "sandbox_run_id": evaluation.sandbox_run_id,
+                },
+            },
+            runtime_directives=dict(payload["runtime_directives"]),
+            tool_plan=[],
+            compatibility_contract={
+                "surfaces": ["quiz"],
+                "implementation_binding": "create_quiz",
+                "input_schema_version": "1.0",
+                "output_schema_version": "1.0",
+                "dynamic_execution": False,
+            },
+            source_reflection_ids=[proposal.reflection_record_id],
+            source_memory_ids=["memory-replace"],
+            source_proposal_id=proposal.id,
+            quality_score=0.7,
+            created_by="operator:seed",
+        )
+        await SkillArtifactRepository(db).create(replacement)
+
+        rollout = ReflectionProposalRollout.build(
+            proposal_id=proposal.id,
+            learner_goal_id=learner_goal_id,
+            surface="quiz",
+            baseline_snapshot=payload,
+            runtime_overlay_payload={
+                "skill_name": "create_quiz",
+                "surface": "quiz",
+                "match_rules": dict(payload["match_rules"]),
+                "runtime_directives": dict(payload["runtime_directives"]),
+                "tool_plan": [],
+            },
+            activated_by="operator:seed",
+        )
+        binding = GoalSkillBinding.build(
+            proposal_id=proposal.id,
+            rollout_id=rollout.id,
+            learner_goal_id=learner_goal_id,
+            surface="quiz",
+            priority_score=proposal.priority_score,
+            match_rules=dict(payload["match_rules"]),
+            runtime_directives=dict(payload["runtime_directives"]),
+            tool_plan=[],
+        ).with_status("rolled_out")
+        observation = ReflectionProposalRolloutObservation.build(
+            rollout_id=rollout.id,
+            proposal_id=proposal.id,
+            learner_goal_id=learner_goal_id,
+            surface="quiz",
+            recommendation="promote",
+            observed_sample_count=3,
+            positive_score=0.8,
+            negative_score=0.0,
+            signal_summary={"completed_usage_count": 1},
+            reason_codes=["usage_promoted"],
+        )
+        observation_2 = replace(
+            ReflectionProposalRolloutObservation.build(
+                rollout_id=rollout.id,
+                proposal_id=proposal.id,
+                learner_goal_id=learner_goal_id,
+                surface="quiz",
+                recommendation="promote",
+                observed_sample_count=4,
+                positive_score=0.9,
+                negative_score=0.0,
+                signal_summary={"completed_usage_count": 3},
+                reason_codes=["stable_usage_promoted"],
+            ),
+            created_at=observation.created_at + timedelta(minutes=1),
+        )
+        rollout = rollout.with_status("rolled_out", latest_observation_id=observation_2.id)
+        await ReflectionProposalRolloutRepository(db).create(rollout)
+        await GoalSkillBindingRepository(db).create(binding)
+        await ReflectionProposalRolloutObservationRepository(db).create(observation)
+        await ReflectionProposalRolloutObservationRepository(db).create(observation_2)
+        usage_repository = SkillUsageEventRepository(db)
+        for index in range(3):
+            usage_event = replace(
+                SkillUsageEvent.build(
+                    skill_artifact_id=None,
+                    skill_name="create_quiz",
+                    skill_version=None,
+                    skill_status_at_use=None,
+                    learner_goal_id=learner_goal_id,
+                    surface="quiz",
+                    outcome_status="completed",
+                    resolver_status="missing_artifact",
+                    selection_reason="artifact_missing_static_fallback",
+                    metadata={
+                        "skill_package_rollout": {
+                            "proposal_id": proposal.id,
+                            "rollout_id": rollout.id,
+                            "binding_id": binding.id,
+                            "skill_name": "create_quiz",
+                            "surface": "quiz",
+                        }
+                    },
+                ),
+                created_at=rollout.activated_at + timedelta(minutes=index + 1),
+            )
+            await usage_repository.create(usage_event)
+        await db.commit()
+        return current, replacement
+
+
+async def _seed_active_quiz_runtime_artifact() -> SkillArtifact:
+    from agent_core.api import dependencies as api_dependencies
+
+    session_factory = api_dependencies.get_session_factory()
+    async with session_factory() as db:
+        artifact = SkillArtifact.build(
+            name="create_quiz",
+            version="1.0.1",
+            skill_type="learned",
+            scope="quiz",
+            status="active",
+            description="Active governed quiz runtime artifact.",
+            runtime_directives={
+                "question_count": 3,
+                "skill_directives": ["show_work"],
+                "feedback_style": "guided_correction",
+            },
+            compatibility_contract={
+                "surfaces": ["quiz"],
+                "implementation_binding": "llm_create_quiz_v1",
+                "input_schema_version": "1.0",
+                "output_schema_version": "1.0",
+                "dynamic_execution": False,
+            },
+            quality_score=0.9,
+            approved_by="operator:seed",
+        )
+        await SkillArtifactRepository(db).create(artifact)
+        await db.commit()
+        return artifact
+
+
+async def _seed_skill_curator_recommendation(
+    *,
+    recommendation_type: str = "patch_needed",
+    recommended_action: str = "none",
+    reason_code: str = "quality_regression",
+    artifact_id: str | None = None,
+    skill_name: str = "create_quiz",
+    scope: str = "quiz",
+    surface: str = "quiz",
+    evidence_snapshot: dict[str, object] | None = None,
+    metrics_snapshot: dict[str, object] | None = None,
+    related_artifact_ids: list[str] | None = None,
+) -> str:
+    from agent_core.api import dependencies as api_dependencies
+
+    session_factory = api_dependencies.get_session_factory()
+    async with session_factory() as db:
+        service = api_dependencies.get_skill_curator_recommendation_service(db)
+        recommendation = await service.create_recommendation(
+            artifact_id=artifact_id,
+            skill_name=skill_name,
+            scope=scope,
+            surface=surface,
+            recommendation_type=recommendation_type,
+            recommended_action=recommended_action,
+            reason_code=reason_code,
+            reason_note="Seeded API integration recommendation.",
+            evidence_snapshot=evidence_snapshot or {"usage_event_ids": ["usage-api-1"]},
+            metrics_snapshot=metrics_snapshot or {"negative_usage_rate": 0.4},
+            related_artifact_ids=related_artifact_ids,
+            created_by="skill_curator:test",
+        )
+        await db.commit()
+        return recommendation.id
+
+
+async def _seed_merge_candidate_skill_artifacts(
+    *,
+    learner_profile_id: str,
+    learner_goal_id: str,
+) -> tuple[SkillArtifact, SkillArtifact, str]:
+    from agent_core.api import dependencies as api_dependencies
+
+    session_factory = api_dependencies.get_session_factory()
+    async with session_factory() as db:
+        source_artifact = SkillArtifact.build(
+            name="create_quiz",
+            version="0.1.80",
+            skill_type="learned",
+            scope="quiz",
+            status="stable",
+            description="Current quiz skill package.",
+            definition={
+                "artifact_kind": "declarative_skill_package",
+                "match_rules": {"task_types": ["practice"], "topic_keys": ["algebra"]},
+                "scoring_contract": {"mode": "rule_replay_live_llm", "minimum_sample_count": 2},
+            },
+            runtime_directives={"question_count": 3, "feedback_style": "guided_correction"},
+            tool_plan=[],
+            compatibility_contract={
+                "surfaces": ["quiz"],
+                "implementation_binding": "create_quiz",
+                "input_schema_version": "1.0",
+                "output_schema_version": "1.0",
+                "dynamic_execution": False,
+            },
+            source_reflection_ids=["reflection-source"],
+            source_memory_ids=["memory-source"],
+            source_proposal_id="proposal-source",
+            quality_score=0.8,
+            created_by="operator:seed",
+            approved_by="operator:seed",
+        )
+        related_artifact = SkillArtifact.build(
+            name="create_quiz",
+            version="0.1.81",
+            skill_type="learned",
+            scope="quiz",
+            status="deprecated",
+            description="Overlapping quiz skill package.",
+            definition={
+                "artifact_kind": "declarative_skill_package",
+                "match_rules": {"task_types": ["review", "practice"], "topic_keys": ["linear-systems"]},
+                "scoring_contract": {"mode": "rule_replay_live_llm", "minimum_sample_count": 4},
+            },
+            runtime_directives={"question_count": 5, "feedback_style": "direct"},
+            tool_plan=[],
+            compatibility_contract={
+                "surfaces": ["quiz"],
+                "implementation_binding": "create_quiz",
+                "input_schema_version": "1.0",
+                "output_schema_version": "1.0",
+                "dynamic_execution": False,
+            },
+            source_reflection_ids=["reflection-related"],
+            source_memory_ids=["memory-related"],
+            source_proposal_id="proposal-related",
+            quality_score=0.75,
+            created_by="operator:seed",
+            approved_by="operator:seed",
+        )
+        await SkillArtifactRepository(db).create(source_artifact)
+        await SkillArtifactRepository(db).create(related_artifact)
+        reflection = ReflectionRecord.build(
+            learner_profile_id=learner_profile_id,
+            learner_goal_id=learner_goal_id,
+            daily_task_id=None,
+            workflow_run_id=None,
+            study_plan_id=None,
+            scope="goal",
+            target_type="learner_goal",
+            target_id=learner_goal_id,
+            trigger_source="consecutive_failure_pattern",
+            reflection_depth=1,
+            dedupe_key=f"merge-skill:{learner_goal_id}",
+            aggregation_key=f"merge-skill:{learner_goal_id}",
+            duplicate_count=1,
+            priority_score=0.8,
+            last_duplicate_at=None,
+            cooldown_until=None,
+            primary_root_cause="knowledge_gap",
+            secondary_root_causes=[],
+            severity="medium",
+            confidence_score=0.8,
+            summary="Seeded merge candidate reflection.",
+            evidence_summary="Seeded overlapping skill package evidence.",
+            recommended_next_step="Merge overlapping quiz skill package coverage.",
+            evidence_payload={"source": "api_integration"},
+        )
+        await ReflectionRecordRepository(db).create(reflection)
+        await db.commit()
+        return source_artifact, related_artifact, reflection.id
+
+
+async def _seed_realizable_skill_patch_request(
+    *,
+    learner_profile_id: str,
+    learner_goal_id: str,
+) -> tuple[SkillArtifact, ReflectionProposal]:
+    from agent_core.api import dependencies as api_dependencies
+
+    session_factory = api_dependencies.get_session_factory()
+    async with session_factory() as db:
+        source_artifact = SkillArtifact.build(
+            name="create_quiz",
+            version="0.1.77",
+            skill_type="learned",
+            scope="quiz",
+            status="stable",
+            description="Current quiz skill package.",
+            definition={
+                "artifact_kind": "declarative_skill_package",
+                "match_rules": {"task_types": ["practice"], "topic_keys": ["algebra"]},
+                "scoring_contract": {"mode": "rule_replay_live_llm", "minimum_sample_count": 2},
+            },
+            runtime_directives={"question_count": 3, "feedback_style": "guided_correction"},
+            tool_plan=[],
+            compatibility_contract={
+                "surfaces": ["quiz"],
+                "implementation_binding": "create_quiz",
+                "input_schema_version": "1.0",
+                "output_schema_version": "1.0",
+                "dynamic_execution": False,
+            },
+            source_reflection_ids=["reflection-source"],
+            source_memory_ids=["memory-source"],
+            source_proposal_id="proposal-source",
+            quality_score=0.8,
+            created_by="operator:seed",
+            approved_by="operator:seed",
+        )
+        await SkillArtifactRepository(db).create(source_artifact)
+        reflection = ReflectionRecord.build(
+            learner_profile_id=learner_profile_id,
+            learner_goal_id=learner_goal_id,
+            daily_task_id=None,
+            workflow_run_id=None,
+            study_plan_id=None,
+            scope="goal",
+            target_type="learner_goal",
+            target_id=learner_goal_id,
+            trigger_source="consecutive_failure_pattern",
+            reflection_depth=1,
+            dedupe_key=f"realize-skill-patch:{learner_goal_id}",
+            aggregation_key=f"realize-skill-patch:{learner_goal_id}",
+            duplicate_count=1,
+            priority_score=0.8,
+            last_duplicate_at=None,
+            cooldown_until=None,
+            primary_root_cause="knowledge_gap",
+            secondary_root_causes=[],
+            severity="medium",
+            confidence_score=0.8,
+            summary="Seeded skill patch request reflection.",
+            evidence_summary="Seeded API integration evidence.",
+            recommended_next_step="Realize governed skill patch request.",
+            evidence_payload={"source": "api_integration"},
+        )
+        await ReflectionRecordRepository(db).create(reflection)
+        patch_request = ReflectionProposal.build(
+            reflection_record_id=reflection.id,
+            learner_goal_id=learner_goal_id,
+            proposal_type="skill_patch_request",
+            target_scope="quiz",
+            priority_score=0.8,
+            hypothesis="Curator evidence indicates create_quiz may need a governed skill patch.",
+            change_summary="Create a governed patch request for create_quiz on quiz.",
+            structured_patch_payload={
+                "artifact_id": source_artifact.id,
+                "skill_name": source_artifact.name,
+                "skill_version": source_artifact.version,
+                "scope": source_artifact.scope,
+                "surface": source_artifact.scope,
+                "recommendation_id": "recommendation-api-1",
+                "recommendation_reason_code": "quality_regression",
+                "usage_event_ids": ["usage-api-1", "usage-api-2"],
+                "related_artifact_ids": [],
+                "evidence_snapshot": {"usage_event_ids": ["usage-api-1", "usage-api-2"]},
+                "metrics_snapshot": {"negative_usage_rate": 0.5},
+            },
+            expected_improvement="Route negative skill evidence into sandboxed proposal review before artifact changes.",
+            risk_level="medium",
+            evidence_snapshot={
+                "source": "skill_curator_recommendation",
+                "recommendation_id": "recommendation-api-1",
+            },
+        ).enqueue_sandbox(
+            sandbox_run_id="sandbox-patch-api",
+        ).start_sandbox(
+            sandbox_run_id="sandbox-patch-api",
+        ).complete_sandbox(
+            sandbox_run_id="sandbox-patch-api",
+            evaluation_status="effective",
+            evaluation_summary="sandbox:0.15",
+        ).approve(
+            operator_id="operator:seed",
+            reason_code="validated",
+            reason_note=None,
+        )
+        await ReflectionProposalRepository(db).create(patch_request)
+        evaluation = ReflectionProposalEvaluation.build(
+            proposal_id=patch_request.id,
+            comparison_window_size=2,
+            baseline_policy_snapshot={"artifact_id": source_artifact.id},
+            candidate_policy_snapshot={"usage_event_ids": ["usage-api-1", "usage-api-2"]},
+            evaluator_type="rule",
+            sandbox_run_id="sandbox-patch-api",
+        ).with_result(
+            evaluation_status="effective",
+            simulated_outcome_summary={"score_delta": 0.15},
+            score_delta=0.15,
+            sandbox_run_id="sandbox-patch-api",
+        )
+        await ReflectionProposalEvaluationRepository(db).create(evaluation)
+        await db.commit()
+        return source_artifact, patch_request
+
+
+async def _approve_realized_replacement_proposal(proposal_id: str) -> ReflectionProposal:
+    from agent_core.api import dependencies as api_dependencies
+
+    session_factory = api_dependencies.get_session_factory()
+    async with session_factory() as db:
+        proposal_repository = ReflectionProposalRepository(db)
+        proposal = await proposal_repository.get_by_id(proposal_id)
+        assert proposal is not None
+
+        sandbox_run_id = proposal.latest_sandbox_run_id or f"sandbox-realized-{proposal.id}"
+        if proposal.status == "proposed":
+            proposal = proposal.enqueue_sandbox(sandbox_run_id=sandbox_run_id)
+        if proposal.status == "sandbox_queued":
+            proposal = proposal.start_sandbox(sandbox_run_id=sandbox_run_id)
+        if proposal.status == "sandbox_running":
+            proposal = proposal.complete_sandbox(
+                sandbox_run_id=sandbox_run_id,
+                evaluation_status="effective",
+                evaluation_summary="sandbox:0.20",
+            )
+        if proposal.status == "sandbox_completed":
+            proposal = proposal.approve(
+                operator_id="operator:seed",
+                reason_code="validated",
+                reason_note=None,
+            )
+        assert proposal.status == "approved"
+        assert proposal.evaluation_status == "effective"
+        await proposal_repository.update(proposal)
+
+        evaluation_repository = ReflectionProposalEvaluationRepository(db)
+        existing_evaluation = await evaluation_repository.get_by_proposal(proposal.id)
+        evaluation = ReflectionProposalEvaluation.build(
+            proposal_id=proposal.id,
+            comparison_window_size=3,
+            baseline_policy_snapshot={"source_artifact_id": proposal.evidence_snapshot["source_artifact_id"]},
+            candidate_policy_snapshot=proposal.structured_patch_payload,
+            evaluator_type="rule",
+            sandbox_run_id=sandbox_run_id,
+        ).with_result(
+            evaluation_status="effective",
+            simulated_outcome_summary={"score_delta": 0.2},
+            score_delta=0.2,
+            sandbox_run_id=sandbox_run_id,
+        )
+        if existing_evaluation is None:
+            await evaluation_repository.create(evaluation)
+        else:
+            await evaluation_repository.update(
+                ReflectionProposalEvaluation(
+                    id=existing_evaluation.id,
+                    proposal_id=existing_evaluation.proposal_id,
+                    evaluation_status=evaluation.evaluation_status,
+                    comparison_window_size=existing_evaluation.comparison_window_size,
+                    baseline_policy_snapshot=existing_evaluation.baseline_policy_snapshot,
+                    candidate_policy_snapshot=existing_evaluation.candidate_policy_snapshot,
+                    simulated_outcome_summary=evaluation.simulated_outcome_summary,
+                    score_delta=evaluation.score_delta,
+                    evaluator_type=existing_evaluation.evaluator_type,
+                    sandbox_run_id=evaluation.sandbox_run_id,
+                    created_at=existing_evaluation.created_at,
+                    updated_at=evaluation.updated_at,
+                )
+            )
+        await db.commit()
+        return proposal
 
 
 def test_session_endpoints_cover_create_list_get_update_and_errors(app_client_factory):
@@ -207,6 +827,26 @@ def test_quiz_endpoints_cover_generate_list_detail_and_errors(app_client_factory
 
     missing_quiz = client.get(f"/api/v1/sessions/{session_id}/quizzes/missing-quiz")
     assert missing_quiz.status_code == 404
+
+
+def test_quiz_generation_consumes_active_runtime_artifact_directives(app_client_factory):
+    client = app_client_factory()
+    asyncio.run(_seed_active_quiz_runtime_artifact())
+
+    session_response = client.post(
+        "/api/v1/sessions",
+        json={"title": "Probability", "subject": "Distributions"},
+    )
+    assert session_response.status_code == 200
+    session_id = session_response.json()["id"]
+
+    generated = client.post(
+        f"/api/v1/sessions/{session_id}/quizzes/generate",
+        json={"topic": "Distributions", "difficulty": "easy", "question_count": 1},
+    )
+    assert generated.status_code == 200
+    quiz_payload = generated.json()
+    assert quiz_payload["question_count"] == 3
 
 
 def test_profile_access_key_api_returns_key_once_and_rotates_operator_only(app_client_factory):
@@ -784,7 +1424,7 @@ def test_reflection_proposal_sandbox_and_approval_endpoints(app_client_factory):
         (
             item
             for item in proposals.json()
-            if item["proposal_type"] == "skill_package"
+            if item["proposal_type"] == "skill_package" and item["activation_surface"] in {"chat", "hint"}
         ),
         None,
     )
@@ -1028,6 +1668,59 @@ def test_reflection_proposal_sandbox_and_approval_endpoints(app_client_factory):
     assert artifact_activation_repeat.json()["id"] == staged_payload["id"]
     assert artifact_activation_repeat.json()["version"] == staged_payload["version"]
 
+    stabilize_unauthorized = client.post(
+        f"/api/v1/skill-artifacts/{activated_artifact_payload['id']}/stabilize",
+        json={"reason_code": "stable_evidence", "reason_note": "Promote active artifact to stable"},
+    )
+    assert stabilize_unauthorized.status_code == 403
+
+    for index in range(5):
+        message_payload = {
+            "content": f"Stable evidence turn {index + 1}.",
+            "mode": rollout_mode,
+        }
+        if rollout_mode == "hint":
+            message_payload["question_prompt"] = "What is the next step in matrix multiplication?"
+        stable_message = client.post(
+            f"/api/v1/sessions/{rollout_session_id}/messages",
+            json=message_payload,
+        )
+        assert stable_message.status_code == 200
+
+    for _ in range(2):
+        stable_observed = client.post(
+            f"/api/v1/rollouts/{rollout_id}/observe",
+            headers={"X-Operator-Key": "secret-operator"},
+            json={"reason_code": "manual_observe", "reason_note": "Stable artifact evidence collected"},
+        )
+        assert stable_observed.status_code == 200
+        assert stable_observed.json()["recommendation"] == "promote"
+
+    stable_artifact = client.post(
+        f"/api/v1/skill-artifacts/{activated_artifact_payload['id']}/stabilize",
+        headers={"X-Operator-Key": "secret-operator"},
+        json={"reason_code": "stable_evidence", "reason_note": "Promote active artifact to stable"},
+    )
+    assert stable_artifact.status_code == 200
+    stable_artifact_payload = stable_artifact.json()
+    assert stable_artifact_payload["id"] == activated_artifact_payload["id"]
+    assert stable_artifact_payload["status"] == "stable"
+    assert stable_artifact_payload["approved_by"] == _operator_actor_id()
+    assert stable_artifact_payload["approved_at"] is not None
+
+    stable_resolution = client.get(
+        "/api/v1/skill-resolution",
+        headers={"X-Operator-Key": "secret-operator"},
+        params={
+            "skill_name": stable_artifact_payload["name"],
+            "surface": stable_artifact_payload["scope"],
+        },
+    )
+    assert stable_resolution.status_code == 200
+    assert stable_resolution.json()["resolver_status"] == "resolved"
+    assert stable_resolution.json()["artifact_id"] == stable_artifact_payload["id"]
+    assert stable_resolution.json()["artifact_status"] == "stable"
+
     rolled_back = client.post(
         f"/api/v1/rollouts/{rollout_id}/rollback",
         headers={"X-Operator-Key": "secret-operator"},
@@ -1036,27 +1729,22 @@ def test_reflection_proposal_sandbox_and_approval_endpoints(app_client_factory):
     assert rolled_back.status_code == 200
     assert rolled_back.json()["status"] == "rolled_back"
 
-    deactivate_unauthorized = client.post(
-        f"/api/v1/skill-artifacts/{activated_artifact_payload['id']}/deactivate",
-        json={"reason_code": "rollout_rollback", "reason_note": "Deactivate rolled back artifact"},
-    )
-    assert deactivate_unauthorized.status_code == 403
-
-    deactivated_artifact = client.post(
-        f"/api/v1/skill-artifacts/{activated_artifact_payload['id']}/deactivate",
+    deactivated_artifact = client.get(
+        f"/api/v1/skill-artifacts/{stable_artifact_payload['id']}",
         headers={"X-Operator-Key": "secret-operator"},
-        json={"reason_code": "rollout_rollback", "reason_note": "Deactivate rolled back artifact"},
     )
     assert deactivated_artifact.status_code == 200
-    assert deactivated_artifact.json()["id"] == activated_artifact_payload["id"]
+    assert deactivated_artifact.json()["id"] == stable_artifact_payload["id"]
     assert deactivated_artifact.json()["status"] == "deprecated"
+    assert deactivated_artifact.json()["deprecated_by"] == _operator_actor_id()
+    assert deactivated_artifact.json()["deprecated_at"] is not None
 
     deactivated_resolution = client.get(
         "/api/v1/skill-resolution",
         headers={"X-Operator-Key": "secret-operator"},
         params={
-            "skill_name": activated_artifact_payload["name"],
-            "surface": activated_artifact_payload["scope"],
+            "skill_name": stable_artifact_payload["name"],
+            "surface": stable_artifact_payload["scope"],
         },
     )
     assert deactivated_resolution.status_code == 200
@@ -1211,6 +1899,949 @@ def test_skills_readyz_and_metrics_endpoints(app_client_factory):
     assert 'route="/api/v1/sessions/{session_id}/messages"' in metrics.text
     assert "agent_edu_llm_operations_total" in metrics.text
     assert "agent_edu_audit_writes_total" in metrics.text
+    assert "agent_edu_skill_resolutions_total" in metrics.text
+    assert "agent_edu_skill_usage_events_total" in metrics.text
+    assert "agent_edu_skill_artifacts" in metrics.text
+    assert "agent_edu_skill_curator_pending_recommendations" in metrics.text
+
+
+def test_replace_skill_artifact_route_supersedes_current_selectable(app_client_factory):
+    client = app_client_factory(env_overrides={"AGENT_EDU_OPERATOR_API_KEY": "secret-operator"})
+    profile_id, access_key = _create_profile_with_key(client)
+    goal = client.post(
+        f"/api/v1/learner-profiles/{profile_id}/goals",
+        headers=_learner_headers(access_key),
+        json={
+            "title": "Master quiz replacement",
+            "subject": "Algebra",
+            "target_outcome": "Practice with better generated quizzes",
+            "deadline_date": (date.today() + timedelta(days=21)).isoformat(),
+            "weekly_study_minutes": 120,
+        },
+    )
+    assert goal.status_code == 200
+    current, replacement = asyncio.run(
+        _seed_replaceable_skill_artifacts(
+            learner_profile_id=profile_id,
+            learner_goal_id=goal.json()["id"],
+        )
+    )
+
+    unauthorized = client.post(
+        f"/api/v1/skill-artifacts/{replacement.id}/replace",
+        json={"reason_code": "superseded", "reason_note": "Replace current quiz package."},
+    )
+    assert unauthorized.status_code == 403
+
+    replaced = client.post(
+        f"/api/v1/skill-artifacts/{replacement.id}/replace",
+        headers=_operator_headers(),
+        json={"reason_code": "superseded", "reason_note": "Replace current quiz package."},
+    )
+    assert replaced.status_code == 200
+    replacement_payload = replaced.json()
+    assert replacement_payload["id"] == replacement.id
+    assert replacement_payload["status"] == "active"
+    assert replacement_payload["lineage_id"] == current.lineage_id
+    assert replacement_payload["parent_artifact_id"] == current.id
+    assert replacement_payload["supersedes_artifact_id"] == current.id
+    assert replacement_payload["approved_by"] == _operator_actor_id()
+    assert replacement_payload["approved_at"] is not None
+
+    current_response = client.get(f"/api/v1/skill-artifacts/{current.id}", headers=_operator_headers())
+    assert current_response.status_code == 200
+    current_payload = current_response.json()
+    assert current_payload["status"] == "deprecated"
+    assert current_payload["deprecated_by"] == _operator_actor_id()
+    assert current_payload["deprecated_at"] is not None
+
+    resolution = client.get(
+        "/api/v1/skill-resolution",
+        headers=_operator_headers(),
+        params={"skill_name": "create_quiz", "surface": "quiz"},
+    )
+    assert resolution.status_code == 200
+    assert resolution.json()["resolver_status"] == "resolved"
+    assert resolution.json()["artifact_id"] == replacement.id
+    assert resolution.json()["artifact_status"] == "active"
+
+    repeated = client.post(
+        f"/api/v1/skill-artifacts/{replacement.id}/replace",
+        headers=_operator_headers(),
+        json={"reason_code": "superseded", "reason_note": "Repeat replacement."},
+    )
+    assert repeated.status_code == 200
+    assert repeated.json()["id"] == replacement.id
+
+    event_types = asyncio.run(_audit_event_types())
+    assert "skill.artifact.deactivated" in event_types
+    assert "skill.artifact.replaced" in event_types
+    assert "skill.artifact.replace_reused" in event_types
+
+
+def test_skill_replacement_readiness_route_reports_governed_replace_readiness(app_client_factory):
+    client = app_client_factory(env_overrides={"AGENT_EDU_OPERATOR_API_KEY": "secret-operator"})
+    profile_id, access_key = _create_profile_with_key(client)
+    goal = client.post(
+        f"/api/v1/learner-profiles/{profile_id}/goals",
+        headers=_learner_headers(access_key),
+        json={
+            "title": "Check governed replacement readiness",
+            "subject": "Algebra",
+            "target_outcome": "Review staged replacement evidence before replace",
+            "deadline_date": (date.today() + timedelta(days=21)).isoformat(),
+            "weekly_study_minutes": 120,
+        },
+    )
+    assert goal.status_code == 200
+    current, replacement = asyncio.run(
+        _seed_replaceable_skill_artifacts(
+            learner_profile_id=profile_id,
+            learner_goal_id=goal.json()["id"],
+        )
+    )
+
+    unauthorized = client.get(f"/api/v1/skill-artifacts/{replacement.id}/replacement-readiness")
+    assert unauthorized.status_code == 403
+
+    readiness = client.get(
+        f"/api/v1/skill-artifacts/{replacement.id}/replacement-readiness",
+        headers=_operator_headers(),
+    )
+    assert readiness.status_code == 200
+    payload = readiness.json()
+    assert payload["artifact_id"] == replacement.id
+    assert payload["proposal_source"] == "skill_patch_request_realization"
+    assert payload["recommended_action"] == "replace_selectable"
+    assert payload["source_anchor"]["source_artifact_id"] == current.id
+    assert payload["activate_readiness"]["status"] == "blocked"
+    assert "current_selectable_conflict" in payload["activate_readiness"]["reason_codes"]
+    assert payload["replace_readiness"]["status"] == "ready"
+    assert payload["thresholds"]["successful_usage_min"] == 3
+    assert payload["usage_evidence"]["successful_count"] == 3
+
+
+def test_suppress_restore_skill_artifact_routes_gate_runtime_resolution(app_client_factory):
+    client = app_client_factory(env_overrides={"AGENT_EDU_OPERATOR_API_KEY": "secret-operator"})
+    profile_id, access_key = _create_profile_with_key(client)
+    goal = client.post(
+        f"/api/v1/learner-profiles/{profile_id}/goals",
+        headers=_learner_headers(access_key),
+        json={
+            "title": "Master quiz suppression",
+            "subject": "Algebra",
+            "target_outcome": "Practice with governed quiz packages",
+            "deadline_date": (date.today() + timedelta(days=21)).isoformat(),
+            "weekly_study_minutes": 120,
+        },
+    )
+    assert goal.status_code == 200
+    current, _replacement = asyncio.run(
+        _seed_replaceable_skill_artifacts(
+            learner_profile_id=profile_id,
+            learner_goal_id=goal.json()["id"],
+        )
+    )
+
+    unauthorized = client.post(
+        f"/api/v1/skill-artifacts/{current.id}/suppress",
+        json={"reason_code": "safety_risk", "reason_note": "Investigate package."},
+    )
+    assert unauthorized.status_code == 403
+
+    suppressed = client.post(
+        f"/api/v1/skill-artifacts/{current.id}/suppress",
+        headers=_operator_headers(),
+        json={"reason_code": "safety_risk", "reason_note": "Investigate package."},
+    )
+    assert suppressed.status_code == 200
+    suppressed_payload = suppressed.json()
+    assert suppressed_payload["id"] == current.id
+    assert suppressed_payload["status"] == "suppressed"
+    assert suppressed_payload["suppressed_reason_code"] == "safety_risk"
+    assert suppressed_payload["suppressed_reason_note"] == "Investigate package."
+    assert suppressed_payload["suppressed_by"] == _operator_actor_id()
+    assert suppressed_payload["suppressed_at"] is not None
+    assert suppressed_payload["suppressed_previous_status"] == "stable"
+
+    blocked_resolution = client.get(
+        "/api/v1/skill-resolution",
+        headers=_operator_headers(),
+        params={"skill_name": "create_quiz", "surface": "quiz"},
+    )
+    assert blocked_resolution.status_code == 200
+    assert blocked_resolution.json()["resolver_status"] == "blocked"
+    assert blocked_resolution.json()["selection_reason"] == "suppressed_artifact"
+    assert blocked_resolution.json()["artifact_id"] == current.id
+    assert blocked_resolution.json()["artifact_status"] == "suppressed"
+
+    restored = client.post(
+        f"/api/v1/skill-artifacts/{current.id}/restore",
+        headers=_operator_headers(),
+        json={"reason_code": "risk_mitigated", "reason_note": "Investigation cleared."},
+    )
+    assert restored.status_code == 200
+    restored_payload = restored.json()
+    assert restored_payload["id"] == current.id
+    assert restored_payload["status"] == "stable"
+    assert restored_payload["suppressed_reason_code"] is None
+    assert restored_payload["suppressed_reason_note"] is None
+    assert restored_payload["suppressed_by"] is None
+    assert restored_payload["suppressed_at"] is None
+    assert restored_payload["suppressed_previous_status"] is None
+
+    resolved = client.get(
+        "/api/v1/skill-resolution",
+        headers=_operator_headers(),
+        params={"skill_name": "create_quiz", "surface": "quiz"},
+    )
+    assert resolved.status_code == 200
+    assert resolved.json()["resolver_status"] == "resolved"
+    assert resolved.json()["artifact_id"] == current.id
+    assert resolved.json()["artifact_status"] == "stable"
+
+    repeated_restore = client.post(
+        f"/api/v1/skill-artifacts/{current.id}/restore",
+        headers=_operator_headers(),
+        json={"reason_code": "operator_restore", "reason_note": "Repeat restore."},
+    )
+    assert repeated_restore.status_code == 200
+    assert repeated_restore.json()["id"] == current.id
+    assert repeated_restore.json()["status"] == "stable"
+
+    event_types = asyncio.run(_audit_event_types())
+    assert "skill.artifact.suppressed" in event_types
+    assert "skill.resolution.blocked" not in event_types
+    assert "skill.artifact.restored" in event_types
+    assert "skill.artifact.restore_reused" in event_types
+
+
+def test_archive_skill_artifact_route_archives_deprecated_artifact(app_client_factory):
+    client = app_client_factory(env_overrides={"AGENT_EDU_OPERATOR_API_KEY": "secret-operator"})
+    profile_id, access_key = _create_profile_with_key(client)
+    goal = client.post(
+        f"/api/v1/learner-profiles/{profile_id}/goals",
+        headers=_learner_headers(access_key),
+        json={
+            "title": "Master quiz archival",
+            "subject": "Algebra",
+            "target_outcome": "Retire stale quiz packages",
+            "deadline_date": (date.today() + timedelta(days=21)).isoformat(),
+            "weekly_study_minutes": 120,
+        },
+    )
+    assert goal.status_code == 200
+    current, _replacement = asyncio.run(
+        _seed_replaceable_skill_artifacts(
+            learner_profile_id=profile_id,
+            learner_goal_id=goal.json()["id"],
+        )
+    )
+
+    unauthorized = client.post(
+        f"/api/v1/skill-artifacts/{current.id}/archive",
+        json={"reason_code": "stale_deprecated", "reason_note": "Archive stale package."},
+    )
+    assert unauthorized.status_code == 403
+
+    rejected_selectable = client.post(
+        f"/api/v1/skill-artifacts/{current.id}/archive",
+        headers=_operator_headers(),
+        json={"reason_code": "stale_deprecated", "reason_note": "Not deprecated yet."},
+    )
+    assert rejected_selectable.status_code == 400
+
+    deactivated = client.post(
+        f"/api/v1/skill-artifacts/{current.id}/deactivate",
+        headers=_operator_headers(),
+        json={"reason_code": "operator_request", "reason_note": "Prepare archive."},
+    )
+    assert deactivated.status_code == 200
+    assert deactivated.json()["status"] == "deprecated"
+
+    archived = client.post(
+        f"/api/v1/skill-artifacts/{current.id}/archive",
+        headers=_operator_headers(),
+        json={"reason_code": "stale_deprecated", "reason_note": "Archive stale package."},
+    )
+    assert archived.status_code == 200
+    archived_payload = archived.json()
+    assert archived_payload["id"] == current.id
+    assert archived_payload["status"] == "archived"
+    assert archived_payload["lineage_id"] == current.lineage_id
+    assert archived_payload["deprecated_by"] == _operator_actor_id()
+    assert archived_payload["deprecated_at"] is not None
+
+    resolution = client.get(
+        "/api/v1/skill-resolution",
+        headers=_operator_headers(),
+        params={"skill_name": "create_quiz", "surface": "quiz"},
+    )
+    assert resolution.status_code == 200
+    assert resolution.json()["resolver_status"] == "missing_artifact"
+    assert resolution.json()["artifact_id"] is None
+
+    repeated = client.post(
+        f"/api/v1/skill-artifacts/{current.id}/archive",
+        headers=_operator_headers(),
+        json={"reason_code": "cleanup", "reason_note": "Repeat archive."},
+    )
+    assert repeated.status_code == 200
+    assert repeated.json()["id"] == current.id
+    assert repeated.json()["status"] == "archived"
+
+    restore_archived = client.post(
+        f"/api/v1/skill-artifacts/{current.id}/restore",
+        headers=_operator_headers(),
+        json={"reason_code": "operator_restore", "reason_note": "Cannot restore archived."},
+    )
+    assert restore_archived.status_code == 400
+
+    event_types = asyncio.run(_audit_event_types())
+    assert "skill.artifact.archived" in event_types
+    assert "skill.artifact.archive_reused" in event_types
+
+
+def test_skill_curator_recommendation_operator_routes_cover_list_get_accept_and_dismiss(app_client_factory):
+    client = app_client_factory(env_overrides={"AGENT_EDU_OPERATOR_API_KEY": "secret-operator"})
+    recommendation_id = asyncio.run(
+        _seed_skill_curator_recommendation(
+            recommendation_type="rollback_review",
+            recommended_action="none",
+            reason_code="rollback_recommended",
+        )
+    )
+    dismiss_recommendation_id = asyncio.run(
+        _seed_skill_curator_recommendation(
+            recommendation_type="flag_for_review",
+            recommended_action="none",
+            reason_code="manual_review",
+        )
+    )
+
+    unauthorized_list = client.get("/api/v1/skill-curator-recommendations")
+    assert unauthorized_list.status_code == 403
+
+    no_create = client.post(
+        "/api/v1/skill-curator-recommendations",
+        headers=_operator_headers(),
+        json={"recommendation_type": "patch_needed"},
+    )
+    assert no_create.status_code == 405
+
+    listed = client.get(
+        "/api/v1/skill-curator-recommendations",
+        headers=_operator_headers(),
+        params={
+            "status": "pending",
+            "recommendation_type": "rollback_review",
+            "recommended_action": "none",
+            "skill_name": "create_quiz",
+            "scope": "quiz",
+            "surface": "quiz",
+        },
+    )
+    assert listed.status_code == 200
+    listed_payload = listed.json()
+    assert [item["id"] for item in listed_payload] == [recommendation_id]
+    assert listed_payload[0]["status"] == "pending"
+    assert listed_payload[0]["evidence_snapshot"] == {"usage_event_ids": ["usage-api-1"]}
+    assert listed_payload[0]["metrics_snapshot"] == {"negative_usage_rate": 0.4}
+
+    detail = client.get(
+        f"/api/v1/skill-curator-recommendations/{recommendation_id}",
+        headers=_operator_headers(),
+    )
+    assert detail.status_code == 200
+    assert detail.json()["id"] == recommendation_id
+
+    accepted = client.post(
+        f"/api/v1/skill-curator-recommendations/{recommendation_id}/accept",
+        headers=_operator_headers(),
+        json={"reason_code": "operator_reviewed", "reason_note": "Accept merge candidate note."},
+    )
+    assert accepted.status_code == 200
+    accepted_payload = accepted.json()
+    assert accepted_payload["id"] == recommendation_id
+    assert accepted_payload["status"] == "accepted"
+    assert accepted_payload["accepted_by"] == _operator_actor_id()
+    assert accepted_payload["accepted_at"] is not None
+    assert accepted_payload["decision_reason_code"] == "operator_reviewed"
+    assert accepted_payload["action_result"] == {"executed": False, "recommended_action": "none"}
+
+    repeated_accept = client.post(
+        f"/api/v1/skill-curator-recommendations/{recommendation_id}/accept",
+        headers=_operator_headers(),
+        json={"reason_code": "operator_reviewed", "reason_note": "Repeat accept."},
+    )
+    assert repeated_accept.status_code == 200
+    assert repeated_accept.json()["status"] == "accepted"
+
+    dismissed = client.post(
+        f"/api/v1/skill-curator-recommendations/{dismiss_recommendation_id}/dismiss",
+        headers=_operator_headers(),
+        json={"reason_code": "false_positive", "reason_note": "No longer relevant."},
+    )
+    assert dismissed.status_code == 200
+    dismissed_payload = dismissed.json()
+    assert dismissed_payload["id"] == dismiss_recommendation_id
+    assert dismissed_payload["status"] == "dismissed"
+    assert dismissed_payload["dismissed_by"] == _operator_actor_id()
+    assert dismissed_payload["dismissed_at"] is not None
+
+    cannot_dismiss_accepted = client.post(
+        f"/api/v1/skill-curator-recommendations/{recommendation_id}/dismiss",
+        headers=_operator_headers(),
+        json={"reason_code": "false_positive", "reason_note": "Too late."},
+    )
+    assert cannot_dismiss_accepted.status_code == 400
+
+    event_types = asyncio.run(_audit_event_types())
+    assert "skill.curator.recommendation.created" in event_types
+    assert "skill.curator.recommendation.accepted" in event_types
+    assert "skill.curator.recommendation.accept_reused" in event_types
+    assert "skill.curator.recommendation.dismissed" in event_types
+
+
+def test_skill_curator_recommendation_accept_patch_needed_creates_skill_patch_proposal(app_client_factory):
+    client = app_client_factory(env_overrides={"AGENT_EDU_OPERATOR_API_KEY": "secret-operator"})
+    profile_id, access_key = _create_profile_with_key(client)
+    goal = client.post(
+        f"/api/v1/learner-profiles/{profile_id}/goals",
+        headers=_learner_headers(access_key),
+        json={
+            "title": "Accept patch recommendation",
+            "subject": "Algebra",
+            "target_outcome": "Route skill patch recommendations through governance",
+            "deadline_date": (date.today() + timedelta(days=21)).isoformat(),
+            "weekly_study_minutes": 120,
+        },
+    )
+    assert goal.status_code == 200
+    goal_id = goal.json()["id"]
+
+    async def seed_reflection() -> str:
+        from agent_core.api import dependencies as api_dependencies
+
+        session_factory = api_dependencies.get_session_factory()
+        async with session_factory() as db:
+            reflection = ReflectionRecord.build(
+                learner_profile_id=profile_id,
+                learner_goal_id=goal_id,
+                daily_task_id=None,
+                workflow_run_id=None,
+                study_plan_id=None,
+                scope="goal",
+                target_type="learner_goal",
+                target_id=goal_id,
+                trigger_source="consecutive_failure_pattern",
+                reflection_depth=1,
+                dedupe_key=f"patch-recommendation:{goal_id}",
+                aggregation_key=f"patch-recommendation:{goal_id}",
+                duplicate_count=1,
+                priority_score=0.8,
+                last_duplicate_at=None,
+                cooldown_until=None,
+                primary_root_cause="knowledge_gap",
+                secondary_root_causes=[],
+                severity="medium",
+                confidence_score=0.8,
+                summary="Seeded patch recommendation reflection.",
+                evidence_summary="Seeded API integration evidence.",
+                recommended_next_step="Create a governed skill patch request.",
+                evidence_payload={"source": "api_integration"},
+            )
+            await ReflectionRecordRepository(db).create(reflection)
+            await db.commit()
+            return reflection.id
+
+    reflection_id = asyncio.run(seed_reflection())
+    recommendation_id = asyncio.run(
+        _seed_skill_curator_recommendation(
+            recommendation_type="patch_needed",
+            recommended_action="none",
+            reason_code="quality_regression",
+            evidence_snapshot={
+                "learner_goal_id": goal_id,
+                "reflection_record_id": reflection_id,
+                "usage_event_ids": ["usage-api-1", "usage-api-2"],
+            },
+            metrics_snapshot={"negative_usage_rate": 0.5},
+        )
+    )
+
+    accepted = client.post(
+        f"/api/v1/skill-curator-recommendations/{recommendation_id}/accept",
+        headers=_operator_headers(),
+        json={"reason_code": "operator_reviewed", "reason_note": "Create governed patch proposal."},
+    )
+
+    assert accepted.status_code == 200
+    accepted_payload = accepted.json()
+    assert accepted_payload["status"] == "accepted"
+    assert accepted_payload["action_result"]["executed"] is True
+    assert accepted_payload["action_result"]["recommended_action"] == "create_skill_patch_proposal"
+    proposal_id = accepted_payload["action_result"]["proposal_id"]
+    assert accepted_payload["action_result"]["proposal_type"] == "skill_patch_request"
+    assert accepted_payload["action_result"]["proposal_status"] in {"proposed", "sandbox_queued"}
+
+    proposal = client.get(f"/api/v1/proposals/{proposal_id}", headers=_operator_headers())
+    assert proposal.status_code == 200
+    proposal_payload = proposal.json()
+    assert proposal_payload["proposal_type"] == "skill_patch_request"
+    assert proposal_payload["reflection_record_id"] == reflection_id
+    assert proposal_payload["learner_goal_id"] == goal_id
+    assert proposal_payload["rollout_eligible"] is False
+    assert proposal_payload["activation_surface"] is None
+    assert proposal_payload["structured_patch_payload"]["recommendation_id"] == recommendation_id
+    assert proposal_payload["structured_patch_payload"]["usage_event_ids"] == ["usage-api-1", "usage-api-2"]
+    assert "runtime_directives" not in proposal_payload["structured_patch_payload"]
+    assert "tool_plan" not in proposal_payload["structured_patch_payload"]
+
+    rollout = client.post(
+        f"/api/v1/proposals/{proposal_id}/activate",
+        headers=_operator_headers(),
+        json={"reason_code": "activate", "reason_note": "Should be blocked."},
+    )
+    assert rollout.status_code == 400
+
+    candidate = client.post(
+        "/api/v1/skill-artifacts/from-reflection-proposal",
+        headers=_operator_headers(),
+        json={"proposal_id": proposal_id},
+    )
+    assert candidate.status_code == 400
+
+    event_types = asyncio.run(_audit_event_types())
+    assert "reflection.proposal.created" in event_types
+    assert "skill.curator.recommendation.accepted" in event_types
+
+
+def test_skill_curator_recommendation_accept_merge_candidate_creates_merge_proposal_and_stages(app_client_factory):
+    client = app_client_factory(env_overrides={"AGENT_EDU_OPERATOR_API_KEY": "secret-operator"})
+    profile_id, access_key = _create_profile_with_key(client)
+    goal = client.post(
+        f"/api/v1/learner-profiles/{profile_id}/goals",
+        headers=_learner_headers(access_key),
+        json={
+            "title": "Accept merge recommendation",
+            "subject": "Algebra",
+            "target_outcome": "Route merge recommendations through governed skill package proposals",
+            "deadline_date": (date.today() + timedelta(days=21)).isoformat(),
+            "weekly_study_minutes": 120,
+        },
+    )
+    assert goal.status_code == 200
+    goal_id = goal.json()["id"]
+    source_artifact, related_artifact, reflection_id = asyncio.run(
+        _seed_merge_candidate_skill_artifacts(
+            learner_profile_id=profile_id,
+            learner_goal_id=goal_id,
+        )
+    )
+    recommendation_id = asyncio.run(
+        _seed_skill_curator_recommendation(
+            recommendation_type="merge_candidate",
+            recommended_action="none",
+            reason_code="merge_candidate",
+            artifact_id=source_artifact.id,
+            evidence_snapshot={
+                "learner_goal_id": goal_id,
+                "reflection_record_id": reflection_id,
+                "overlap_reason": "duplicate topic coverage",
+            },
+            metrics_snapshot={"overlap_score": 0.8},
+            related_artifact_ids=[related_artifact.id],
+        )
+    )
+
+    unauthorized = client.post(
+        f"/api/v1/skill-curator-recommendations/{recommendation_id}/accept",
+        json={"reason_code": "operator_reviewed", "reason_note": "Missing operator key."},
+    )
+    assert unauthorized.status_code == 403
+
+    accepted = client.post(
+        f"/api/v1/skill-curator-recommendations/{recommendation_id}/accept",
+        headers=_operator_headers(),
+        json={"reason_code": "operator_reviewed", "reason_note": "Create governed merge proposal."},
+    )
+
+    assert accepted.status_code == 200
+    accepted_payload = accepted.json()
+    assert accepted_payload["status"] == "accepted"
+    assert accepted_payload["action_result"]["executed"] is True
+    assert accepted_payload["action_result"]["recommended_action"] == "create_skill_merge_proposal"
+    assert accepted_payload["action_result"]["proposal_type"] == "skill_package"
+    assert accepted_payload["action_result"]["proposal_status"] in {"proposed", "sandbox_queued"}
+    assert accepted_payload["action_result"]["artifact_id"] == source_artifact.id
+    assert accepted_payload["action_result"]["merge_source_artifact_ids"] == [related_artifact.id]
+
+    proposal_id = accepted_payload["action_result"]["proposal_id"]
+    proposal = client.get(f"/api/v1/proposals/{proposal_id}", headers=_operator_headers())
+    assert proposal.status_code == 200
+    proposal_payload = proposal.json()
+    assert proposal_payload["proposal_type"] == "skill_package"
+    assert proposal_payload["reflection_record_id"] == reflection_id
+    assert proposal_payload["learner_goal_id"] == goal_id
+    assert proposal_payload["rollout_eligible"] is True
+    assert proposal_payload["activation_surface"] == "quiz"
+    assert proposal_payload["structured_patch_payload"] == {
+        "artifact_kind": "declarative_skill_package",
+        "skill_name": "create_quiz",
+        "surface": "quiz",
+        "match_rules": {
+            "task_types": ["practice", "review"],
+            "topic_keys": ["algebra", "linear-systems"],
+        },
+        "runtime_directives": {"question_count": 3, "feedback_style": "guided_correction"},
+        "tool_plan": [],
+        "scoring_contract": {"mode": "rule_replay_live_llm", "minimum_sample_count": 2},
+    }
+    assert proposal_payload["evidence_snapshot"]["source"] == "skill_curator_merge_recommendation"
+    assert proposal_payload["evidence_snapshot"]["recommendation_id"] == recommendation_id
+    assert proposal_payload["evidence_snapshot"]["source_artifact_id"] == source_artifact.id
+    assert proposal_payload["evidence_snapshot"]["source_artifact_lineage_id"] == source_artifact.lineage_id
+    assert proposal_payload["evidence_snapshot"]["merge_source_artifact_ids"] == [related_artifact.id]
+
+    rejected_stage = client.post(
+        "/api/v1/skill-artifacts/staged-replacements/from-reflection-proposal",
+        headers=_operator_headers(),
+        json={
+            "proposal_id": proposal_id,
+            "reason_code": "reviewed",
+            "reason_note": "Not approved yet.",
+        },
+    )
+    assert rejected_stage.status_code == 400
+
+    approved_merge = asyncio.run(_approve_realized_replacement_proposal(proposal_id))
+    assert approved_merge.status == "approved"
+
+    staged = client.post(
+        "/api/v1/skill-artifacts/staged-replacements/from-reflection-proposal",
+        headers=_operator_headers(),
+        json={
+            "proposal_id": proposal_id,
+            "reason_code": "reviewed",
+            "reason_note": "Stage governed merge replacement.",
+        },
+    )
+    assert staged.status_code == 200
+    staged_payload = staged.json()
+    assert staged_payload["status"] == "staged"
+    assert staged_payload["source_proposal_id"] == proposal_id
+    assert staged_payload["lineage_id"] == source_artifact.lineage_id
+    assert staged_payload["parent_artifact_id"] == source_artifact.id
+    assert staged_payload["supersedes_artifact_id"] == source_artifact.id
+    assert staged_payload["approved_by"] is None
+    assert staged_payload["approved_at"] is None
+
+    source_after_stage = client.get(f"/api/v1/skill-artifacts/{source_artifact.id}", headers=_operator_headers())
+    assert source_after_stage.status_code == 200
+    assert source_after_stage.json()["status"] == "stable"
+
+    event_types = asyncio.run(_audit_event_types())
+    assert "reflection.proposal.skill_merge_created" in event_types
+    assert "skill.curator.recommendation.accepted" in event_types
+    assert "skill.artifact.replacement_proposal_staged" in event_types
+
+
+def test_realize_skill_patch_request_route_creates_replacement_skill_package_proposal(app_client_factory):
+    client = app_client_factory(env_overrides={"AGENT_EDU_OPERATOR_API_KEY": "secret-operator"})
+    profile_id, access_key = _create_profile_with_key(client)
+    goal = client.post(
+        f"/api/v1/learner-profiles/{profile_id}/goals",
+        headers=_learner_headers(access_key),
+        json={
+            "title": "Realize patch request",
+            "subject": "Algebra",
+            "target_outcome": "Turn approved patch request into governed replacement proposal",
+            "deadline_date": (date.today() + timedelta(days=21)).isoformat(),
+            "weekly_study_minutes": 120,
+        },
+    )
+    assert goal.status_code == 200
+    source_artifact, patch_request = asyncio.run(
+        _seed_realizable_skill_patch_request(
+            learner_profile_id=profile_id,
+            learner_goal_id=goal.json()["id"],
+        )
+    )
+
+    unauthorized = client.post(
+        f"/api/v1/proposals/{patch_request.id}/realize-skill-patch",
+        json={"reason_code": "operator_reviewed", "reason_note": "Missing operator key."},
+    )
+    assert unauthorized.status_code == 403
+
+    realized = client.post(
+        f"/api/v1/proposals/{patch_request.id}/realize-skill-patch",
+        headers=_operator_headers(),
+        json={"reason_code": "operator_reviewed", "reason_note": "Create replacement proposal."},
+    )
+
+    assert realized.status_code == 200
+    realized_payload = realized.json()
+    assert realized_payload["proposal_type"] == "skill_package"
+    assert realized_payload["status"] in {"proposed", "sandbox_queued"}
+    assert realized_payload["target_scope"] == "quiz"
+    assert realized_payload["rollout_eligible"] is True
+    assert realized_payload["activation_surface"] == "quiz"
+    assert realized_payload["structured_patch_payload"] == {
+        "artifact_kind": "declarative_skill_package",
+        "skill_name": "create_quiz",
+        "surface": "quiz",
+        "match_rules": {"task_types": ["practice"], "topic_keys": ["algebra"]},
+        "runtime_directives": {"question_count": 3, "feedback_style": "guided_correction"},
+        "tool_plan": [],
+        "scoring_contract": {"mode": "rule_replay_live_llm", "minimum_sample_count": 2},
+    }
+    assert realized_payload["evidence_snapshot"]["source"] == "skill_patch_request_realization"
+    assert realized_payload["evidence_snapshot"]["source_skill_patch_request_id"] == patch_request.id
+    assert realized_payload["evidence_snapshot"]["source_artifact_id"] == source_artifact.id
+    assert realized_payload["evidence_snapshot"]["source_artifact_lineage_id"] == source_artifact.lineage_id
+    assert realized_payload["evidence_snapshot"]["usage_event_ids"] == ["usage-api-1", "usage-api-2"]
+    assert realized_payload["evidence_snapshot"]["patch_request_evaluation"]["score_delta"] == 0.15
+
+    source_after = client.get(f"/api/v1/skill-artifacts/{source_artifact.id}", headers=_operator_headers())
+    assert source_after.status_code == 200
+    assert source_after.json()["status"] == "stable"
+
+    candidate = client.post(
+        "/api/v1/skill-artifacts/from-reflection-proposal",
+        headers=_operator_headers(),
+        json={"proposal_id": realized_payload["id"]},
+    )
+    assert candidate.status_code == 400
+
+    unauthorized_stage = client.post(
+        "/api/v1/skill-artifacts/staged-replacements/from-reflection-proposal",
+        json={
+            "proposal_id": realized_payload["id"],
+            "reason_code": "reviewed",
+            "reason_note": "Missing operator key.",
+        },
+    )
+    assert unauthorized_stage.status_code == 403
+
+    rejected_stage = client.post(
+        "/api/v1/skill-artifacts/staged-replacements/from-reflection-proposal",
+        headers=_operator_headers(),
+        json={
+            "proposal_id": realized_payload["id"],
+            "reason_code": "reviewed",
+            "reason_note": "Not approved yet.",
+        },
+    )
+    assert rejected_stage.status_code == 400
+
+    approved_replacement = asyncio.run(_approve_realized_replacement_proposal(realized_payload["id"]))
+    assert approved_replacement.status == "approved"
+
+    staged = client.post(
+        "/api/v1/skill-artifacts/staged-replacements/from-reflection-proposal",
+        headers=_operator_headers(),
+        json={
+            "proposal_id": realized_payload["id"],
+            "reason_code": "reviewed",
+            "reason_note": "Stage governed replacement.",
+        },
+    )
+    assert staged.status_code == 200
+    staged_payload = staged.json()
+    assert staged_payload["status"] == "staged"
+    assert staged_payload["source_proposal_id"] == realized_payload["id"]
+    assert staged_payload["lineage_id"] == source_artifact.lineage_id
+    assert staged_payload["parent_artifact_id"] == source_artifact.id
+    assert staged_payload["supersedes_artifact_id"] == source_artifact.id
+    assert staged_payload["approved_by"] is None
+    assert staged_payload["approved_at"] is None
+
+    source_after_stage = client.get(f"/api/v1/skill-artifacts/{source_artifact.id}", headers=_operator_headers())
+    assert source_after_stage.status_code == 200
+    assert source_after_stage.json()["status"] == "stable"
+
+    repeated_stage = client.post(
+        "/api/v1/skill-artifacts/staged-replacements/from-reflection-proposal",
+        headers=_operator_headers(),
+        json={
+            "proposal_id": realized_payload["id"],
+            "reason_code": "reviewed",
+            "reason_note": "Repeat staging.",
+        },
+    )
+    assert repeated_stage.status_code == 200
+    assert repeated_stage.json()["id"] == staged_payload["id"]
+    assert repeated_stage.json()["status"] == "staged"
+
+    repeated = client.post(
+        f"/api/v1/proposals/{patch_request.id}/realize-skill-patch",
+        headers=_operator_headers(),
+        json={"reason_code": "operator_reviewed", "reason_note": "Repeat."},
+    )
+    assert repeated.status_code == 200
+    assert repeated.json()["id"] == realized_payload["id"]
+
+    event_types = asyncio.run(_audit_event_types())
+    assert "reflection.proposal.skill_patch_realized" in event_types
+    assert "reflection.proposal.skill_patch_realize_reused" in event_types
+    assert "skill.artifact.replacement_proposal_staged" in event_types
+
+
+def test_skill_curator_recommendation_accept_archive_candidate_archives_artifact(app_client_factory):
+    client = app_client_factory(env_overrides={"AGENT_EDU_OPERATOR_API_KEY": "secret-operator"})
+    profile_id, access_key = _create_profile_with_key(client)
+    goal = client.post(
+        f"/api/v1/learner-profiles/{profile_id}/goals",
+        headers=_learner_headers(access_key),
+        json={
+            "title": "Accept archive recommendation",
+            "subject": "Algebra",
+            "target_outcome": "Archive stale skill package recommendations",
+            "deadline_date": (date.today() + timedelta(days=21)).isoformat(),
+            "weekly_study_minutes": 120,
+        },
+    )
+    assert goal.status_code == 200
+    current, _replacement = asyncio.run(
+        _seed_replaceable_skill_artifacts(
+            learner_profile_id=profile_id,
+            learner_goal_id=goal.json()["id"],
+        )
+    )
+    deactivated = client.post(
+        f"/api/v1/skill-artifacts/{current.id}/deactivate",
+        headers=_operator_headers(),
+        json={"reason_code": "operator_request", "reason_note": "Prepare archive recommendation."},
+    )
+    assert deactivated.status_code == 200
+    assert deactivated.json()["status"] == "deprecated"
+    recommendation_id = asyncio.run(
+        _seed_skill_curator_recommendation(
+            recommendation_type="archive_candidate",
+            recommended_action="archive_deprecated",
+            reason_code="stale_deprecated",
+            artifact_id=current.id,
+        )
+    )
+
+    accepted = client.post(
+        f"/api/v1/skill-curator-recommendations/{recommendation_id}/accept",
+        headers=_operator_headers(),
+        json={"reason_code": "stale_deprecated", "reason_note": "Accept archive recommendation."},
+    )
+
+    assert accepted.status_code == 200
+    accepted_payload = accepted.json()
+    assert accepted_payload["id"] == recommendation_id
+    assert accepted_payload["status"] == "accepted"
+    assert accepted_payload["action_result"] == {
+        "executed": True,
+        "recommended_action": "archive_deprecated",
+        "artifact_id": current.id,
+        "artifact_status": "archived",
+        "skill_name": "create_quiz",
+        "skill_version": current.version,
+        "scope": "quiz",
+    }
+    archived = client.get(f"/api/v1/skill-artifacts/{current.id}", headers=_operator_headers())
+    assert archived.status_code == 200
+    assert archived.json()["status"] == "archived"
+
+    event_types = asyncio.run(_audit_event_types())
+    assert "skill.artifact.archived" in event_types
+    assert "skill.curator.recommendation.accepted" in event_types
+
+
+def test_deactivate_skill_artifact_route_rolls_back_on_service_error(monkeypatch):
+    class FakeSession:
+        def __init__(self) -> None:
+            self.commits = 0
+            self.rollbacks = 0
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+        async def rollback(self) -> None:
+            self.rollbacks += 1
+
+    class FailingLifecycleService:
+        async def deactivate_active(self, **_kwargs):
+            raise ValidationError("Cannot deactivate skill artifact while active rollouts exist.")
+
+    fake_session = FakeSession()
+    monkeypatch.setenv("AGENT_EDU_APP_ENV", "testing")
+    monkeypatch.setenv("AGENT_EDU_OPERATOR_API_KEY", "secret-operator")
+    app = create_app()
+
+    async def override_session():
+        return fake_session
+
+    app.dependency_overrides[get_db_session] = override_session
+    app.dependency_overrides[get_skill_artifact_lifecycle_service] = lambda: FailingLifecycleService()
+    app.dependency_overrides[require_operator_api_key] = lambda: _operator_actor_id()
+
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/skill-artifacts/artifact-1/deactivate",
+                headers=_operator_headers(),
+                json={"reason_code": "rollout_rollback", "reason_note": "blocked"},
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 400
+    assert fake_session.commits == 0
+    assert fake_session.rollbacks == 1
+
+
+def test_stage_replacement_route_rolls_back_on_service_error(monkeypatch):
+    class FakeSession:
+        def __init__(self) -> None:
+            self.commits = 0
+            self.rollbacks = 0
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+        async def rollback(self) -> None:
+            self.rollbacks += 1
+
+    class FailingReplacementStagingService:
+        async def stage_replacement_from_proposal(self, **_kwargs):
+            raise ValidationError("Only approved skill_package proposals can create skill candidates.")
+
+    fake_session = FakeSession()
+    monkeypatch.setenv("AGENT_EDU_APP_ENV", "testing")
+    monkeypatch.setenv("AGENT_EDU_OPERATOR_API_KEY", "secret-operator")
+    app = create_app()
+
+    async def override_session():
+        return fake_session
+
+    app.dependency_overrides[get_db_session] = override_session
+    app.dependency_overrides[get_skill_replacement_staging_service] = lambda: FailingReplacementStagingService()
+    app.dependency_overrides[require_operator_api_key] = lambda: _operator_actor_id()
+
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/skill-artifacts/staged-replacements/from-reflection-proposal",
+                headers=_operator_headers(),
+                json={
+                    "proposal_id": "proposal-1",
+                    "reason_code": "reviewed",
+                    "reason_note": "blocked",
+                },
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 400
+    assert fake_session.commits == 0
+    assert fake_session.rollbacks == 1
 
 
 def test_phase2_profile_goal_plan_task_workflow_chain(app_client_factory):

@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from agent_core.domain.errors import ValidationError
 
-PROPOSAL_TYPES = {"prompt_optimization", "workflow_optimization", "skill_package"}
+PROPOSAL_TYPES = {"prompt_optimization", "workflow_optimization", "skill_package", "skill_patch_request"}
 PROPOSAL_TARGET_SCOPES = {"chat", "hint", "quiz", "plan_generation", "review_scheduling", "assessment_generation", "replan"}
 PROPOSAL_STATUSES = {
     "proposed",
@@ -55,6 +55,19 @@ SKILL_POLICY_KEYS = {
     "runtime_directives",
     "tool_plan",
     "scoring_contract",
+}
+SKILL_PATCH_REQUEST_POLICY_KEYS = {
+    "artifact_id",
+    "skill_name",
+    "skill_version",
+    "scope",
+    "surface",
+    "recommendation_id",
+    "recommendation_reason_code",
+    "usage_event_ids",
+    "related_artifact_ids",
+    "evidence_snapshot",
+    "metrics_snapshot",
 }
 SKILL_BINDING_STATUSES = {"staged", "rolled_out", "rolled_back"}
 
@@ -478,6 +491,8 @@ def proposal_policy_keys(proposal_type: str) -> set[str]:
         return set(WORKFLOW_POLICY_KEYS)
     if proposal_type == "skill_package":
         return set(SKILL_POLICY_KEYS)
+    if proposal_type == "skill_patch_request":
+        return set(SKILL_PATCH_REQUEST_POLICY_KEYS)
     raise ValidationError("Unsupported reflection proposal type.")
 
 

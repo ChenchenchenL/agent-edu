@@ -712,7 +712,7 @@ Evolution优化
 - Reflection System v1：结构化反思记录、规则分类、低风险自动动作与查询 API
 - Reflection System v2 部分增强：evidence signals、outcome tracking、strategy card、reflective memory、operator governance API
 - prompt / workflow proposal v1：proposal queue、sandbox、replay/eval、approval、evaluation read API
-- proposal rollout / rollback v1：goal-scoped staged activation，覆盖 `chat / hint / plan_generation / review_scheduling / assessment_generation / replan`
+- proposal rollout / rollback v1：goal-scoped staged activation，覆盖 `chat / hint / quiz / plan_generation / review_scheduling / assessment_generation / replan`
 - rollout overlay 已进入 chat / task / planner 运行时，能影响 hint level、review bias、assessment bias、replan bias
 
 当前已具备的验证与观测能力：
@@ -832,7 +832,7 @@ Docker 代理、真实 provider 回归与 Prometheus / Grafana 观测细节见 [
   - periodic goal reflection 最小调度入口
   - prompt / workflow proposal records
   - sandbox / replay-eval / approval / evaluation read API
-  - rollout / rollback v1，覆盖 `chat / hint / plan_generation / review_scheduling / assessment_generation / replan`
+- rollout / rollback v1，覆盖 `chat / hint / quiz / plan_generation / review_scheduling / assessment_generation / replan`
   - rollout overlay 进入 chat / planner / task runtime
 
 ## 仍需继续增强
@@ -852,9 +852,34 @@ Docker 代理、真实 provider 回归与 Prometheus / Grafana 观测细节见 [
 
 ## 当前状态
 
-- 尚未落地
-- 当前仍停留在架构设计与路线图层
-- `skill proposal / skill sandbox evaluation / skill approval gate` 尚未进入代码主链路
+- 最小治理闭环已部分落地，但还不是完整动态技能系统
+- `skill_package` proposal 已进入 sandbox / evaluation / approval / artifact lifecycle 主链路
+- `SkillArtifact`、`SkillUsageEvent`、`SkillCuratorRecommendation` 和 `SkillCuratorJob` MVP 已落地
+- `patch_needed` recommendation accept 已可创建 reference-only `skill_patch_request` proposal，并继续走 sandbox / evaluation / approval
+- approved / effective `skill_patch_request` 已可 realization 为 replacement `skill_package` proposal
+- `merge_candidate` recommendation accept 已可创建 merge-sourced replacement `skill_package` proposal；merge payload 复用 source artifact 的可执行基线，只合并 list-valued `match_rules`
+- `SkillCuratorJob` 已可基于同 name/scope 或同 implementation binding 的 artifact overlap / duplicate detection 自动生成 `merge_candidate / none` recommendation；只产 recommendation，不直接修改 artifact
+- `SkillCuratorJob` 已接入 memory conflict summary、reflection outcome evaluation 和 resolver health trend 作为 `governance_evidence`，可生成或增强 `flag_for_review / none` recommendation；该 evidence 只进入 recommendation，不直接改 artifact
+- `SkillCuratorJob` 已接入 surface / topic coverage regression 输入，可基于声明外 topic demand 与 governed binding gap 生成 `patch_needed / none` recommendation，并复用既有 patch proposal 治理路径
+- skill observability 已接入 Prometheus / Grafana / alert 基线，可观测 skill usage、resolver failure、artifact status、curator pending backlog、recommendation rate 和 curator job p95
+- approved / effective replacement `skill_package` proposal 已可通过 operator-protected staging API 生成 `staged` replacement artifact
+- staged governed replacement 已接入 shared readiness evaluation、operator read API、strict source-anchor gate 和 curator ready recommendation
+- staged replacement readiness API 现会直接返回 `recommended_action`，并统一暴露 source anchor / rollout / usage / threshold 摘要
+- staging 不会自动 activate / replace source artifact；activate / replace 仍必须人工触发，不会自动执行
+- staged replacement recommendation accept 现为 lifecycle-first：只有 lifecycle 成功后 recommendation 才会 accepted；失败时会写 `skill.curator.recommendation.accept_failed` durable audit，并保持 pending
+- `tool_plan` 已支持保守 multi-step 样板：当前 `replan` 可受控执行 `partial_replan -> review_scheduling` 两步链，并把 sequence / step 摘要写回 usage、audit 和 sandbox summary
+- dynamic runtime registry V1 已统一 `chat / hint / quiz / plan_generation / review_scheduling / assessment_generation / replan` 的 execution-plan resolution / usage metadata sourcing，并把 artifact/binding 来源摘要写入 usage metadata
+- `chat / quiz / plan_generation` 已与 task/autonomy 对齐到同一套 runtime usage metadata helper；`chat / hint / quiz / plan_generation` 的 rollout observation 已在成功路径接通，其中 `plan_generation` 只会在 plan/task 持久化成功后调度 observation
+- rollout auto-governance V1 已落地独立 decision job；当前只对 `review_scheduling / assessment_generation / replan` 的 allowlisted rollout 自动执行 `promote / rollback`
+- rollout auto-governance 已配置化：可通过 `AGENT_EDU_SKILL_ROLLOUT_AUTO_GOVERNANCE_ENABLED`、`AGENT_EDU_SKILL_ROLLOUT_AUTO_PROMOTE_ENABLED`、`AGENT_EDU_SKILL_ROLLOUT_AUTO_ROLLBACK_ENABLED` 和对应 surface allowlist 环境变量控制
+- skill observability 已补 rollout auto-governance 指标与告警，可观测 auto decision queued / executed / skipped、auto rollback 速率与 decision skip 速率
+
+## 仍需继续增强
+
+- dynamic runtime skill registry V2（更丰富的 multi-step tool-plan orchestration 与更完整的 active-artifact runtime sourcing）
+- bundle / global rollout 治理
+- `chat / hint / quiz / plan_generation` 仍未进入 auto-governance allowlist
+- staged replacement 的 auto-activate / auto-replace 仍未实现
 
 ---
 

@@ -142,6 +142,52 @@ REFLECTION_SESSION_SIGNAL_COVERAGE_TOTAL = Counter(
     "Total number of reflection session-signal aggregation results.",
     ["coverage"],
 )
+SKILL_RESOLUTIONS_TOTAL = Counter(
+    "agent_edu_skill_resolutions_total",
+    "Total number of skill resolver decisions.",
+    ["surface", "resolver_status", "selection_reason"],
+)
+SKILL_USAGE_EVENTS_TOTAL = Counter(
+    "agent_edu_skill_usage_events_total",
+    "Total number of skill usage events.",
+    ["surface", "outcome_status", "resolver_status", "selection_reason"],
+)
+SKILL_CURATOR_RECOMMENDATIONS_TOTAL = Counter(
+    "agent_edu_skill_curator_recommendations_total",
+    "Total number of skill curator recommendation lifecycle events.",
+    ["recommendation_type", "reason_code", "event"],
+)
+SKILL_CURATOR_JOB_RUNS_TOTAL = Counter(
+    "agent_edu_skill_curator_job_runs_total",
+    "Total number of skill curator job executions.",
+    ["status"],
+)
+SKILL_CURATOR_JOB_DURATION_SECONDS = Histogram(
+    "agent_edu_skill_curator_job_duration_seconds",
+    "Skill curator job duration in seconds.",
+    ["status"],
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0),
+)
+SKILL_REPLACEMENT_READINESS_TOTAL = Counter(
+    "agent_edu_skill_replacement_readiness_total",
+    "Total number of replacement readiness evaluations by action and result.",
+    ["action", "status"],
+)
+SKILL_ROLLOUT_AUTO_DECISIONS_TOTAL = Counter(
+    "agent_edu_skill_rollout_auto_decisions_total",
+    "Total number of skill rollout auto-governance lifecycle events.",
+    ["event", "decision", "surface", "reason_code"],
+)
+SKILL_ARTIFACTS_GAUGE = Gauge(
+    "agent_edu_skill_artifacts",
+    "Current number of skill artifacts by status.",
+    ["status"],
+)
+SKILL_CURATOR_PENDING_RECOMMENDATIONS_GAUGE = Gauge(
+    "agent_edu_skill_curator_pending_recommendations",
+    "Current number of pending skill curator recommendations by type.",
+    ["recommendation_type"],
+)
 
 
 def build_metrics_app():
@@ -295,6 +341,65 @@ def observe_reflection_session_signal_coverage(*, covered: bool) -> None:
     REFLECTION_SESSION_SIGNAL_COVERAGE_TOTAL.labels(
         coverage="covered" if covered else "empty",
     ).inc()
+
+
+def observe_skill_resolution(*, surface: str, resolver_status: str, selection_reason: str) -> None:
+    SKILL_RESOLUTIONS_TOTAL.labels(
+        surface=surface,
+        resolver_status=resolver_status,
+        selection_reason=selection_reason,
+    ).inc()
+
+
+def observe_skill_usage_event(*, surface: str, outcome_status: str, resolver_status: str, selection_reason: str) -> None:
+    SKILL_USAGE_EVENTS_TOTAL.labels(
+        surface=surface,
+        outcome_status=outcome_status,
+        resolver_status=resolver_status,
+        selection_reason=selection_reason,
+    ).inc()
+
+
+def observe_skill_curator_recommendation(*, recommendation_type: str, reason_code: str, event: str) -> None:
+    SKILL_CURATOR_RECOMMENDATIONS_TOTAL.labels(
+        recommendation_type=recommendation_type,
+        reason_code=reason_code,
+        event=event,
+    ).inc()
+
+
+def observe_skill_curator_job(*, status: str, duration_seconds: float) -> None:
+    SKILL_CURATOR_JOB_RUNS_TOTAL.labels(status=status).inc()
+    SKILL_CURATOR_JOB_DURATION_SECONDS.labels(status=status).observe(max(duration_seconds, 0.0))
+
+
+def observe_skill_replacement_readiness(*, action: str, status: str) -> None:
+    SKILL_REPLACEMENT_READINESS_TOTAL.labels(action=action, status=status).inc()
+
+
+def observe_skill_rollout_auto_decision(
+    *,
+    event: str,
+    decision: str,
+    surface: str,
+    reason_code: str,
+) -> None:
+    SKILL_ROLLOUT_AUTO_DECISIONS_TOTAL.labels(
+        event=event,
+        decision=decision,
+        surface=surface,
+        reason_code=reason_code,
+    ).inc()
+
+
+def set_skill_artifacts_total(*, status: str, count: int) -> None:
+    SKILL_ARTIFACTS_GAUGE.labels(status=status).set(max(count, 0))
+
+
+def set_skill_curator_pending_recommendations(*, recommendation_type: str, count: int) -> None:
+    SKILL_CURATOR_PENDING_RECOMMENDATIONS_GAUGE.labels(
+        recommendation_type=recommendation_type,
+    ).set(max(count, 0))
 
 
 class PrometheusHttpMiddleware(BaseHTTPMiddleware):

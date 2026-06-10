@@ -29,6 +29,7 @@ AUTONOMY_JOB_TYPES = {
     "replan",
     "reflection_outcome_evaluation",
     "reflection_proposal_evaluation",
+    "reflection_proposal_rollout_decision",
     "reflection_proposal_rollout_observation",
     "review_scheduling",
     "task_reflection",

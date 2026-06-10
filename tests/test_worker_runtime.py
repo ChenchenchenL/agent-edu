@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from apps.worker.main import run_memory_maintenance_once, run_once
+from apps.worker.main import run_memory_maintenance_once, run_once, run_skill_curator_once
 
 
 class _FakeSession:
@@ -57,6 +57,16 @@ class _FakeMemoryService:
         return 3
 
 
+class _FakeSkillCuratorResult:
+    created_count = 2
+    existing_count = 1
+
+
+class _FakeSkillCuratorService:
+    async def run_once(self) -> _FakeSkillCuratorResult:
+        return _FakeSkillCuratorResult()
+
+
 @pytest.mark.asyncio
 async def test_worker_run_once_handles_empty_queue(monkeypatch):
     monkeypatch.setattr("apps.worker.main.get_session_factory", lambda: _FakeSessionFactory())
@@ -77,3 +87,15 @@ async def test_worker_run_memory_maintenance_once_aggregates_counts(monkeypatch)
 
     assert processed == 3
     assert session_factory.session.committed is False
+
+
+@pytest.mark.asyncio
+async def test_worker_run_skill_curator_once_commits_recommendations(monkeypatch):
+    session_factory = _FakeSessionFactory()
+    monkeypatch.setattr("apps.worker.main.get_session_factory", lambda: session_factory)
+    monkeypatch.setattr("apps.worker.main.get_skill_curator_job_service", lambda session: _FakeSkillCuratorService())
+
+    processed = await run_skill_curator_once()
+
+    assert processed == 3
+    assert session_factory.session.committed is True

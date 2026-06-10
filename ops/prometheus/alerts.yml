@@ -42,3 +42,75 @@ groups:
         annotations:
           summary: Long-term memory conflicts are growing quickly
           description: New open memory conflicts are being created faster than expected for 30 minutes.
+  - name: agent-edu-skill
+    rules:
+      - alert: SkillResolverFailureRateHigh
+        expr: |
+          sum(rate(agent_edu_skill_usage_events_total{resolver_status=~"missing_artifact|blocked|incompatible"}[15m])) by (surface)
+            / clamp_min(sum(rate(agent_edu_skill_usage_events_total[15m])) by (surface), 1) > 0.10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Skill resolver failure rate is high
+          description: More than 10% of skill usage events on surface {{ $labels.surface }} have unresolved resolver outcomes for 15 minutes.
+
+      - alert: SkillNegativeUsageRateHigh
+        expr: |
+          sum(rate(agent_edu_skill_usage_events_total{outcome_status=~"failed|skipped|aborted"}[15m])) by (surface)
+            / clamp_min(sum(rate(agent_edu_skill_usage_events_total[15m])) by (surface), 1) > 0.20
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Skill negative usage rate is high
+          description: More than 20% of skill usage events on surface {{ $labels.surface }} are negative for 15 minutes.
+
+      - alert: SkillCuratorPendingBacklogHigh
+        expr: sum(agent_edu_skill_curator_pending_recommendations) > 20
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Skill curator pending backlog is high
+          description: More than 20 pending skill curator recommendations have been waiting for 30 minutes.
+
+      - alert: SkillCoverageRegressionRecommendationRateHigh
+        expr: sum(rate(agent_edu_skill_curator_recommendations_total{event="created",reason_code="coverage_regression"}[30m])) > 0.05
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Skill coverage regression recommendations are being created rapidly
+          description: Coverage-regression patch recommendations are being created faster than expected for 30 minutes.
+
+      - alert: SkillCuratorJobSlow
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(agent_edu_skill_curator_job_duration_seconds_bucket{status="completed"}[15m])) by (le)
+          ) > 30
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Skill curator job p95 is slow
+          description: Skill curator job p95 duration has been above 30 seconds for 15 minutes.
+
+      - alert: SkillRolloutAutoRollbackRateHigh
+        expr: sum(rate(agent_edu_skill_rollout_auto_decisions_total{event="executed",decision="rollback"}[15m])) by (surface) > 0.05
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Skill rollout auto-rollbacks are happening frequently
+          description: Auto-rollback executions on surface {{ $labels.surface }} are occurring faster than expected for 15 minutes.
+
+      - alert: SkillRolloutAutoDecisionSkipRateHigh
+        expr: sum(rate(agent_edu_skill_rollout_auto_decisions_total{event="skipped"}[15m])) by (surface) > 0.1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Skill rollout auto-decision skip rate is high
+          description: Auto-governance decision jobs on surface {{ $labels.surface }} are being skipped frequently for 15 minutes.

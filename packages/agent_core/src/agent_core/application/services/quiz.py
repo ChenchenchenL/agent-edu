@@ -1,12 +1,19 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_core.application.services.audit import AuditService
+from agent_core.application.services.dynamic_runtime_registry import (
+    DynamicRuntimeRegistryService,
+    RuntimeSkillExecutionPlan,
+)
 from agent_core.application.services.goal_skill_binding_resolver import ActiveGoalSkillBinding, GoalSkillBindingResolver
+from agent_core.application.services.reflection_proposal_rollout_observation_scheduler import (
+    ReflectionProposalRolloutObservationScheduler,
+)
 from agent_core.application.services.skills import SkillUsageService
 from agent_core.application.skills.registry import SkillRegistry
 from agent_core.domain.entities.quiz import SessionQuiz, SessionQuizQuestion
 from agent_core.domain.entities.session import LearningSession
-from agent_core.domain.entities.skill import SkillResolution
+from agent_core.domain.entities.skill import SkillExecutionPlan, SkillResolution
 from agent_core.domain.errors import NotFoundError, ValidationError
 from agent_core.domain.schemas.quiz import (
     GenerateQuizRequest,
@@ -30,7 +37,9 @@ class QuizService:
         llm_provider: LLMProvider,
         skill_registry: SkillRegistry,
         goal_skill_binding_resolver: GoalSkillBindingResolver | None = None,
+        rollout_observation_scheduler: ReflectionProposalRolloutObservationScheduler | None = None,
         skill_usage_service: SkillUsageService | None = None,
+        runtime_registry: DynamicRuntimeRegistryService | None = None,
     ) -> None:
         self._db_session = db_session
         self._audit_service = audit_service
@@ -39,7 +48,9 @@ class QuizService:
         self._llm_provider = llm_provider
         self._skill_registry = skill_registry
         self._goal_skill_binding_resolver = goal_skill_binding_resolver
+        self._rollout_observation_scheduler = rollout_observation_scheduler
         self._skill_usage_service = skill_usage_service
+        self._runtime_registry = runtime_registry
 
     async def generate_quiz(self, payload: GenerateQuizRequest, *, commit: bool = True) -> QuizDraftResponse:
         if payload.session_id is None:
@@ -49,11 +60,6 @@ class QuizService:
         if session is None:
             raise NotFoundError(f"Session '{payload.session_id}' was not found.")
         skills = self._skill_registry.trace_for_mode("quiz")
-        skill_resolution = await self._resolve_skill_for_runtime(
-            skill_name=skills[0],
-            surface="quiz",
-            resource_id=session.id,
-        )
         skill_binding = None
         if self._goal_skill_binding_resolver is not None and session.learner_goal_id is not None:
             skill_binding = await self._goal_skill_binding_resolver.get_active_binding(
@@ -63,16 +69,40 @@ class QuizService:
                 trigger_source="quiz_generation",
                 include_staged=True,
             )
+        runtime_plan = await self._resolve_runtime_plan(
+            learner_goal_id=session.learner_goal_id,
+            skill_name=skills[0],
+            surface="quiz",
+            resource_id=session.id,
+            topic_key=payload.topic,
+            trigger_source="quiz_generation",
+        )
+        skill_execution_plan = runtime_plan.plan if runtime_plan is not None else await self._resolve_skill_execution_plan(
+            skill_name=skills[0],
+            surface="quiz",
+            resource_id=session.id,
+            skill_binding=skill_binding,
+        )
+        skill_resolution = skill_execution_plan.resolution if skill_execution_plan is not None else await self._resolve_skill_for_runtime(
+            skill_name=skills[0],
+            surface="quiz",
+            resource_id=session.id,
+        )
 
         quiz = None
         session_quiz = None
         try:
+            runtime_directives = (
+                dict(skill_execution_plan.runtime_directives)
+                if skill_execution_plan is not None
+                else dict(skill_binding.runtime_directives) if skill_binding is not None else {}
+            )
             quiz = await self._llm_provider.generate_quiz_draft(
                 topic=payload.topic,
                 difficulty=payload.difficulty,
-                question_count=int((skill_binding.runtime_directives.get("question_count") if skill_binding is not None else None) or payload.question_count),
-                skill_directives=list(skill_binding.runtime_directives.get("skill_directives") or []) if skill_binding is not None else None,
-                feedback_style=str(skill_binding.runtime_directives.get("feedback_style")) if skill_binding is not None and skill_binding.runtime_directives.get("feedback_style") else None,
+                question_count=int(runtime_directives.get("question_count") or payload.question_count),
+                skill_directives=list(runtime_directives.get("skill_directives") or []) or None,
+                feedback_style=str(runtime_directives.get("feedback_style")) if runtime_directives.get("feedback_style") else None,
             )
             session_quiz = SessionQuiz.build(
                 session_id=session.id,
@@ -136,21 +166,8 @@ class QuizService:
                 input_summary=payload.topic,
                 output_summary=f"{len(quiz.questions)} questions",
                 resolution=skill_resolution,
-                metadata=(
-                    skill_binding.with_usage_metadata(
-                        {
-                            "quiz_id": session_quiz.id,
-                            "difficulty": quiz.difficulty,
-                            "question_count": len(quiz.questions),
-                            "response_shape_valid": quiz.response_shape_valid,
-                            "retry_count": quiz.retry_count,
-                            "provider": quiz.provider,
-                            "model": quiz.model,
-                        },
-                        skill_name="create_quiz",
-                    )
-                    if skill_binding is not None
-                    else {
+                metadata=self._build_usage_metadata(
+                    base_metadata={
                         "quiz_id": session_quiz.id,
                         "difficulty": quiz.difficulty,
                         "question_count": len(quiz.questions),
@@ -158,9 +175,18 @@ class QuizService:
                         "retry_count": quiz.retry_count,
                         "provider": quiz.provider,
                         "model": quiz.model,
-                    }
+                    },
+                    execution_plan=skill_execution_plan,
+                    runtime_plan=runtime_plan,
                 ),
             )
+            if session.learner_goal_id is not None:
+                await self._schedule_surface_rollout_observation(
+                    learner_goal_id=session.learner_goal_id,
+                    surface="quiz",
+                    trigger_source="quiz_generation",
+                    source_ref=session_quiz.id,
+                )
             if commit:
                 await self._db_session.commit()
         except Exception as exc:
@@ -197,21 +223,14 @@ class QuizService:
                 input_summary=payload.topic,
                 error_code=type(exc).__name__,
                 resolution=skill_resolution,
-                metadata=(
-                    skill_binding.with_usage_metadata(
-                        {
-                            "quiz_id": session_quiz.id if session_quiz is not None else None,
-                            "difficulty": payload.difficulty,
-                            "question_count": payload.question_count,
-                        },
-                        skill_name="create_quiz",
-                    )
-                    if skill_binding is not None
-                    else {
+                metadata=self._build_usage_metadata(
+                    base_metadata={
                         "quiz_id": session_quiz.id if session_quiz is not None else None,
                         "difficulty": payload.difficulty,
                         "question_count": payload.question_count,
-                    }
+                    },
+                    execution_plan=skill_execution_plan,
+                    runtime_plan=runtime_plan,
                 ),
             )
             if commit:
@@ -275,6 +294,45 @@ class QuizService:
             resource_id=resource_id,
         )
 
+    async def _resolve_skill_execution_plan(
+        self,
+        *,
+        skill_name: str,
+        surface: str,
+        resource_id: str,
+        skill_binding: ActiveGoalSkillBinding | None,
+    ) -> SkillExecutionPlan | None:
+        if self._skill_usage_service is None:
+            return None
+        return await self._skill_usage_service.resolve_execution_plan(
+            skill_name=skill_name,
+            surface=surface,
+            resource_id=resource_id,
+            skill_binding=skill_binding,
+        )
+
+    async def _resolve_runtime_plan(
+        self,
+        *,
+        learner_goal_id: str | None,
+        skill_name: str,
+        surface: str,
+        resource_id: str,
+        topic_key: str | None,
+        trigger_source: str | None,
+    ) -> RuntimeSkillExecutionPlan | None:
+        if self._runtime_registry is None:
+            return None
+        return await self._runtime_registry.resolve_runtime_plan(
+            learner_goal_id=learner_goal_id,
+            skill_name=skill_name,
+            surface=surface,
+            resource_id=resource_id,
+            topic_key=topic_key,
+            trigger_source=trigger_source,
+            include_staged=True,
+        )
+
     async def _record_skill_usage(
         self,
         *,
@@ -306,4 +364,34 @@ class QuizService:
             error_code=error_code,
             resolution=resolution,
             metadata=metadata,
+        )
+
+    async def _schedule_surface_rollout_observation(
+        self,
+        *,
+        learner_goal_id: str,
+        surface: str,
+        trigger_source: str,
+        source_ref: str,
+    ) -> None:
+        if self._rollout_observation_scheduler is None:
+            return
+        await self._rollout_observation_scheduler.schedule_active(
+            learner_goal_id=learner_goal_id,
+            surface=surface,
+            trigger_source=trigger_source,
+            source_ref=source_ref,
+        )
+
+    @staticmethod
+    def _build_usage_metadata(
+        *,
+        base_metadata: dict[str, object],
+        execution_plan: SkillExecutionPlan | None,
+        runtime_plan: RuntimeSkillExecutionPlan | None = None,
+    ) -> dict[str, object]:
+        return DynamicRuntimeRegistryService.usage_metadata_for_plan(
+            execution_plan=execution_plan,
+            runtime_plan=runtime_plan,
+            base_metadata=base_metadata,
         )

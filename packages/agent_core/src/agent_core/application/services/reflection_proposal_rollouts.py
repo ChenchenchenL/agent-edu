@@ -8,6 +8,12 @@ from agent_core.application.services.planner import PlannerService
 from agent_core.application.services.reflection_proposal_rollout_observation_scheduler import (
     ReflectionProposalRolloutObservationScheduler,
 )
+from agent_core.application.services.tool_plan_sequence_governance import (
+    build_tool_plan_sequence_contract,
+    has_tool_plan_sequence_regression,
+    summarize_tool_plan_usage,
+    tool_plan_sequence_reason_codes,
+)
 from agent_core.application.services.workflow import WorkflowRunService
 from agent_core.domain.entities.autonomy import GoalAutonomyState
 from agent_core.domain.entities.goal import LearnerGoal
@@ -20,6 +26,7 @@ from agent_core.domain.entities.reflection_closure import (
     ReflectionProposalRolloutObservation,
     proposal_rollout_surface,
 )
+from agent_core.domain.entities.skill import SkillArtifact, SkillUsageEvent
 from agent_core.domain.errors import NotFoundError, ValidationError
 from agent_core.infrastructure.db.repositories import (
     DailyTaskRepository,
@@ -38,7 +45,11 @@ from agent_core.infrastructure.db.repositories import (
     TaskAttemptRepository,
     WorkflowRunRepository,
     PlanStageRepository,
+    SkillArtifactRepository,
+    SkillUsageEventRepository,
 )
+
+AUTO_ROLLOUT_ACTOR = "system:auto_rollout_governor"
 
 
 class ReflectionProposalRolloutService:
@@ -56,11 +67,13 @@ class ReflectionProposalRolloutService:
         workflow_run_repository: WorkflowRunRepository,
         goal_autonomy_state_repository: GoalAutonomyStateRepository | None,
         goal_skill_binding_repository: GoalSkillBindingRepository,
+        skill_artifact_repository: SkillArtifactRepository,
         session_repository: SessionRepository,
         message_repository: SessionMessageRepository,
         reflection_record_repository: ReflectionRecordRepository,
         reflection_evidence_repository: ReflectionEvidenceSignalRepository,
         task_attempt_repository: TaskAttemptRepository,
+        usage_repository: SkillUsageEventRepository,
         planner_service: PlannerService,
         workflow_run_service: WorkflowRunService,
         observation_scheduler: ReflectionProposalRolloutObservationScheduler | None,
@@ -77,11 +90,13 @@ class ReflectionProposalRolloutService:
         self._workflow_run_repository = workflow_run_repository
         self._goal_autonomy_state_repository = goal_autonomy_state_repository
         self._goal_skill_binding_repository = goal_skill_binding_repository
+        self._skill_artifact_repository = skill_artifact_repository
         self._session_repository = session_repository
         self._message_repository = message_repository
         self._reflection_record_repository = reflection_record_repository
         self._reflection_evidence_repository = reflection_evidence_repository
         self._task_attempt_repository = task_attempt_repository
+        self._usage_repository = usage_repository
         self._planner_service = planner_service
         self._workflow_run_service = workflow_run_service
         self._observation_scheduler = observation_scheduler
@@ -213,6 +228,7 @@ class ReflectionProposalRolloutService:
                 "rollout_id": updated.id,
                 "operator_id": operator_id,
                 "reason_code": reason_code,
+                "decision_origin": "automatic" if operator_id == AUTO_ROLLOUT_ACTOR else "manual",
             },
         )
         return updated
@@ -226,11 +242,34 @@ class ReflectionProposalRolloutService:
         reason_note: str | None,
     ) -> ReflectionProposalRollout:
         rollout = await self.get_rollout(rollout_id)
+        if rollout.status == "rolled_back":
+            await self._audit_service.record(
+                event_type="reflection.proposal.rollout.rollback_reused",
+                resource_type="reflection_proposal_rollout",
+                resource_id=rollout.id,
+                actor=operator_id,
+                event_data={
+                    "proposal_id": rollout.proposal_id,
+                    "rollout_id": rollout.id,
+                    "operator_id": operator_id,
+                    "reason_code": reason_code,
+                    "reason_note": reason_note,
+                    "decision_origin": "automatic" if operator_id == AUTO_ROLLOUT_ACTOR else "manual",
+                },
+            )
+            return rollout
+
         updated = rollout.with_status("rolled_back")
         await self._rollout_repository.update(updated)
         binding = await self._goal_skill_binding_repository.get_by_rollout(rollout.id)
         if binding is not None:
             await self._goal_skill_binding_repository.update(binding.with_status("rolled_back"))
+        deactivated_artifact = await self._deactivate_skill_package_artifact_on_rollback(
+            rollout=updated,
+            operator_id=operator_id,
+            reason_code=reason_code,
+            reason_note=reason_note,
+        )
         if rollout.surface == "plan_generation" and rollout.staged_plan_id is not None:
             updated = await self._materialize_rollout_plan(
                 rollout=updated,
@@ -250,6 +289,14 @@ class ReflectionProposalRolloutService:
                 operator_id=operator_id,
             )
         )
+        deactivated_artifact_id = None
+        deactivated_artifact_previous_status = None
+        deactivated_artifact_status = None
+        if deactivated_artifact is not None:
+            artifact, previous_status = deactivated_artifact
+            deactivated_artifact_id = artifact.id
+            deactivated_artifact_previous_status = previous_status
+            deactivated_artifact_status = artifact.status
         await self._audit_service.record(
             event_type="reflection.proposal.rollout.rolled_back",
             resource_type="reflection_proposal_rollout",
@@ -260,9 +307,52 @@ class ReflectionProposalRolloutService:
                 "rollout_id": updated.id,
                 "operator_id": operator_id,
                 "reason_code": reason_code,
+                "reason_note": reason_note,
+                "decision_origin": "automatic" if operator_id == AUTO_ROLLOUT_ACTOR else "manual",
+                "deactivated_skill_artifact_id": deactivated_artifact_id,
+                "deactivated_skill_artifact_previous_status": deactivated_artifact_previous_status,
+                "deactivated_skill_artifact_status": deactivated_artifact_status,
             },
         )
         return updated
+
+    async def _deactivate_skill_package_artifact_on_rollback(
+        self,
+        *,
+        rollout: ReflectionProposalRollout,
+        operator_id: str,
+        reason_code: str,
+        reason_note: str | None,
+    ) -> tuple[SkillArtifact, str] | None:
+        proposal = await self._proposal_repository.get_by_id(rollout.proposal_id)
+        if proposal is None or proposal.proposal_type != "skill_package":
+            return None
+        artifact = await self._skill_artifact_repository.get_by_source_proposal_id(rollout.proposal_id)
+        if artifact is None or artifact.status not in {"active", "stable", "suppressed"}:
+            return None
+        previous_status = artifact.status
+        deactivated = artifact.mark_deprecated(operator_id=operator_id)
+        await self._skill_artifact_repository.update(deactivated)
+        await self._audit_service.record(
+            event_type="skill.artifact.deactivated",
+            resource_type="skill_artifact",
+            resource_id=deactivated.id,
+            actor=operator_id,
+            event_data={
+                "artifact_id": deactivated.id,
+                "skill_name": deactivated.name,
+                "version": deactivated.version,
+                "scope": deactivated.scope,
+                "status": deactivated.status,
+                "source_proposal_id": deactivated.source_proposal_id,
+                "rollout_id": rollout.id,
+                "previous_status": previous_status,
+                "operator_id": operator_id,
+                "reason_code": reason_code,
+                "reason_note": reason_note,
+            },
+        )
+        return deactivated, previous_status
 
     async def observe(
         self,
@@ -283,6 +373,12 @@ class ReflectionProposalRolloutService:
             latest_observation_id=observation.id,
         )
         await self._rollout_repository.update(updated)
+        if self._observation_scheduler is not None:
+            await self._observation_scheduler.schedule_decision(
+                rollout_id=updated.id,
+                trigger_source=trigger_source,
+                source_ref=observation.id,
+            )
         await self._audit_service.record(
             event_type="reflection.proposal.rollout.observed",
             resource_type="reflection_proposal_rollout_observation",
@@ -531,6 +627,8 @@ class ReflectionProposalRolloutService:
     def _eligible_surface(proposal: ReflectionProposal) -> str:
         if proposal.status != "approved":
             raise ValidationError("Only approved proposals can be activated.")
+        if proposal.proposal_type == "skill_patch_request":
+            raise ValidationError("This proposal type is not rollout-enabled.")
         surface = proposal_rollout_surface(proposal.target_scope)
         if surface is None:
             raise ValidationError("This proposal target scope is not rollout-enabled.")
@@ -573,6 +671,7 @@ class ReflectionProposalRolloutService:
     async def _observe_workflow_surface(self, rollout: ReflectionProposalRollout) -> ReflectionProposalRolloutObservation:
         tasks = await self._daily_task_repository.list_by_goal(rollout.learner_goal_id)
         workflow_runs = await self._workflow_run_repository.list_recent_by_goal(rollout.learner_goal_id, limit=20)
+        binding = await self._goal_skill_binding_repository.get_by_rollout(rollout.id)
         relevant_tasks = [item for item in tasks if item.updated_at >= rollout.activated_at]
         relevant_runs = [item for item in workflow_runs if (item.finished_at or item.created_at) >= rollout.activated_at]
         surface_task_type = {
@@ -595,32 +694,65 @@ class ReflectionProposalRolloutService:
         skipped_count = len([item for item in task_window if item.status == "skipped"])
         workflow_failed_count = len([item for item in workflow_window if item.status == "failed"])
         observed_sample_count = len(task_window) + len(workflow_window)
+        sequence_summary_payload: dict[str, Any] | None = None
+        sequence_regression = False
+        sequence_reason_codes: list[str] = []
+        contract = build_tool_plan_sequence_contract(
+            surface=rollout.surface,
+            tool_plan=[dict(item) for item in (rollout.runtime_overlay_payload.get("tool_plan") or [])],
+        )
+        if contract is not None and binding is not None:
+            usage_events = await self._matching_rollout_usage_events(
+                rollout=rollout,
+                binding=binding,
+                created_at_from=rollout.activated_at,
+            )
+            sequence_summary = summarize_tool_plan_usage(contract=contract, usage_events=usage_events)
+            sequence_summary_payload = sequence_summary.to_payload(contract)
+            sequence_regression = has_tool_plan_sequence_regression(
+                summary=sequence_summary,
+                mismatch_min=1,
+                missing_metadata_min=1,
+                required_output_missing_min=1,
+            )
+            sequence_reason_codes = tool_plan_sequence_reason_codes(sequence_summary)
         recommendation = "collecting"
         reason_codes: list[str] = []
-        if workflow_failed_count > 0:
+        if sequence_regression:
+            recommendation = "rollback"
+            reason_codes.extend(sequence_reason_codes)
+        elif workflow_failed_count > 0:
             recommendation = "rollback"
             reason_codes.append("workflow_failed")
         elif rollout.surface == "review_scheduling":
             if failed_count + skipped_count >= 2:
                 recommendation = "rollback"
                 reason_codes.append("review_failure_cluster")
-            elif observed_sample_count >= 2 and completed_count >= 1:
+            elif observed_sample_count >= 2 and completed_count >= 1 and (contract is None or "tool_plan_sequence_verified" in sequence_reason_codes):
                 recommendation = "promote"
                 reason_codes.append("review_completed")
         elif rollout.surface == "assessment_generation":
             if failed_count >= 1 and completed_count == 0:
                 recommendation = "rollback"
                 reason_codes.append("assessment_regressed")
-            elif completed_count >= 1:
+            elif completed_count >= 1 and (contract is None or "tool_plan_sequence_verified" in sequence_reason_codes):
                 recommendation = "promote"
                 reason_codes.append("assessment_completed")
         elif rollout.surface == "replan":
             if failed_count + skipped_count >= 2:
                 recommendation = "rollback"
                 reason_codes.append("post_replan_failure_cluster")
-            elif observed_sample_count >= 2 and failed_count + skipped_count <= 1:
+            elif (
+                observed_sample_count >= 2
+                and failed_count + skipped_count <= 1
+                and (contract is None or "tool_plan_sequence_verified" in sequence_reason_codes)
+            ):
                 recommendation = "promote"
                 reason_codes.append("post_replan_recovered")
+        if recommendation == "promote":
+            for code in sequence_reason_codes:
+                if code not in reason_codes:
+                    reason_codes.append(code)
         return ReflectionProposalRolloutObservation.build(
             rollout_id=rollout.id,
             proposal_id=rollout.proposal_id,
@@ -636,6 +768,57 @@ class ReflectionProposalRolloutService:
                 "task_skipped_count": skipped_count,
                 "workflow_failed_count": workflow_failed_count,
                 "surface": rollout.surface,
+                "tool_plan_sequence": dict(sequence_summary_payload or {}),
             },
             reason_codes=reason_codes or ["collecting"],
+        )
+
+    async def _matching_rollout_usage_events(
+        self,
+        *,
+        rollout: ReflectionProposalRollout,
+        binding: GoalSkillBinding,
+        created_at_from: datetime,
+    ) -> list[SkillUsageEvent]:
+        skill_name = str(rollout.runtime_overlay_payload.get("skill_name") or "").strip()
+        if not skill_name:
+            return []
+        events = await self._usage_repository.list_events(
+            skill_name=skill_name,
+            learner_goal_id=rollout.learner_goal_id,
+            surface=rollout.surface,
+            created_at_from=created_at_from,
+            limit=200,
+        )
+        return [
+            event
+            for event in events
+            if self._matches_rollout_metadata(
+                event.metadata.get("skill_package_rollout"),
+                proposal_id=rollout.proposal_id,
+                rollout_id=rollout.id,
+                binding_id=binding.id,
+                skill_name=skill_name,
+                surface=rollout.surface,
+            )
+        ]
+
+    @staticmethod
+    def _matches_rollout_metadata(
+        rollout_metadata: Any,
+        *,
+        proposal_id: str,
+        rollout_id: str,
+        binding_id: str,
+        skill_name: str,
+        surface: str,
+    ) -> bool:
+        if not isinstance(rollout_metadata, dict):
+            return False
+        return (
+            rollout_metadata.get("proposal_id") == proposal_id
+            and rollout_metadata.get("rollout_id") == rollout_id
+            and rollout_metadata.get("binding_id") == binding_id
+            and rollout_metadata.get("skill_name") == skill_name
+            and rollout_metadata.get("surface") == surface
         )
