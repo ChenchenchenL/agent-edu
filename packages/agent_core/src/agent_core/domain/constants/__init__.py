@@ -7,6 +7,7 @@ from agent_core.domain.constants.skill_constants import (
     SkillArtifactStatus,
     SkillType,
     SkillLifecycleThresholds,
+    SkillEvaluationConstants,
     ALLOWED_SKILL_PACKAGE_TOOLS,
 )
 
@@ -14,5 +15,6 @@ __all__ = [
     "SkillArtifactStatus",
     "SkillType",
     "SkillLifecycleThresholds",
+    "SkillEvaluationConstants",
     "ALLOWED_SKILL_PACKAGE_TOOLS",
 ]

@@ -66,7 +66,7 @@
 - `review_scheduling / assessment_generation / replan` 已在 task/autonomy 端端到端保留 `RuntimeSkillExecutionPlan`
 - task/autonomy usage attribution 已统一收口到公共 helper；`review_scheduling / assessment_generation / replan` 不再各自维护分散的 usage metadata 拼装
 - `chat / hint / quiz / plan_generation` 的 rollout observation 已在成功路径接通；`chat / hint` 使用 assistant message id，`quiz` 使用 quiz id，`plan_generation` 使用成功 workflow run id，并且 `plan_generation` 的 observation 只会在 plan/task 持久化成功之后调度
-- allowlisted autonomy workflow surface 的 rollout observation 已在成功路径接通；当前覆盖 `review_scheduling / assessment_generation / replan`
+- allowlisted autonomy workflow surface 的 rollout observation 已对 `review_scheduling / assessment_generation / replan` 接通成功路径，并对有真实 workflow run anchor 的 runtime failure 接通失败路径；`skipped` 与 validation / precondition failure 仍不进入 observation
 - rollout auto-governance V1 已落地独立 decision job，并对 allowlisted workflow surfaces 自动执行 rollout `promote / rollback`
 - CLI-first dual-mode client、workspace summary API 与 TUI baseline 已落地
 - 真实 LLM / embedding 的接入已经不是“配置层预留”，而是“代码层可执行”
@@ -734,7 +734,6 @@
 仍未完成：
 
 - runtime 已能在 `chat / hint / quiz / plan_generation / review_scheduling / assessment_generation / replan` 上消费 governed `SkillExecutionPlan`，并把 `implementation_binding / execution_kind / binding metadata` 写入 usage；但 active artifact 还没有成为完整动态技能注册源
-- task/autonomy rollout observation 目前仍是 success-path only，失败路径不会由 task service 主动调度 observation
 - `tool_plan` 已从最小 runtime compatibility gate 升级为 internal-only 的受控 runtime executor，并在 sandbox preview 与 autonomy runtime 上复用同一套 payload-template 解析与 fail-closed 约束；当前支持最多 2 步的 linear chain、显式 `step_id` 和 prior-step output 引用（如 `$steps.repair.created_task_ids[0]`），且已把 `partial_replan -> review_scheduling` 作为保守白名单序列落到 `replan` 主 surface；其 usage metadata、step 级 audit 和 sandbox summary 已能反映 sequence / step count / step summary，但通用多步 tool-plan orchestration interpreter 仍未实现
 - `SkillCuratorJob` 仍是 MVP：已消费 usage / rollout observation / rollout decision、artifact overlap / duplicate detection、memory conflict summary、reflection outcome evaluation、resolver health trend、surface / topic coverage regression 和 staged replacement readiness；生产级 dashboard / alert 基线已落地，但自动执行和更重的运维编排仍未完成
 - patch / merge 的长期治理闭环仍是保守人工执行形态；当前已完成 `patch_needed -> skill_patch_request -> replacement skill_package proposal -> staged replacement -> readiness -> operator activate/replace` 和 `artifact overlap -> merge_candidate -> merge-sourced replacement skill_package proposal -> staged replacement -> readiness -> operator activate/replace`，但没有自动 activate / replace

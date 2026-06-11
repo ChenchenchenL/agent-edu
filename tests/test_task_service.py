@@ -317,6 +317,17 @@ class FailingReviewTaskRepository(StubDailyTaskRepository):
         await super().create_many(entities)
 
 
+class FailingTaskOriginRepository(StubDailyTaskRepository):
+    def __init__(self, *task_origins: str):
+        super().__init__()
+        self.task_origins = set(task_origins)
+
+    async def create_many(self, entities: list[DailyTask]):
+        if any(item.task_origin in self.task_origins for item in entities):
+            raise RuntimeError("task creation failed")
+        await super().create_many(entities)
+
+
 class StubWorkflowRunRepository:
     def __init__(self):
         self.runs: dict[str, WorkflowRun] = {}
@@ -1166,6 +1177,134 @@ async def test_review_scheduling_worker_schedules_rollout_observation_for_active
     assert observation_jobs[0].payload["rollout_id"]
 
 
+async def test_review_scheduling_failure_schedules_rollout_observation_for_active_surface():
+    profile = LearnerProfile.build()
+    goal = LearnerGoal.build(
+        learner_profile_id=profile.id,
+        title="Master matrices",
+        subject="Linear Algebra",
+        target_outcome="Solve core matrix exercises independently",
+        baseline_note=None,
+        deadline_date=date.today() + timedelta(days=21),
+        weekly_study_minutes=180,
+    )
+    skill_usage_service = StubSkillUsageService()
+    workflow_run_repository = StubWorkflowRunRepository()
+    task_service, _, _, rollout_repository = _build_task_service(
+        goal=goal,
+        profile=profile,
+        fake_session=FakeSession(),
+        audit_service=AuditService(StubAuditRepository()),
+        workflow_run_repository=workflow_run_repository,
+        daily_task_repository=FailingReviewTaskRepository(),
+        skill_usage_service=skill_usage_service,
+    )
+    await rollout_repository.create(
+        ReflectionProposalRollout.build(
+            proposal_id="proposal-review-fail-1",
+            learner_goal_id=goal.id,
+            surface="review_scheduling",
+            baseline_snapshot={},
+            runtime_overlay_payload={},
+            activated_by="operator",
+        ).with_status("rolled_out")
+    )
+    await task_service.generate_plan(goal_id=goal.id, trigger_source="initial")
+    source_task_response = (await task_service.list_tasks(goal.id))[0]
+    source_task = await task_service._daily_task_repository.get_by_id(source_task_response.id)
+    assert source_task is not None
+    task_service._autonomy_job_repository.jobs.clear()
+    job = ScheduledAutonomyJob.build(
+        learner_goal_id=goal.id,
+        job_type="review_scheduling",
+        trigger_source="task_completed",
+        due_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        idempotency_key="usage-review-scheduling-failure-observation",
+        payload={"source_task_id": source_task.id},
+    )
+    task_service._autonomy_job_repository.jobs[job.id] = job
+
+    processed = await task_service.run_due_autonomy_jobs(raise_on_error=False, lease_owner="usage-test", limit=1)
+
+    assert processed == 0
+    event = next(item for item in skill_usage_service.events if item["surface"] == "review_scheduling")
+    assert event["outcome_status"] == "failed"
+    assert event["workflow_run_id"] is not None
+    stored_run = await workflow_run_repository.get_by_id(event["workflow_run_id"])
+    assert stored_run is not None
+    assert stored_run.status == "failed"
+    observation_jobs = [
+        item
+        for item in task_service._autonomy_job_repository.jobs.values()
+        if item.job_type == "reflection_proposal_rollout_observation"
+    ]
+    assert len(observation_jobs) == 1
+    assert observation_jobs[0].learner_goal_id == goal.id
+    assert observation_jobs[0].trigger_source == "task_completed"
+    assert observation_jobs[0].payload["surface"] == "review_scheduling"
+    assert observation_jobs[0].payload["source_ref"] == event["workflow_run_id"]
+
+
+async def test_review_scheduling_skip_records_runtime_metadata():
+    profile = LearnerProfile.build()
+    goal = LearnerGoal.build(
+        learner_profile_id=profile.id,
+        title="Master matrices",
+        subject="Linear Algebra",
+        target_outcome="Solve core matrix exercises independently",
+        baseline_note=None,
+        deadline_date=date.today() + timedelta(days=21),
+        weekly_study_minutes=180,
+    )
+    skill_usage_service = StubSkillUsageService()
+    task_service, _, _, _ = _build_task_service(
+        goal=goal,
+        profile=profile,
+        fake_session=FakeSession(),
+        audit_service=AuditService(StubAuditRepository()),
+        workflow_run_repository=StubWorkflowRunRepository(),
+        skill_usage_service=skill_usage_service,
+    )
+    await task_service.generate_plan(goal_id=goal.id, trigger_source="initial")
+    source_task_response = (await task_service.list_tasks(goal.id))[0]
+    source_task = await task_service._daily_task_repository.get_by_id(source_task_response.id)
+    assert source_task is not None
+    task_service._daily_task_repository.tasks[source_task.id] = replace(source_task, task_type="review")
+    task_service._autonomy_job_repository.jobs.clear()
+    job = ScheduledAutonomyJob.build(
+        learner_goal_id=goal.id,
+        job_type="review_scheduling",
+        trigger_source="task_completed",
+        due_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        idempotency_key="usage-review-scheduling-skip",
+        payload={"source_task_id": source_task.id},
+    )
+    task_service._autonomy_job_repository.jobs[job.id] = job
+
+    processed = await task_service.run_due_autonomy_jobs(raise_on_error=True, lease_owner="usage-test", limit=1)
+
+    assert processed == 1
+    event = next(item for item in skill_usage_service.events if item["surface"] == "review_scheduling")
+    metadata = event["metadata"]
+    assert event["outcome_status"] == "skipped"
+    assert event["workflow_run_id"] is None
+    assert metadata["skip_reason"] == "source_task_already_review"
+    assert metadata["implementation_binding"] == "schedule_review"
+    assert metadata["execution_kind"] == "review_schedule"
+    assert metadata["dynamic_registry_version"] == "v1"
+    assert metadata["source_summary"] == {
+        "artifact_source": "static_fallback",
+        "directives_source": "none",
+        "tool_plan_source": "none",
+    }
+    observation_jobs = [
+        item
+        for item in task_service._autonomy_job_repository.jobs.values()
+        if item.job_type == "reflection_proposal_rollout_observation"
+    ]
+    assert observation_jobs == []
+
+
 async def test_assessment_generation_worker_records_skill_usage_with_binding_metadata():
     profile = LearnerProfile.build()
     goal = LearnerGoal.build(
@@ -1312,6 +1451,128 @@ async def test_assessment_generation_worker_schedules_rollout_observation_for_ac
     assert observation_jobs[0].trigger_source == "task_completed"
     assert observation_jobs[0].payload["surface"] == "assessment_generation"
     assert observation_jobs[0].payload["rollout_id"]
+
+
+async def test_assessment_generation_failure_schedules_rollout_observation_for_active_surface():
+    profile = LearnerProfile.build()
+    goal = LearnerGoal.build(
+        learner_profile_id=profile.id,
+        title="Master matrices",
+        subject="Linear Algebra",
+        target_outcome="Solve core matrix exercises independently",
+        baseline_note=None,
+        deadline_date=date.today() + timedelta(days=21),
+        weekly_study_minutes=180,
+    )
+    skill_usage_service = StubSkillUsageService()
+    workflow_run_repository = StubWorkflowRunRepository()
+    task_service, _, _, rollout_repository = _build_task_service(
+        goal=goal,
+        profile=profile,
+        fake_session=FakeSession(),
+        audit_service=AuditService(StubAuditRepository()),
+        workflow_run_repository=workflow_run_repository,
+        daily_task_repository=FailingTaskOriginRepository("assessment_scheduler"),
+        skill_usage_service=skill_usage_service,
+    )
+    await rollout_repository.create(
+        ReflectionProposalRollout.build(
+            proposal_id="proposal-assessment-fail-1",
+            learner_goal_id=goal.id,
+            surface="assessment_generation",
+            baseline_snapshot={},
+            runtime_overlay_payload={},
+            activated_by="operator",
+        ).with_status("rolled_out")
+    )
+    await task_service.generate_plan(goal_id=goal.id, trigger_source="initial")
+    source_task_response = (await task_service.list_tasks(goal.id))[0]
+    source_task = await task_service._daily_task_repository.get_by_id(source_task_response.id)
+    assert source_task is not None
+    task_service._autonomy_job_repository.jobs.clear()
+    job = ScheduledAutonomyJob.build(
+        learner_goal_id=goal.id,
+        job_type="assessment_generation",
+        trigger_source="task_completed",
+        due_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        idempotency_key="usage-assessment-generation-failure-observation",
+        payload={"topic_focus": source_task.topic_focus, "source_task_id": source_task.id},
+    )
+    task_service._autonomy_job_repository.jobs[job.id] = job
+
+    processed = await task_service.run_due_autonomy_jobs(raise_on_error=False, lease_owner="usage-test", limit=1)
+
+    assert processed == 0
+    event = next(item for item in skill_usage_service.events if item["surface"] == "assessment_generation")
+    assert event["outcome_status"] == "failed"
+    assert event["workflow_run_id"] is not None
+    stored_run = await workflow_run_repository.get_by_id(event["workflow_run_id"])
+    assert stored_run is not None
+    assert stored_run.status == "failed"
+    observation_jobs = [
+        item
+        for item in task_service._autonomy_job_repository.jobs.values()
+        if item.job_type == "reflection_proposal_rollout_observation"
+    ]
+    assert len(observation_jobs) == 1
+    assert observation_jobs[0].learner_goal_id == goal.id
+    assert observation_jobs[0].trigger_source == "task_completed"
+    assert observation_jobs[0].payload["surface"] == "assessment_generation"
+    assert observation_jobs[0].payload["source_ref"] == event["workflow_run_id"]
+
+
+async def test_assessment_generation_skip_records_runtime_metadata():
+    profile = LearnerProfile.build()
+    goal = LearnerGoal.build(
+        learner_profile_id=profile.id,
+        title="Master matrices",
+        subject="Linear Algebra",
+        target_outcome="Solve core matrix exercises independently",
+        baseline_note=None,
+        deadline_date=date.today() + timedelta(days=21),
+        weekly_study_minutes=180,
+    )
+    skill_usage_service = StubSkillUsageService()
+    task_service, _, _, _ = _build_task_service(
+        goal=goal,
+        profile=profile,
+        fake_session=FakeSession(),
+        audit_service=AuditService(StubAuditRepository()),
+        workflow_run_repository=StubWorkflowRunRepository(),
+        skill_usage_service=skill_usage_service,
+    )
+    job = ScheduledAutonomyJob.build(
+        learner_goal_id=goal.id,
+        job_type="assessment_generation",
+        trigger_source="task_completed",
+        due_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        idempotency_key="usage-assessment-generation-skip",
+        payload={"topic_focus": goal.subject},
+    )
+    task_service._autonomy_job_repository.jobs[job.id] = job
+
+    processed = await task_service.run_due_autonomy_jobs(raise_on_error=True, lease_owner="usage-test", limit=1)
+
+    assert processed == 1
+    event = next(item for item in skill_usage_service.events if item["surface"] == "assessment_generation")
+    metadata = event["metadata"]
+    assert event["outcome_status"] == "skipped"
+    assert event["workflow_run_id"] is None
+    assert metadata["skip_reason"] == "active_plan_missing"
+    assert metadata["implementation_binding"] == "create_quiz"
+    assert metadata["execution_kind"] == "quiz_draft"
+    assert metadata["dynamic_registry_version"] == "v1"
+    assert metadata["source_summary"] == {
+        "artifact_source": "static_fallback",
+        "directives_source": "none",
+        "tool_plan_source": "none",
+    }
+    observation_jobs = [
+        item
+        for item in task_service._autonomy_job_repository.jobs.values()
+        if item.job_type == "reflection_proposal_rollout_observation"
+    ]
+    assert observation_jobs == []
 
 
 async def test_partial_replan_worker_records_skill_usage():
@@ -1522,6 +1783,74 @@ async def test_replan_worker_schedules_rollout_observation_for_active_surface():
     assert observation_jobs[0].payload["rollout_id"]
 
 
+async def test_partial_replan_failure_schedules_rollout_observation_for_active_surface():
+    profile = LearnerProfile.build()
+    goal = LearnerGoal.build(
+        learner_profile_id=profile.id,
+        title="Master matrices",
+        subject="Linear Algebra",
+        target_outcome="Solve core matrix exercises independently",
+        baseline_note=None,
+        deadline_date=date.today() + timedelta(days=21),
+        weekly_study_minutes=180,
+    )
+    skill_usage_service = StubSkillUsageService()
+    workflow_run_repository = StubWorkflowRunRepository()
+    task_service, _, _, rollout_repository = _build_task_service(
+        goal=goal,
+        profile=profile,
+        fake_session=FakeSession(),
+        audit_service=AuditService(StubAuditRepository()),
+        workflow_run_repository=workflow_run_repository,
+        daily_task_repository=FailingTaskOriginRepository("replan_scheduler"),
+        skill_usage_service=skill_usage_service,
+    )
+    await rollout_repository.create(
+        ReflectionProposalRollout.build(
+            proposal_id="proposal-replan-fail-1",
+            learner_goal_id=goal.id,
+            surface="replan",
+            baseline_snapshot={},
+            runtime_overlay_payload={},
+            activated_by="operator",
+        ).with_status("rolled_out")
+    )
+    await task_service.generate_plan(goal_id=goal.id, trigger_source="initial")
+    source_task_response = (await task_service.list_tasks(goal.id))[0]
+    source_task = await task_service._daily_task_repository.get_by_id(source_task_response.id)
+    assert source_task is not None
+    task_service._autonomy_job_repository.jobs.clear()
+    job = ScheduledAutonomyJob.build(
+        learner_goal_id=goal.id,
+        job_type="replan",
+        trigger_source="task_failed",
+        due_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        idempotency_key="usage-replan-failure-observation",
+        payload={"mode": "partial", "source_task_id": source_task.id, "topic_focus": source_task.topic_focus},
+    )
+    task_service._autonomy_job_repository.jobs[job.id] = job
+
+    processed = await task_service.run_due_autonomy_jobs(raise_on_error=False, lease_owner="usage-test", limit=1)
+
+    assert processed == 0
+    event = next(item for item in skill_usage_service.events if item["surface"] == "replan")
+    assert event["outcome_status"] == "failed"
+    assert event["workflow_run_id"] is not None
+    stored_run = await workflow_run_repository.get_by_id(event["workflow_run_id"])
+    assert stored_run is not None
+    assert stored_run.status == "failed"
+    observation_jobs = [
+        item
+        for item in task_service._autonomy_job_repository.jobs.values()
+        if item.job_type == "reflection_proposal_rollout_observation"
+    ]
+    assert len(observation_jobs) == 1
+    assert observation_jobs[0].learner_goal_id == goal.id
+    assert observation_jobs[0].trigger_source == "task_failed"
+    assert observation_jobs[0].payload["surface"] == "replan"
+    assert observation_jobs[0].payload["source_ref"] == event["workflow_run_id"]
+
+
 async def test_full_replan_worker_records_skill_usage():
     profile = LearnerProfile.build()
     goal = LearnerGoal.build(
@@ -1562,6 +1891,7 @@ async def test_full_replan_worker_records_skill_usage():
     assert event["skill_name"] == "plan_study_path"
     assert event["outcome_status"] == "completed"
     assert event["daily_task_id"] is None
+    assert event["workflow_run_id"] is not None
     assert event["topic_key"] == goal.subject
     assert event["trigger_source"] == "manual_replan"
     assert metadata["autonomy_job_id"] == job.id
@@ -1581,6 +1911,177 @@ async def test_full_replan_worker_records_skill_usage():
         "directives_source": "none",
         "tool_plan_source": "none",
     }
+    assert task_service._autonomy_job_repository.jobs[job.id].workflow_run_id == event["workflow_run_id"]
+
+
+async def test_full_replan_schedules_rollout_observation_with_workflow_run_source_ref():
+    profile = LearnerProfile.build()
+    goal = LearnerGoal.build(
+        learner_profile_id=profile.id,
+        title="Master matrices",
+        subject="Linear Algebra",
+        target_outcome="Solve core matrix exercises independently",
+        baseline_note=None,
+        deadline_date=date.today() + timedelta(days=21),
+        weekly_study_minutes=180,
+    )
+    skill_usage_service = StubSkillUsageService()
+    task_service, _, _, rollout_repository = _build_task_service(
+        goal=goal,
+        profile=profile,
+        fake_session=FakeSession(),
+        audit_service=AuditService(StubAuditRepository()),
+        workflow_run_repository=StubWorkflowRunRepository(),
+        skill_usage_service=skill_usage_service,
+    )
+    await rollout_repository.create(
+        ReflectionProposalRollout.build(
+            proposal_id="proposal-replan-full-1",
+            learner_goal_id=goal.id,
+            surface="replan",
+            baseline_snapshot={},
+            runtime_overlay_payload={},
+            activated_by="operator",
+        ).with_status("rolled_out")
+    )
+    await task_service.generate_plan(goal_id=goal.id, trigger_source="initial")
+    task_service._autonomy_job_repository.jobs.clear()
+    job = ScheduledAutonomyJob.build(
+        learner_goal_id=goal.id,
+        job_type="replan",
+        trigger_source="manual_replan",
+        due_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        idempotency_key="usage-replan-full-observation",
+        payload={"mode": "full", "topic_focus": goal.subject},
+    )
+    task_service._autonomy_job_repository.jobs[job.id] = job
+
+    processed = await task_service.run_due_autonomy_jobs(raise_on_error=True, lease_owner="usage-test", limit=1)
+
+    assert processed == 1
+    event = next(item for item in skill_usage_service.events if item["surface"] == "replan")
+    observation_jobs = [
+        item
+        for item in task_service._autonomy_job_repository.jobs.values()
+        if item.job_type == "reflection_proposal_rollout_observation"
+    ]
+    assert len(observation_jobs) == 1
+    assert observation_jobs[0].payload["surface"] == "replan"
+    assert observation_jobs[0].payload["source_ref"] == event["workflow_run_id"]
+
+
+async def test_fallback_full_replan_records_workflow_run_and_observation_source_ref():
+    profile = LearnerProfile.build()
+    goal = LearnerGoal.build(
+        learner_profile_id=profile.id,
+        title="Master matrices",
+        subject="Linear Algebra",
+        target_outcome="Solve core matrix exercises independently",
+        baseline_note=None,
+        deadline_date=date.today() + timedelta(days=21),
+        weekly_study_minutes=180,
+    )
+    skill_usage_service = StubSkillUsageService()
+    task_service, _, _, rollout_repository = _build_task_service(
+        goal=goal,
+        profile=profile,
+        fake_session=FakeSession(),
+        audit_service=AuditService(StubAuditRepository()),
+        workflow_run_repository=StubWorkflowRunRepository(),
+        skill_usage_service=skill_usage_service,
+    )
+    await rollout_repository.create(
+        ReflectionProposalRollout.build(
+            proposal_id="proposal-replan-fallback-1",
+            learner_goal_id=goal.id,
+            surface="replan",
+            baseline_snapshot={},
+            runtime_overlay_payload={},
+            activated_by="operator",
+        ).with_status("rolled_out")
+    )
+    job = ScheduledAutonomyJob.build(
+        learner_goal_id=goal.id,
+        job_type="replan",
+        trigger_source="task_failed",
+        due_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        idempotency_key="usage-replan-fallback-full",
+        payload={"mode": "partial", "topic_focus": goal.subject},
+    )
+    task_service._autonomy_job_repository.jobs[job.id] = job
+
+    processed = await task_service.run_due_autonomy_jobs(raise_on_error=True, lease_owner="usage-test", limit=1)
+
+    assert processed == 1
+    event = next(item for item in skill_usage_service.events if item["surface"] == "replan")
+    metadata = event["metadata"]
+    observation_jobs = [
+        item
+        for item in task_service._autonomy_job_repository.jobs.values()
+        if item.job_type == "reflection_proposal_rollout_observation"
+    ]
+    assert event["outcome_status"] == "completed"
+    assert event["workflow_run_id"] is not None
+    assert metadata["effective_mode"] == "full"
+    assert metadata["fallback_used"] is True
+    assert metadata["fallback_reason"] == "source_task_missing"
+    assert len(observation_jobs) == 1
+    assert observation_jobs[0].payload["source_ref"] == event["workflow_run_id"]
+
+
+async def test_invalid_replan_mode_records_runtime_metadata():
+    profile = LearnerProfile.build()
+    goal = LearnerGoal.build(
+        learner_profile_id=profile.id,
+        title="Master matrices",
+        subject="Linear Algebra",
+        target_outcome="Solve core matrix exercises independently",
+        baseline_note=None,
+        deadline_date=date.today() + timedelta(days=21),
+        weekly_study_minutes=180,
+    )
+    skill_usage_service = StubSkillUsageService()
+    task_service, _, _, _ = _build_task_service(
+        goal=goal,
+        profile=profile,
+        fake_session=FakeSession(),
+        audit_service=AuditService(StubAuditRepository()),
+        workflow_run_repository=StubWorkflowRunRepository(),
+        skill_usage_service=skill_usage_service,
+    )
+    job = ScheduledAutonomyJob.build(
+        learner_goal_id=goal.id,
+        job_type="replan",
+        trigger_source="manual_replan",
+        due_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        idempotency_key="usage-replan-invalid-mode",
+        payload={"mode": "bogus", "topic_focus": goal.subject},
+    )
+    task_service._autonomy_job_repository.jobs[job.id] = job
+
+    processed = await task_service.run_due_autonomy_jobs(raise_on_error=False, lease_owner="usage-test", limit=1)
+
+    assert processed == 0
+    event = next(item for item in skill_usage_service.events if item["surface"] == "replan")
+    metadata = event["metadata"]
+    assert event["outcome_status"] == "failed"
+    assert event["workflow_run_id"] is None
+    assert event["error_code"] == "ValidationError"
+    assert metadata["mode"] == "bogus"
+    assert metadata["implementation_binding"] == "plan_study_path"
+    assert metadata["execution_kind"] == "study_plan"
+    assert metadata["dynamic_registry_version"] == "v1"
+    assert metadata["source_summary"] == {
+        "artifact_source": "static_fallback",
+        "directives_source": "none",
+        "tool_plan_source": "none",
+    }
+    observation_jobs = [
+        item
+        for item in task_service._autonomy_job_repository.jobs.values()
+        if item.job_type == "reflection_proposal_rollout_observation"
+    ]
+    assert observation_jobs == []
 
 
 async def test_generate_plan_uses_execution_plan_resolution():

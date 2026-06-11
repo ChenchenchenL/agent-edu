@@ -49,6 +49,11 @@ from agent_core.infrastructure.observability.metrics import (
     set_skill_artifacts_total,
     set_skill_curator_pending_recommendations,
 )
+from agent_core.domain.constants import (
+    SkillArtifactStatus,
+    SkillLifecycleThresholds,
+    ALLOWED_SKILL_PACKAGE_TOOLS as ALLOWED_TOOLS_FROM_CONSTANTS,
+)
 from agent_core.infrastructure.db.repositories import (
     GoalSkillBindingRepository,
     MemoryConflictRepository,
@@ -64,17 +69,24 @@ from agent_core.infrastructure.db.repositories import (
 )
 
 
+# 使用集中管理的常量
+_thresholds = SkillLifecycleThresholds()
+CANDIDATE_MIN_SCORE_DELTA = _thresholds.CANDIDATE_MIN_SCORE_DELTA
+STABLE_MIN_SUCCESSFUL_USAGE_COUNT = _thresholds.STABLE_MIN_SUCCESSFUL_USAGE
+STABLE_REQUIRED_PROMOTE_OBSERVATION_COUNT = 2  # TODO: 添加到SkillLifecycleThresholds
+STABLE_MAX_NEGATIVE_USAGE_RATE = _thresholds.STABLE_MAX_NEGATIVE_RATE
+REPLACEMENT_READINESS_SUCCESSFUL_USAGE_MIN = _thresholds.STAGING_MIN_USAGE_COUNT
+REPLACEMENT_READINESS_PROMOTE_OBSERVATION_MIN = 2  # TODO: 添加到SkillLifecycleThresholds
+REPLACEMENT_READINESS_MAX_NEGATIVE_USAGE_RATE = _thresholds.STAGING_MAX_FAILURE_RATE
+
+# 特定于skills.py的工具集（与centralized常量不同）
 ALLOWED_SKILL_PACKAGE_TOOLS = {"review_scheduling", "assessment_generation", "partial_replan"}
-CANDIDATE_MIN_SCORE_DELTA = 0.1
-STABLE_MIN_SUCCESSFUL_USAGE_COUNT = 5
-STABLE_REQUIRED_PROMOTE_OBSERVATION_COUNT = 2
-STABLE_MAX_NEGATIVE_USAGE_RATE = 0.2
-REPLACEMENT_READINESS_SUCCESSFUL_USAGE_MIN = 3
-REPLACEMENT_READINESS_PROMOTE_OBSERVATION_MIN = 2
-REPLACEMENT_READINESS_MAX_NEGATIVE_USAGE_RATE = 0.2
 STABLE_SUCCESSFUL_USAGE_STATUSES = {"completed", "partial_success"}
 STABLE_NEGATIVE_USAGE_STATUSES = {"failed", "skipped", "aborted"}
-ACTIVE_SKILL_REFERENCE_STATUSES = ["staged", "rolled_out"]
+ACTIVE_SKILL_REFERENCE_STATUSES = [
+    SkillArtifactStatus.STAGED.value,
+    "rolled_out"  # 不在SkillArtifactStatus枚举中
+]
 CURATOR_DEACTIVATION_REASON_CODES = {
     "rollout_rollback",
     "quality_regression",
@@ -105,9 +117,24 @@ CURATOR_ACTIVATION_REASON_CODES = {
     "operator_request",
     "rollout_promoted",
 }
-MERGE_SOURCE_ARTIFACT_STATUSES = {"active", "stable"}
-MERGE_RELATED_ARTIFACT_STATUSES = {"candidate", "staged", "active", "stable", "deprecated"}
-MERGE_RELATED_ARTIFACT_STATUS_SCAN_ORDER = ("candidate", "staged", "active", "stable", "deprecated")
+MERGE_SOURCE_ARTIFACT_STATUSES = {
+    SkillArtifactStatus.ACTIVE.value,
+    SkillArtifactStatus.STABLE.value
+}
+MERGE_RELATED_ARTIFACT_STATUSES = {
+    SkillArtifactStatus.CANDIDATE.value,
+    SkillArtifactStatus.STAGED.value,
+    SkillArtifactStatus.ACTIVE.value,
+    SkillArtifactStatus.STABLE.value,
+    SkillArtifactStatus.DEPRECATED.value
+}
+MERGE_RELATED_ARTIFACT_STATUS_SCAN_ORDER = (
+    SkillArtifactStatus.CANDIDATE.value,
+    SkillArtifactStatus.STAGED.value,
+    SkillArtifactStatus.ACTIVE.value,
+    SkillArtifactStatus.STABLE.value,
+    SkillArtifactStatus.DEPRECATED.value
+)
 MERGE_OVERLAP_RULE_KEYS = ("task_types", "topic_keys")
 
 
@@ -323,7 +350,7 @@ class SkillReplacementReadinessService:
             "negative_usage_event_ids": [],
         }
 
-        if artifact.status != "staged":
+        if artifact.status != SkillArtifactStatus.STAGED.value:
             readiness = SkillReplacementReadiness(
                 artifact_id=artifact.id,
                 skill_name=artifact.name,
@@ -726,7 +753,7 @@ class SkillCandidateService:
             supersedes_artifact_id=self._replacement_supersedes_artifact_id(proposal),
             skill_type="learned",
             scope=surface,
-            status="candidate",
+            status=SkillArtifactStatus.CANDIDATE.value,
             description=proposal.change_summary,
             definition={
                 "artifact_kind": payload["artifact_kind"],
@@ -932,7 +959,7 @@ class SkillArtifactLifecycleService:
         artifact = await self._artifact_repository.get_by_id(artifact_id)
         if artifact is None:
             raise NotFoundError(f"Skill artifact '{artifact_id}' was not found.")
-        if artifact.status == "staged":
+        if artifact.status == SkillArtifactStatus.STAGED.value:
             await self._audit_stage(
                 artifact,
                 event_type="skill.artifact.stage_reused",
@@ -943,7 +970,7 @@ class SkillArtifactLifecycleService:
                 score_delta=None,
             )
             return artifact
-        if artifact.status != "candidate":
+        if artifact.status != SkillArtifactStatus.CANDIDATE.value:
             raise ValidationError("Only candidate skill artifacts can be staged.")
         if artifact.source_proposal_id is None:
             raise ValidationError("Skill artifact staging requires a source proposal.")
@@ -989,7 +1016,7 @@ class SkillArtifactLifecycleService:
         artifact = await self._get_artifact_for_activation(artifact_id)
         if artifact is None:
             raise NotFoundError(f"Skill artifact '{artifact_id}' was not found.")
-        if artifact.status == "active":
+        if artifact.status == SkillArtifactStatus.ACTIVE.value:
             await self._audit_activate(
                 artifact,
                 event_type="skill.artifact.activate_reused",
@@ -1005,7 +1032,7 @@ class SkillArtifactLifecycleService:
                 replacement_readiness=None,
             )
             return artifact
-        if artifact.status != "staged":
+        if artifact.status != SkillArtifactStatus.STAGED.value:
             raise ValidationError("Only staged skill artifacts can be activated.")
         if not self._skill_registry.has_skill(artifact.name):
             raise ValidationError("Skill artifact activation requires an enabled skill name.")
@@ -1072,7 +1099,7 @@ class SkillArtifactLifecycleService:
             raise NotFoundError(f"Skill artifact '{artifact_id}' was not found.")
         if artifact.status == "active" and artifact.supersedes_artifact_id is not None:
             superseded = await self._artifact_repository.get_by_id(artifact.supersedes_artifact_id)
-            if superseded is not None and superseded.status == "deprecated":
+            if superseded is not None and superseded.status == SkillArtifactStatus.DEPRECATED.value:
                 await self._audit_replace(
                     artifact,
                     event_type="skill.artifact.replace_reused",
@@ -1090,7 +1117,7 @@ class SkillArtifactLifecycleService:
                     replacement_readiness=None,
                 )
                 return artifact
-        if artifact.status != "staged":
+        if artifact.status != SkillArtifactStatus.STAGED.value:
             raise ValidationError("Only staged skill artifacts can replace a selectable artifact.")
         if not self._skill_registry.has_skill(artifact.name):
             raise ValidationError("Skill artifact replacement requires an enabled skill name.")
@@ -1107,7 +1134,10 @@ class SkillArtifactLifecycleService:
             raise ValidationError("Skill artifact replacement requires an existing selectable artifact.")
         if existing_selectable.id == artifact.id:
             raise ValidationError("A skill artifact cannot replace itself.")
-        if existing_selectable.status not in {"active", "stable"}:
+        if existing_selectable.status not in {
+            SkillArtifactStatus.ACTIVE.value,
+            SkillArtifactStatus.STABLE.value
+        }:
             raise ValidationError("Only active or stable skill artifacts can be superseded.")
         if replacement_readiness.replace_readiness.status != "not_applicable":
             source_anchor_id = replacement_readiness.source_anchor.get("source_artifact_id")
@@ -1180,7 +1210,7 @@ class SkillArtifactLifecycleService:
         artifact = await self._artifact_repository.get_by_id(artifact_id)
         if artifact is None:
             raise NotFoundError(f"Skill artifact '{artifact_id}' was not found.")
-        if artifact.status == "stable":
+        if artifact.status == SkillArtifactStatus.STABLE.value:
             await self._audit_stabilize(
                 artifact,
                 event_type="skill.artifact.stabilize_reused",
@@ -1197,7 +1227,7 @@ class SkillArtifactLifecycleService:
                 evidence_started_at=None,
             )
             return artifact
-        if artifact.status != "active":
+        if artifact.status != SkillArtifactStatus.ACTIVE.value:
             raise ValidationError("Only active skill artifacts can be stabilized.")
         if not self._skill_registry.has_skill(artifact.name):
             raise ValidationError("Skill artifact stabilization requires an enabled skill name.")
@@ -1273,9 +1303,12 @@ class SkillArtifactLifecycleService:
         artifact = await self._get_artifact_for_deactivation(artifact_id)
         if artifact is None:
             raise NotFoundError(f"Skill artifact '{artifact_id}' was not found.")
-        if artifact.status == "deprecated":
+        if artifact.status == SkillArtifactStatus.DEPRECATED.value:
             raise ValidationError("Skill artifact is already deprecated.")
-        if artifact.status not in {"active", "stable"}:
+        if artifact.status not in {
+            SkillArtifactStatus.ACTIVE.value,
+            SkillArtifactStatus.STABLE.value
+        }:
             raise ValidationError("Only active or stable skill artifacts can be deactivated.")
         await self._validate_no_active_runtime_references(artifact)
 
@@ -1317,7 +1350,10 @@ class SkillArtifactLifecycleService:
                 previous_status=artifact.suppressed_previous_status,
             )
             return artifact
-        if artifact.status not in {"active", "stable"}:
+        if artifact.status not in {
+            SkillArtifactStatus.ACTIVE.value,
+            SkillArtifactStatus.STABLE.value
+        }:
             raise ValidationError("Only active or stable skill artifacts can be suppressed.")
 
         existing_suppressed = await self._get_suppressed_for_suppression(name=artifact.name, scope=artifact.scope)
@@ -1358,7 +1394,10 @@ class SkillArtifactLifecycleService:
         artifact = await self._get_artifact_for_suppression(artifact_id)
         if artifact is None:
             raise NotFoundError(f"Skill artifact '{artifact_id}' was not found.")
-        if artifact.status in {"active", "stable"} and artifact.suppressed_previous_status is None:
+        if artifact.status in {
+            SkillArtifactStatus.ACTIVE.value,
+            SkillArtifactStatus.STABLE.value
+        } and artifact.suppressed_previous_status is None:
             await self._audit_restore(
                 artifact,
                 event_type="skill.artifact.restore_reused",
@@ -1410,7 +1449,7 @@ class SkillArtifactLifecycleService:
         artifact = await self._get_artifact_for_archive(artifact_id)
         if artifact is None:
             raise NotFoundError(f"Skill artifact '{artifact_id}' was not found.")
-        if artifact.status == "archived":
+        if artifact.status == SkillArtifactStatus.ARCHIVED.value:
             await self._audit_archive(
                 artifact,
                 event_type="skill.artifact.archive_reused",
@@ -1420,7 +1459,7 @@ class SkillArtifactLifecycleService:
                 previous_status=artifact.status,
             )
             return artifact
-        if artifact.status != "deprecated":
+        if artifact.status != SkillArtifactStatus.DEPRECATED.value:
             raise ValidationError("Only deprecated skill artifacts can be archived.")
 
         previous_status = artifact.status
@@ -2938,7 +2977,12 @@ class SkillCuratorJobService:
         limit = max(self._config.artifact_scan_limit, 1)
         artifacts: list[SkillArtifact] = []
         seen_ids: set[str] = set()
-        for status in ("staged", "active", "stable", "deprecated"):
+        for status in (
+            SkillArtifactStatus.STAGED.value,
+            SkillArtifactStatus.ACTIVE.value,
+            SkillArtifactStatus.STABLE.value,
+            SkillArtifactStatus.DEPRECATED.value
+        ):
             remaining = limit - len(artifacts)
             if remaining <= 0:
                 break
@@ -2977,21 +3021,24 @@ class SkillCuratorJobService:
         window_key: str,
     ) -> list[str]:
         outcomes: list[str] = []
-        if artifact.status == "staged":
+        if artifact.status == SkillArtifactStatus.STAGED.value:
             staged_recommendation = await self._maybe_recommend_staged_replacement_action(
                 artifact=artifact,
                 window_key=window_key,
             )
             if staged_recommendation is not None:
                 outcomes.append(staged_recommendation)
-        if artifact.status == "active":
+        if artifact.status == SkillArtifactStatus.ACTIVE.value:
             promote = await self._maybe_recommend_promote(
                 artifact=artifact,
                 window_key=window_key,
             )
             if promote is not None:
                 outcomes.append(promote)
-        if artifact.status in {"active", "stable"}:
+        if artifact.status in {
+            SkillArtifactStatus.ACTIVE.value,
+            SkillArtifactStatus.STABLE.value
+        }:
             negative = await self._maybe_recommend_negative_review(
                 artifact=artifact,
                 now=now,
@@ -3018,7 +3065,7 @@ class SkillCuratorJobService:
             )
             if merge is not None:
                 outcomes.append(merge)
-        if artifact.status == "deprecated":
+        if artifact.status == SkillArtifactStatus.DEPRECATED.value:
             archive = await self._maybe_recommend_archive(
                 artifact=artifact,
                 now=now,
@@ -3583,7 +3630,7 @@ class SkillCuratorJobService:
         }
         return {
             "artifact_id": readiness.artifact_id,
-            "artifact_status": "staged",
+            "artifact_status": SkillArtifactStatus.STAGED.value,
             "source_proposal_id": readiness.proposal_id,
             "proposal_source": readiness.proposal_source,
             "ready_action": ready_action,

@@ -589,7 +589,7 @@
   - prior-step output 引用已收紧到工具输出白名单，当前主要开放 `partial_replan.created_task_ids[0]`
   - `chat / hint / quiz / plan_generation` 的 rollout observation 现已在成功路径接通：`chat / hint` 使用 assistant message id，`quiz` 使用 quiz id，`plan_generation` 使用成功完成的 workflow run id；`plan_generation` 的 observation 调度点在 plan/task 持久化成功之后，而不是 planner draft 构建阶段
   - task/autonomy usage attribution 已在 service 内统一收口；`review_scheduling / assessment_generation / replan` 不再各自维护分散的 usage payload 拼装逻辑
-  - allowlisted autonomy workflow surface 的 rollout observation 已在成功路径接通；当前覆盖 `review_scheduling / assessment_generation / replan`，并以 workflow run 或 job 作为 `source_ref`
+  - allowlisted autonomy workflow surface 的 rollout observation 已对 `review_scheduling / assessment_generation / replan` 接通成功路径，并对有真实 workflow run anchor 的 runtime failure 接通失败路径；当前统一以 workflow run 作为 `source_ref`，而 `skipped` 与 validation / precondition failure 仍保持 usage-only
   - rollout auto-governance 已支持环境变量配置开关与 promote / rollback surface allowlist，并已补 Prometheus / Grafana / alert 基线
   - branching / looping / DAG / 通用 interpreter 仍未实现
 

@@ -189,6 +189,22 @@ class AutonomousTaskService:
         commit: bool = True,
         scheduled_job_id: str | None = None,
     ) -> StudyPlanResponse:
+        plan, _ = await self._generate_plan_with_run_context(
+            goal_id=goal_id,
+            trigger_source=trigger_source,
+            commit=commit,
+            scheduled_job_id=scheduled_job_id,
+        )
+        return plan
+
+    async def _generate_plan_with_run_context(
+        self,
+        *,
+        goal_id: str,
+        trigger_source: str,
+        commit: bool = True,
+        scheduled_job_id: str | None = None,
+    ) -> tuple[StudyPlanResponse, str]:
         goal = await self._require_goal(goal_id)
         active_plan = await self._study_plan_repository.get_active_by_goal(goal.id)
         if active_plan is not None and trigger_source not in {"manual_replan", "task_failed", "task_skipped"}:
@@ -287,7 +303,7 @@ class AutonomousTaskService:
                 study_plan_id=active_plan.id if active_plan is not None else None,
             )
             raise
-        return await self.get_plan(materialized.study_plan.id)
+        return await self.get_plan(materialized.study_plan.id), run.id
 
     async def list_plans(self, goal_id: str) -> list[StudyPlanResponse]:
         await self._require_goal(goal_id)
@@ -969,21 +985,6 @@ class AutonomousTaskService:
             raise ValidationError("Missing source_task_id for review scheduling job.")
         source_task = await self._require_task(source_task_id)
         goal = await self._require_goal(source_task.learner_goal_id)
-        if source_task.task_type == "review":
-            await self._record_review_skill_usage(
-                goal=goal,
-                source_task=source_task,
-                workflow_run_id=None,
-                outcome_status="skipped",
-                trigger_source=job.trigger_source,
-                output_summary="source task is already a review task",
-                metadata={
-                    "autonomy_job_id": job.id,
-                    "source_task_id": source_task.id,
-                    "skip_reason": "source_task_already_review",
-                },
-            )
-            return None
         runtime_plan = await self._resolve_autonomy_execution_plan(
             learner_goal_id=goal.id,
             skill_name="schedule_review",
@@ -998,6 +999,25 @@ class AutonomousTaskService:
             goal=goal,
             source_task=source_task,
         )
+        if source_task.task_type == "review":
+            await self._record_review_skill_usage(
+                goal=goal,
+                source_task=source_task,
+                workflow_run_id=None,
+                outcome_status="skipped",
+                trigger_source=job.trigger_source,
+                output_summary="source task is already a review task",
+                resolution=skill_resolution,
+                metadata=self._with_skill_execution_metadata(
+                    runtime_plan,
+                    metadata={
+                        "autonomy_job_id": job.id,
+                        "source_task_id": source_task.id,
+                        "skip_reason": "source_task_already_review",
+                    },
+                ),
+            )
+            return None
         run = await self._workflow_run_service.create_run(
             workflow_type="review_scheduling",
             trigger_source=job.trigger_source,
@@ -1136,6 +1156,12 @@ class AutonomousTaskService:
                 ),
             )
             await self._workflow_run_service.fail_run(run=run, error_code=type(exc).__name__)
+            await self._schedule_runtime_failure_rollout_observation(
+                learner_goal_id=goal.id,
+                surface="review_scheduling",
+                trigger_source=job.trigger_source,
+                source_ref=run.id,
+            )
             raise
 
     async def _process_reflection_proposal_evaluation_job(self, job: ScheduledAutonomyJob) -> str | None:
@@ -1244,23 +1270,6 @@ class AutonomousTaskService:
     async def _process_replan_job(self, job: ScheduledAutonomyJob) -> str | None:
         goal = await self._require_goal(job.learner_goal_id)
         mode = str(job.payload.get("mode") or "partial")
-        if mode not in AUTONOMY_REPLAN_MODES:
-            await self._record_replan_skill_usage(
-                goal=goal,
-                source_task=None,
-                workflow_run_id=None,
-                outcome_status="failed",
-                trigger_source=job.trigger_source,
-                topic_key=str(job.payload.get("topic_focus") or goal.subject),
-                input_summary=goal.subject,
-                error_code="ValidationError",
-                metadata={
-                    "autonomy_job_id": job.id,
-                    "mode": mode,
-                    "error": "Unsupported autonomy replan mode.",
-                },
-            )
-            raise ValidationError("Unsupported autonomy replan mode.")
         topic_key = str(job.payload.get("topic_focus") or goal.subject)
         runtime_plan = await self._resolve_autonomy_execution_plan(
             learner_goal_id=goal.id,
@@ -1272,11 +1281,34 @@ class AutonomousTaskService:
             trigger_source=job.trigger_source,
             include_staged=True,
         )
+        skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_replan_skill_for_runtime(
+            goal=goal,
+            resource_id=job.id,
+        )
+        if mode not in AUTONOMY_REPLAN_MODES:
+            await self._record_replan_skill_usage(
+                goal=goal,
+                source_task=None,
+                workflow_run_id=None,
+                outcome_status="failed",
+                trigger_source=job.trigger_source,
+                topic_key=topic_key,
+                input_summary=goal.subject,
+                error_code="ValidationError",
+                resolution=skill_resolution,
+                metadata=self._with_skill_execution_metadata(
+                    runtime_plan,
+                    metadata={
+                        "autonomy_job_id": job.id,
+                        "mode": mode,
+                        "error": "Unsupported autonomy replan mode.",
+                    },
+                ),
+            )
+            raise ValidationError("Unsupported autonomy replan mode.")
         if mode == "full":
-            skill_resolution = None
             try:
-                skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_replan_skill_for_runtime(goal=goal, resource_id=job.id)
-                await self.generate_plan(
+                _, workflow_run_id = await self._generate_plan_with_run_context(
                     goal_id=goal.id,
                     trigger_source=job.trigger_source,
                     commit=False,
@@ -1286,7 +1318,7 @@ class AutonomousTaskService:
                 await self._record_replan_skill_usage(
                     goal=goal,
                     source_task=None,
-                    workflow_run_id=None,
+                    workflow_run_id=workflow_run_id,
                     outcome_status="completed",
                     trigger_source=job.trigger_source,
                     topic_key=topic_key,
@@ -1307,7 +1339,7 @@ class AutonomousTaskService:
                     learner_goal_id=goal.id,
                     surface="replan",
                     trigger_source=job.trigger_source,
-                    source_ref=job.id,
+                    source_ref=workflow_run_id,
                 )
                 await self._reflection_service.trigger_reflection(
                     ReflectionTriggerRequest(
@@ -1319,9 +1351,10 @@ class AutonomousTaskService:
                         trigger_source="plan_replanned",
                         reflection_depth=1,
                         source_attempt_id=job.id,
+                        workflow_run_id=workflow_run_id,
                     )
                 )
-                return None
+                return workflow_run_id
             except Exception as exc:
                 await self._record_replan_skill_usage(
                     goal=goal,
@@ -1364,10 +1397,9 @@ class AutonomousTaskService:
             include_staged=True,
         )
         if source_task is None:
-            skill_resolution = None
             try:
                 skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_replan_skill_for_runtime(goal=goal, resource_id=job.id)
-                await self.generate_plan(
+                _, workflow_run_id = await self._generate_plan_with_run_context(
                     goal_id=goal.id,
                     trigger_source=job.trigger_source,
                     commit=False,
@@ -1377,7 +1409,7 @@ class AutonomousTaskService:
                 await self._record_replan_skill_usage(
                     goal=goal,
                     source_task=None,
-                    workflow_run_id=None,
+                    workflow_run_id=workflow_run_id,
                     outcome_status="completed",
                     trigger_source=job.trigger_source,
                     topic_key=source_topic_key,
@@ -1399,9 +1431,9 @@ class AutonomousTaskService:
                     learner_goal_id=goal.id,
                     surface="replan",
                     trigger_source=job.trigger_source,
-                    source_ref=job.id,
+                    source_ref=workflow_run_id,
                 )
-                return None
+                return workflow_run_id
             except Exception as exc:
                 await self._record_replan_skill_usage(
                     goal=goal,
@@ -1428,10 +1460,9 @@ class AutonomousTaskService:
                 raise
         active_plan = await self._study_plan_repository.get_active_by_goal(goal.id)
         if active_plan is None:
-            skill_resolution = None
             try:
                 skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_replan_skill_for_runtime(goal=goal, resource_id=source_task.id)
-                await self.generate_plan(
+                _, workflow_run_id = await self._generate_plan_with_run_context(
                     goal_id=goal.id,
                     trigger_source=job.trigger_source,
                     commit=False,
@@ -1441,7 +1472,7 @@ class AutonomousTaskService:
                 await self._record_replan_skill_usage(
                     goal=goal,
                     source_task=source_task,
-                    workflow_run_id=None,
+                    workflow_run_id=workflow_run_id,
                     outcome_status="completed",
                     trigger_source=job.trigger_source,
                     topic_key=source_topic_key,
@@ -1464,9 +1495,9 @@ class AutonomousTaskService:
                     learner_goal_id=goal.id,
                     surface="replan",
                     trigger_source=job.trigger_source,
-                    source_ref=job.id,
+                    source_ref=workflow_run_id,
                 )
-                return None
+                return workflow_run_id
             except Exception as exc:
                 await self._record_replan_skill_usage(
                     goal=goal,
@@ -1709,29 +1740,18 @@ class AutonomousTaskService:
                 ),
             )
             await self._workflow_run_service.fail_run(run=run, error_code=type(exc).__name__)
+            await self._schedule_runtime_failure_rollout_observation(
+                learner_goal_id=goal.id,
+                surface="replan",
+                trigger_source=job.trigger_source,
+                source_ref=run.id,
+            )
             raise
 
     async def _process_assessment_generation_job(self, job: ScheduledAutonomyJob) -> str | None:
         goal = await self._require_goal(job.learner_goal_id)
         topic_key = str(job.payload.get("topic_focus") or goal.subject)
         source_task_id = str(job.payload.get("source_task_id") or "")
-        active_plan = await self._study_plan_repository.get_active_by_goal(goal.id)
-        if active_plan is None:
-            await self._record_assessment_skill_usage(
-                goal=goal,
-                workflow_run_id=None,
-                outcome_status="skipped",
-                trigger_source=job.trigger_source,
-                topic_key=topic_key,
-                input_summary=topic_key,
-                output_summary="active plan missing",
-                metadata={
-                    "autonomy_job_id": job.id,
-                    "source_task_id": source_task_id or None,
-                    "skip_reason": "active_plan_missing",
-                },
-            )
-            return None
         runtime_plan = await self._resolve_autonomy_execution_plan(
             learner_goal_id=goal.id,
             skill_name="create_quiz",
@@ -1742,7 +1762,31 @@ class AutonomousTaskService:
             trigger_source=job.trigger_source,
             include_staged=True,
         )
-        skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_assessment_skill_for_runtime(goal=goal, resource_id=source_task_id or job.id)
+        skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_assessment_skill_for_runtime(
+            goal=goal,
+            resource_id=source_task_id or job.id,
+        )
+        active_plan = await self._study_plan_repository.get_active_by_goal(goal.id)
+        if active_plan is None:
+            await self._record_assessment_skill_usage(
+                goal=goal,
+                workflow_run_id=None,
+                outcome_status="skipped",
+                trigger_source=job.trigger_source,
+                topic_key=topic_key,
+                input_summary=topic_key,
+                output_summary="active plan missing",
+                resolution=skill_resolution,
+                metadata=self._with_skill_execution_metadata(
+                    runtime_plan,
+                    metadata={
+                        "autonomy_job_id": job.id,
+                        "source_task_id": source_task_id or None,
+                        "skip_reason": "active_plan_missing",
+                    },
+                ),
+            )
+            return None
         run = await self._workflow_run_service.create_run(
             workflow_type="assessment_generation",
             trigger_source=job.trigger_source,
@@ -1880,6 +1924,12 @@ class AutonomousTaskService:
                 ),
             )
             await self._workflow_run_service.fail_run(run=run, error_code=type(exc).__name__)
+            await self._schedule_runtime_failure_rollout_observation(
+                learner_goal_id=goal.id,
+                surface="assessment_generation",
+                trigger_source=job.trigger_source,
+                source_ref=run.id,
+            )
             raise
 
     async def _process_daily_task_materialization_job(self, job: ScheduledAutonomyJob) -> str | None:
@@ -3323,6 +3373,23 @@ class AutonomousTaskService:
         if self._rollout_observation_scheduler is None:
             return
         await self._rollout_observation_scheduler.schedule_active(
+            learner_goal_id=learner_goal_id,
+            surface=surface,
+            trigger_source=trigger_source,
+            source_ref=source_ref,
+        )
+
+    async def _schedule_runtime_failure_rollout_observation(
+        self,
+        *,
+        learner_goal_id: str,
+        surface: str,
+        trigger_source: str,
+        source_ref: str | None,
+    ) -> None:
+        if not source_ref:
+            return
+        await self._schedule_surface_rollout_observation(
             learner_goal_id=learner_goal_id,
             surface=surface,
             trigger_source=trigger_source,

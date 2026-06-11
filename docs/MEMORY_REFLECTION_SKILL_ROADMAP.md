@@ -444,7 +444,7 @@ skill health dashboard / alert 已完成基线接入，当前可观测 skill usa
 - `replan` 主 surface 已补 sequence 级 usage metadata、step 级 audit 与 sandbox summary；prior-step output 引用已收紧到工具输出白名单
 - `chat / hint / quiz / plan_generation` 的 rollout observation 已在成功路径接通：`chat / hint` 使用 assistant message id，`quiz` 使用 quiz id，`plan_generation` 使用成功 workflow run id；其中 `plan_generation` 的 observation 只在 plan/task 持久化成功后调度
 - task/autonomy usage attribution 已统一收口到公共 helper；`review_scheduling / assessment_generation / replan` 共用同一套 usage payload shaping
-- allowlisted autonomy workflow surface 的 rollout observation 已在成功路径接通；当前覆盖 `review_scheduling / assessment_generation / replan`
+- allowlisted autonomy workflow surface 的 rollout observation 已对 `review_scheduling / assessment_generation / replan` 接通成功路径，并对有真实 workflow run anchor 的 runtime failure 接通失败路径；`skipped` 与 validation / precondition failure 仍保持 usage-only
 - `tool_plan` 仍不是通用 runtime tool orchestrator；branching、looping、DAG 和更通用的多步编排未实现
 
 ---
