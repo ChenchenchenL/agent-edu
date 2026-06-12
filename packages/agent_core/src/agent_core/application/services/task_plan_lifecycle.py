@@ -185,21 +185,99 @@ class TaskPlanLifecycleService:
         *,
         task_id: str,
         payload: UpdateDailyTaskStatusRequest,
+        audit_service,
+        post_update_callback=None,
     ) -> DailyTaskResponse:
-        """Update a daily task's status.
+        """Update a daily task's status with validation and audit logging.
 
-        Note: This method is a placeholder. Real implementation
-        with audit logging remains in AutonomousTaskService.
+        This is a simplified implementation focusing on core status update logic.
+        Complex followup actions (reflection, memory, rollout observation) are
+        handled via optional callback to avoid circular dependencies during migration.
 
         Args:
             task_id: Daily task identifier.
-            payload: Status update request.
+            payload: Status update request with new status and optional note.
+            audit_service: Audit service for logging status changes.
+            post_update_callback: Optional async callback(task) for complex followups.
 
         Returns:
             Updated daily task response.
+
+        Raises:
+            ValidationError: If status transition is invalid.
+            NotFoundError: If task does not exist.
         """
-        # TODO: Migrate update_task_status implementation from AutonomousTaskService
-        raise NotImplementedError("update_task_status migration pending")
+        from agent_core.domain.errors import ValidationError
+        from agent_core.infrastructure.observability.metrics import observe_daily_task_status_transition
+
+        # Validate status transition
+        if payload.status not in {"completed", "skipped", "failed"}:
+            raise ValidationError("Only completed, skipped, or failed status updates are supported.")
+
+        task = await self._require_task(task_id)
+
+        if task.status not in {"pending", "in_progress"}:
+            raise ValidationError("Only pending or in-progress tasks can be updated.")
+
+        updated_task = task.with_status(payload.status, result_note=payload.result_note)
+
+        try:
+            # Core update: persist task status
+            await self._daily_task_repository.update(updated_task)
+
+            # Metrics observation
+            observe_daily_task_status_transition(
+                from_status=task.status,
+                to_status=updated_task.status,
+                task_type=updated_task.task_type,
+            )
+
+            # Audit logging
+            await audit_service.record(
+                event_type="daily_task.status.updated",
+                resource_type="daily_task",
+                resource_id=task.id,
+                actor="learner",
+                event_data={
+                    "daily_task_id": task.id,
+                    "previous_status": task.status,
+                    "new_status": updated_task.status,
+                    "result_note": payload.result_note,
+                },
+            )
+
+            # Optional complex followups (reflection, memory, etc.)
+            if post_update_callback is not None:
+                await post_update_callback(updated_task)
+
+            await self._db_session.commit()
+
+        except Exception as exc:
+            await self._db_session.rollback()
+
+            # Durable audit log for failures
+            await audit_service.record_durable(
+                event_type="daily_task.status.update.failed",
+                resource_type="daily_task",
+                resource_id=task.id,
+                actor="learner",
+                event_data={
+                    "daily_task_id": task.id,
+                    "workflow_run_id": task.last_workflow_run_id,
+                    "previous_status": task.status,
+                    "requested_status": payload.status,
+                    "result_note": payload.result_note,
+                    "error_code": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            raise
+
+        # Refresh and return updated task
+        refreshed_task = await self._daily_task_repository.get_by_id(task.id)
+        if refreshed_task is None:
+            raise NotFoundError(f"Daily task '{task.id}' was not found after update.")
+        return DailyTaskResponse.model_validate(refreshed_task)
 
     async def list_workflow_runs(self, goal_id: str) -> list[WorkflowRunResponse]:
         """List workflow runs for a goal.
@@ -252,6 +330,23 @@ class TaskPlanLifecycleService:
         if goal is None:
             raise NotFoundError(f"Learner goal '{goal_id}' was not found.")
         return goal
+
+    async def _require_task(self, task_id: str):
+        """Require task to exist, raising NotFoundError otherwise.
+
+        Args:
+            task_id: Daily task identifier.
+
+        Returns:
+            The daily task entity.
+
+        Raises:
+            NotFoundError: If task does not exist.
+        """
+        task = await self._daily_task_repository.get_by_id(task_id)
+        if task is None:
+            raise NotFoundError(f"Daily task '{task_id}' was not found.")
+        return task
 
     async def _to_plan_response(self, plan: StudyPlan) -> StudyPlanResponse:
         """Convert StudyPlan entity to response DTO with stages.
