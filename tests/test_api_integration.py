@@ -98,7 +98,7 @@ def _run_autonomy_worker_once() -> None:
     async def run_worker_once() -> None:
         session_factory = api_dependencies.get_session_factory()
         async with session_factory() as db:
-            service = api_dependencies.get_task_service(db)
+            service = api_dependencies.get_task_autonomy_scheduling_service(db)
             await service.run_due_autonomy_jobs(raise_on_error=True, lease_owner="test-worker")
 
     loop = asyncio.new_event_loop()

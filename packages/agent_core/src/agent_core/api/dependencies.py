@@ -61,6 +61,10 @@ from agent_core.application.services.skills import (
 )
 from agent_core.application.services.strategy_cards import StrategyCardService
 from agent_core.application.services.task import AutonomousTaskService
+from agent_core.application.services.task_autonomy_scheduling import TaskAutonomySchedulingService
+from agent_core.application.services.task_execution import TaskExecutionService
+from agent_core.application.services.task_plan_lifecycle import TaskPlanLifecycleService
+from agent_core.application.services.task_runtime_skill import TaskRuntimeSkillService
 from agent_core.application.services.tool_plan_runtime import ToolPlanRuntimeExecutor
 from agent_core.application.services.workflow import WorkflowRunService
 from agent_core.application.services.workspace import WorkspaceService
@@ -68,6 +72,7 @@ from agent_core.application.tools.registry import HttpToolSpec, InternalToolRegi
 from agent_core.application.skills.registry import SkillRegistry
 from agent_core.domain.errors import ConfigurationError
 from agent_core.infrastructure.config.settings import Settings, get_settings
+from agent_core.infrastructure.container import ApplicationContainer
 from agent_core.infrastructure.db.repositories import (
     AuditRepository,
     BehaviorMemoryEmbeddingRepository,
@@ -842,7 +847,7 @@ def get_reflection_proposal_rollout_service(session: AsyncSession) -> Reflection
     )
 
 
-def get_task_service(session: AsyncSession) -> AutonomousTaskService:
+def _build_autonomous_task_core_service(session: AsyncSession) -> AutonomousTaskService:
     audit_service = get_audit_service(session)
     tool_registry = InternalToolRegistry(audit_service=audit_service)
     settings = get_settings()
@@ -901,6 +906,38 @@ def get_task_service(session: AsyncSession) -> AutonomousTaskService:
     )
 
 
+@lru_cache(maxsize=1)
+def get_application_container() -> ApplicationContainer:
+    return ApplicationContainer(
+        task_core_builder=_build_autonomous_task_core_service,
+        memory_service_builder=get_memory_service,
+    )
+
+
+def _scope(session: AsyncSession):
+    return get_application_container().scope(session)
+
+
+def get_task_service(session: AsyncSession) -> AutonomousTaskService:
+    return _scope(session).task_services().core
+
+
+def get_task_plan_lifecycle_service(session: AsyncSession) -> TaskPlanLifecycleService:
+    return _scope(session).task_services().plan_lifecycle
+
+
+def get_task_execution_service(session: AsyncSession) -> TaskExecutionService:
+    return _scope(session).task_services().execution
+
+
+def get_task_autonomy_scheduling_service(session: AsyncSession) -> TaskAutonomySchedulingService:
+    return _scope(session).task_services().autonomy_scheduling
+
+
+def get_task_runtime_skill_service(session: AsyncSession) -> TaskRuntimeSkillService:
+    return _scope(session).task_services().runtime_skill
+
+
 def get_dynamic_runtime_registry_service(session: AsyncSession) -> DynamicRuntimeRegistryService:
     return DynamicRuntimeRegistryService(
         goal_skill_binding_resolver=get_goal_skill_binding_resolver(session),
@@ -909,13 +946,4 @@ def get_dynamic_runtime_registry_service(session: AsyncSession) -> DynamicRuntim
 
 
 def get_workspace_service(session: AsyncSession) -> WorkspaceService:
-    return WorkspaceService(
-        learner_profile_repository=LearnerProfileRepository(session),
-        learner_goal_repository=LearnerGoalRepository(session),
-        study_plan_repository=StudyPlanRepository(session),
-        session_repository=SessionRepository(session),
-        workflow_run_repository=WorkflowRunRepository(session),
-        goal_autonomy_state_repository=GoalAutonomyStateRepository(session),
-        task_service=get_task_service(session),
-        memory_service=get_memory_service(session),
-    )
+    return _scope(session).workspace_service()

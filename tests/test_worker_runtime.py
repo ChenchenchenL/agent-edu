@@ -70,7 +70,7 @@ class _FakeSkillCuratorService:
 @pytest.mark.asyncio
 async def test_worker_run_once_handles_empty_queue(monkeypatch):
     monkeypatch.setattr("apps.worker.main.get_session_factory", lambda: _FakeSessionFactory())
-    monkeypatch.setattr("apps.worker.main.get_task_service", lambda session: _FakeService())
+    monkeypatch.setattr("apps.worker.main.get_task_autonomy_scheduling_service", lambda session: _FakeService())
 
     processed = await run_once()
 

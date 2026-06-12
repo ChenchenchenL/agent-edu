@@ -7,7 +7,12 @@ from agent_core.api.access_control import (
     require_task_access,
     require_workflow_run_access,
 )
-from agent_core.api.dependencies import get_access_context, get_db_session, get_task_service
+from agent_core.api.dependencies import (
+    get_access_context,
+    get_db_session,
+    get_task_execution_service,
+    get_task_plan_lifecycle_service,
+)
 from agent_core.domain.schemas.planning import (
     DailyTaskResponse,
     ExecuteDailyTaskResponse,
@@ -26,7 +31,7 @@ async def get_study_plan(
     context: AccessContext = Depends(get_access_context),
 ) -> StudyPlanResponse:
     await require_plan_access(plan_id, context, session)
-    service = get_task_service(session)
+    service = get_task_plan_lifecycle_service(session)
     return await service.get_plan(plan_id)
 
 
@@ -37,7 +42,7 @@ async def get_task(
     context: AccessContext = Depends(get_access_context),
 ) -> DailyTaskResponse:
     await require_task_access(task_id, context, session)
-    service = get_task_service(session)
+    service = get_task_plan_lifecycle_service(session)
     return await service.get_task(task_id)
 
 
@@ -48,7 +53,7 @@ async def execute_task(
     context: AccessContext = Depends(get_access_context),
 ) -> ExecuteDailyTaskResponse:
     await require_task_access(task_id, context, session)
-    service = get_task_service(session)
+    service = get_task_execution_service(session)
     return await service.execute_task(task_id)
 
 
@@ -60,7 +65,7 @@ async def update_task_status(
     context: AccessContext = Depends(get_access_context),
 ) -> DailyTaskResponse:
     await require_task_access(task_id, context, session)
-    service = get_task_service(session)
+    service = get_task_plan_lifecycle_service(session)
     return await service.update_task_status(task_id=task_id, payload=payload)
 
 
@@ -71,5 +76,5 @@ async def get_workflow_run(
     context: AccessContext = Depends(get_access_context),
 ) -> WorkflowRunResponse:
     await require_workflow_run_access(run_id, context, session)
-    service = get_task_service(session)
+    service = get_task_plan_lifecycle_service(session)
     return await service.get_workflow_run(run_id)

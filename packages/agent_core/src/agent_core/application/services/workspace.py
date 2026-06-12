@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 
 from agent_core.application.services.memory import MemoryService
+from agent_core.application.services.task_autonomy_scheduling import TaskAutonomySchedulingService
+from agent_core.application.services.task_plan_lifecycle import TaskPlanLifecycleService
 from agent_core.domain.entities.goal import LearnerGoal
 from agent_core.domain.entities.planning import StudyPlan
 from agent_core.domain.errors import NotFoundError
@@ -24,7 +26,6 @@ from agent_core.infrastructure.db.repositories import (
     StudyPlanRepository,
     WorkflowRunRepository,
 )
-from agent_core.application.services.task import AutonomousTaskService
 
 
 class WorkspaceService:
@@ -37,7 +38,8 @@ class WorkspaceService:
         session_repository: SessionRepository,
         workflow_run_repository: WorkflowRunRepository,
         goal_autonomy_state_repository: GoalAutonomyStateRepository,
-        task_service: AutonomousTaskService,
+        task_plan_lifecycle_service: TaskPlanLifecycleService,
+        task_autonomy_scheduling_service: TaskAutonomySchedulingService,
         memory_service: MemoryService,
     ) -> None:
         self._learner_profile_repository = learner_profile_repository
@@ -46,7 +48,8 @@ class WorkspaceService:
         self._session_repository = session_repository
         self._workflow_run_repository = workflow_run_repository
         self._goal_autonomy_state_repository = goal_autonomy_state_repository
-        self._task_service = task_service
+        self._task_plan_lifecycle_service = task_plan_lifecycle_service
+        self._task_autonomy_scheduling_service = task_autonomy_scheduling_service
         self._memory_service = memory_service
 
     async def get_workspace_summary(
@@ -83,17 +86,17 @@ class WorkspaceService:
 
         active_plan = await self._study_plan_repository.get_active_by_goal(goal.id)
         today = date.today()
-        today_tasks = await self._task_service.list_tasks(
+        today_tasks = await self._task_plan_lifecycle_service.list_tasks(
             goal.id,
             statuses={"pending", "in_progress"},
             scheduled_to=today,
         )
-        review_tasks = await self._task_service.list_tasks(
+        review_tasks = await self._task_plan_lifecycle_service.list_tasks(
             goal.id,
             statuses={"pending", "in_progress"},
             task_type="review",
         )
-        milestone_tasks = await self._task_service.list_tasks(
+        milestone_tasks = await self._task_plan_lifecycle_service.list_tasks(
             goal.id,
             statuses={"pending", "in_progress"},
             task_type="milestone",
@@ -107,7 +110,10 @@ class WorkspaceService:
             for item in await self._session_repository.list_by_goal(goal.id, limit=5)
         ]
         autonomy_state = await self._goal_autonomy_state_repository.get_by_goal(goal.id)
-        autonomy_jobs = [ScheduledAutonomyJobResponse.model_validate(item) for item in await self._task_service.list_autonomy_jobs(goal.id)]
+        autonomy_jobs = [
+            ScheduledAutonomyJobResponse.model_validate(item)
+            for item in await self._task_autonomy_scheduling_service.list_autonomy_jobs(goal.id)
+        ]
         knowledge_memories = await self._memory_service.browse_knowledge_memories(
             learner_profile_id=learner_profile_id,
             learner_goal_id=goal.id,
@@ -174,4 +180,4 @@ class WorkspaceService:
     async def _to_plan_response(self, active_plan: StudyPlan | None) -> StudyPlanResponse | None:
         if active_plan is None:
             return None
-        return await self._task_service.get_plan(active_plan.id)
+        return await self._task_plan_lifecycle_service.get_plan(active_plan.id)
