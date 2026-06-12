@@ -75,15 +75,37 @@ class RequestScopeContainer:
         return self._memory_service
 
     def task_services(self) -> TaskServiceBundle:
-        """Get the scoped task service bundle."""
+        """Get the scoped task service bundle with real dependencies."""
         if self._task_services is None:
+            # Build specialized services with real dependencies
+            from agent_core.infrastructure.db.repositories import (
+                DailyTaskRepository,
+                PlanStageRepository,
+            )
+
+            plan_lifecycle = TaskPlanLifecycleService(
+                db_session=self._session,
+                goal_repository=LearnerGoalRepository(self._session),
+                study_plan_repository=StudyPlanRepository(self._session),
+                plan_stage_repository=PlanStageRepository(self._session),
+                daily_task_repository=DailyTaskRepository(self._session),
+                workflow_run_repository=WorkflowRunRepository(self._session),
+            )
+
+            # Build legacy core service (still used by other facades during migration)
             core = self._task_core_builder(self._session)
+
+            # Other facades still delegate to core (migration pending)
+            execution = TaskExecutionService(core=core)
+            autonomy_scheduling = TaskAutonomySchedulingService(core=core)
+            runtime_skill = TaskRuntimeSkillService(core=core)
+
             self._task_services = TaskServiceBundle(
                 core=core,
-                plan_lifecycle=TaskPlanLifecycleService(core=core),
-                execution=TaskExecutionService(core=core),
-                autonomy_scheduling=TaskAutonomySchedulingService(core=core),
-                runtime_skill=TaskRuntimeSkillService(core=core),
+                plan_lifecycle=plan_lifecycle,
+                execution=execution,
+                autonomy_scheduling=autonomy_scheduling,
+                runtime_skill=runtime_skill,
             )
         return self._task_services
 
