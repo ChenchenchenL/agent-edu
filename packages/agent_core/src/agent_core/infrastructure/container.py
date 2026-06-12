@@ -77,26 +77,68 @@ class RequestScopeContainer:
     def task_services(self) -> TaskServiceBundle:
         """Get the scoped task service bundle with real dependencies."""
         if self._task_services is None:
-            # Build specialized services with real dependencies
+            # Import dependencies
+            from agent_core.application.services.audit import AuditService
+            from agent_core.application.services.chat import ChatService
+            from agent_core.application.services.quiz import QuizService
+            from agent_core.application.services.session import SessionService
+            from agent_core.application.services.workflow import WorkflowRunService
             from agent_core.infrastructure.db.repositories import (
+                AuditRepository,
                 DailyTaskRepository,
                 PlanStageRepository,
+                SessionRepository,
+                SessionMessageRepository,
             )
 
+            # Repositories
+            goal_repository = LearnerGoalRepository(self._session)
+            study_plan_repository = StudyPlanRepository(self._session)
+            daily_task_repository = DailyTaskRepository(self._session)
+            workflow_run_repository = WorkflowRunRepository(self._session)
+
+            # Services (Protocol-based)
+            session_service = SessionService(
+                SessionRepository(self._session),
+                SessionMessageRepository(self._session),
+            )
+            chat_service = ChatService(session_service)
+            quiz_service = QuizService(session_service)
+            workflow_run_service = WorkflowRunService(workflow_run_repository)
+
+            # Audit service (simplified - no session_factory for now)
+            audit_service = AuditService(
+                AuditRepository(self._session),
+                None,  # session_factory - optional
+            )
+
+            # Build TaskPlanLifecycleService (real implementation)
             plan_lifecycle = TaskPlanLifecycleService(
                 db_session=self._session,
-                goal_repository=LearnerGoalRepository(self._session),
-                study_plan_repository=StudyPlanRepository(self._session),
+                goal_repository=goal_repository,
+                study_plan_repository=study_plan_repository,
                 plan_stage_repository=PlanStageRepository(self._session),
-                daily_task_repository=DailyTaskRepository(self._session),
-                workflow_run_repository=WorkflowRunRepository(self._session),
+                daily_task_repository=daily_task_repository,
+                workflow_run_repository=workflow_run_repository,
+            )
+
+            # Build TaskExecutionService (real implementation)
+            execution = TaskExecutionService(
+                db_session=self._session,
+                goal_repository=goal_repository,
+                daily_task_repository=daily_task_repository,
+                session_service=session_service,
+                chat_service=chat_service,
+                quiz_service=quiz_service,
+                workflow_run_service=workflow_run_service,
+                audit_service=audit_service,
+                failure_reflection_callback=None,  # TODO: wire reflection service
             )
 
             # Build legacy core service (still used by other facades during migration)
             core = self._task_core_builder(self._session)
 
             # Other facades still delegate to core (migration pending)
-            execution = TaskExecutionService(core=core)
             autonomy_scheduling = TaskAutonomySchedulingService(core=core)
             runtime_skill = TaskRuntimeSkillService(core=core)
 
