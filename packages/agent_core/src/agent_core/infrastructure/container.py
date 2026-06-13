@@ -150,14 +150,18 @@ class RequestScopeContainer:
                 failure_reflection_callback=None,  # TODO: wire reflection service
             )
 
-            # Other facades still delegate to core (migration pending)
+            # Build TaskAutonomySchedulingService (partial real implementation with callbacks)
             autonomy_scheduling = TaskAutonomySchedulingService(
                 db_session=self._session,
                 goal_repository=goal_repository,
                 goal_autonomy_state_repository=GoalAutonomyStateRepository(self._session),
                 learner_availability_repository=core._learner_availability_repository,
                 learner_topic_mastery_repository=core._learner_topic_mastery_repository,
-                core=core,
+                autonomy_job_repository=core._autonomy_job_repository,
+                audit_service=audit_service,
+                sync_goal_state_callback=core._sync_goal_state,
+                ensure_materialization_job_callback=core._ensure_daily_materialization_job,
+                validate_timezone_callback=core._validate_timezone,
             )
             runtime_skill = TaskRuntimeSkillService(core=core)
 
