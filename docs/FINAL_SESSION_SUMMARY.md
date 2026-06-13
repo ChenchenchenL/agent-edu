@@ -4,6 +4,15 @@
 
 本次会话成功完成了Phase 3架构重构的**核心基础设施**和**2个完整服务迁移**。
 
+> 修正说明（2026-06-12）：
+> 这份总结原先把运行时状态写得过满。当前真实状态是：
+> - `TaskPlanLifecycleService`：6 个读方法、`update_task_status()` 主路径、`generate_plan()`
+>   主流程都已真实迁移；attempt/mastery/post-update 已抽到独立 support service；
+>   goal state 同步、rollout 观测、workflow failure reflection 仍通过 callback 协调
+> - `TaskExecutionService`：真实实现代码存在，运行时 wiring 已修复；其依赖复用 legacy core
+>   已构造的服务实例，而不是完全独立装配
+> 因此，这一阶段应视为“主要 write-path 已 cutover，但深层协作边界仍待继续下沉/清理”
+
 ---
 
 ## ✅ 完成任务清单
@@ -14,9 +23,9 @@
 ### Phase 3: 架构重构 (50% ✅)
 2. ✅ **Task 10**: Protocol接口抽象 (13个接口)
 3. ✅ **Task 11**: DI容器 (双层架构)
-4. ✅ **Task 12**: TaskPlanLifecycleService真实迁移 (7个方法)
-5. ✅ **Task 13**: TaskExecutionService真实迁移 (完整)
-6. ✅ **Task 17**: update_task_status核心逻辑迁移
+4. ⚠️ **Task 12**: TaskPlanLifecycleService主要迁移完成（6个读方法 + `generate_plan`主流程 + 写路径）
+5. ✅ **Task 13**: TaskExecutionService真实实现落地，运行时 wiring 已修复
+6. ⚠️ **Task 17**: update_task_status主路径已独立，深层 helper 仍待继续下沉/清理
 
 **总进度**: 11/19任务 = **58%完成**
 
@@ -54,10 +63,10 @@
 
 ### 2. 真实业务逻辑迁移 ✅
 
-**TaskPlanLifecycleService (400行)**
+**TaskPlanLifecycleService (400+行)**
 - ✅ 6个只读方法完全迁移
-- ⚠️ update_task_status核心逻辑迁移
-- ❌ generate_plan待迁移（200+行）
+- ✅ update_task_status主路径已独立，不再调用 core 私有 helper
+- ✅ generate_plan主流程已独立，不再委托 `core.generate_plan()`
 
 **TaskExecutionService (284行)**
 - ✅ execute_task完全迁移（127行业务逻辑）
@@ -68,7 +77,7 @@
 - 从facade层到真实实现
 - 使用Protocol接口
 - 回调模式处理复杂集成
-- 保持向后兼容
+- 对未彻底拆开的深层协作点使用 callback 维持边界
 
 ### 3. 复杂度透明化 ⚠️
 
@@ -141,7 +150,6 @@ dc2fb45 refactor: Protocol interfaces + DI container (Task 10-11)
 ### 中优先级
 
 #### 3. 复杂方法迁移
-- `generate_plan()` (200+行，需独立3-5天)
 - `update_task_status` 完整版（待模块解耦）
 
 #### 4. 完善测试

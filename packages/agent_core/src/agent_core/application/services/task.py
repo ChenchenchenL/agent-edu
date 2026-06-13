@@ -47,6 +47,7 @@ from agent_core.application.services.tool_plan_runtime import (
     ToolPlanStepResult,
     ToolPlanRuntimeExecutor,
 )
+from agent_core.application.services.task_status_update_support import TaskStatusUpdateSupportService
 from agent_core.application.services.workflow import WorkflowRunService
 from agent_core.application.tools.registry import InternalToolRegistry
 from agent_core.application.tools.registry import ToolExecutionRequest, ToolSpec
@@ -178,6 +179,26 @@ class AutonomousTaskService:
         self._skill_usage_service = skill_usage_service
         self._runtime_registry = runtime_registry
         self._audit_service = audit_service
+        self._status_update_support = TaskStatusUpdateSupportService(
+            db_session=db_session,
+            goal_repository=goal_repository,
+            daily_task_repository=daily_task_repository,
+            goal_autonomy_state_repository=goal_autonomy_state_repository,
+            autonomy_job_repository=autonomy_job_repository,
+            learner_availability_repository=learner_availability_repository,
+            learner_topic_mastery_repository=learner_topic_mastery_repository,
+            task_attempt_repository=task_attempt_repository,
+            autonomy_job_service=autonomy_job_service,
+            reflection_service=reflection_service,
+            reflection_evidence_service=reflection_evidence_service,
+            reflection_outcome_service=reflection_outcome_service,
+            rollout_observation_scheduler=rollout_observation_scheduler,
+            long_term_memory_materialization_service=long_term_memory_materialization_service,
+            audit_service=audit_service,
+            should_schedule_assessment=self._should_schedule_assessment,
+            derive_replan_mode=self._derive_replan_mode,
+            inline_status_followup_handler=self._run_inline_status_followups,
+        )
         self._autonomy_jobs_running = False
         self._register_internal_tools()
 
@@ -478,67 +499,25 @@ class AutonomousTaskService:
         task_id: str,
         payload: UpdateDailyTaskStatusRequest,
     ) -> DailyTaskResponse:
-        if payload.status not in {"completed", "skipped", "failed"}:
-            raise ValidationError("Only completed, skipped, or failed status updates are supported.")
-        task = await self._require_task(task_id)
-        if task.status not in {"pending", "in_progress"}:
-            raise ValidationError("Only pending or in-progress tasks can be updated.")
-        updated_task = task.with_status(payload.status, result_note=payload.result_note)
-        inline_followups = self._autonomy_job_repository is None
+        original_task = await self._daily_task_repository.get_by_id(task_id)
         try:
-            await self._daily_task_repository.update(updated_task)
-            observe_daily_task_status_transition(
-                from_status=task.status,
-                to_status=updated_task.status,
-                task_type=updated_task.task_type,
+            updated_task, attempt = await self._write_task_status_core(
+                task_id=task_id,
+                payload=payload,
             )
-            await self._audit_service.record(
-                event_type="daily_task.status.updated",
-                resource_type="daily_task",
-                resource_id=task.id,
-                actor="learner",
-                event_data={
-                    "daily_task_id": task.id,
-                    "previous_status": task.status,
-                    "new_status": updated_task.status,
-                    "result_note": payload.result_note,
-                },
-            )
-            attempt = await self._record_task_attempt(updated_task)
-            await self._update_topic_mastery(updated_task)
-            if self._long_term_memory_materialization_service is not None and attempt is not None:
-                goal = await self._require_goal(updated_task.learner_goal_id)
-                await self._materialize_task_outcome_isolated(
-                    learner_profile_id=goal.learner_profile_id,
-                    task=updated_task,
-                    attempt=attempt,
-                )
-            await self._derive_task_evidence(updated_task)
-            await self._enqueue_autonomy_followups(updated_task)
-            if self._rollout_observation_scheduler is not None:
-                await self._rollout_observation_scheduler.schedule_active(
-                    learner_goal_id=updated_task.learner_goal_id,
-                    surface="plan_generation",
-                    trigger_source="task_status_updated",
-                    source_ref=updated_task.id,
-                )
-            if self._reflection_service is not None:
-                await self._trigger_post_task_reflection(updated_task)
-                await self._evaluate_recent_reflection_outcomes(updated_task)
-            if inline_followups:
-                await self._run_inline_status_followups(updated_task)
+            await self._status_update_support.coordinate_post_update(updated_task, attempt)
             await self._db_session.commit()
         except Exception as exc:
             await self._db_session.rollback()
             await self._audit_service.record_durable(
                 event_type="daily_task.status.update.failed",
                 resource_type="daily_task",
-                resource_id=task.id,
+                resource_id=task_id,
                 actor="learner",
                 event_data={
-                    "daily_task_id": task.id,
-                    "workflow_run_id": task.last_workflow_run_id,
-                    "previous_status": task.status,
+                    "daily_task_id": task_id,
+                    "workflow_run_id": original_task.last_workflow_run_id if original_task is not None else None,
+                    "previous_status": original_task.status if original_task is not None else None,
                     "requested_status": payload.status,
                     "result_note": payload.result_note,
                     "error_code": type(exc).__name__,
@@ -546,7 +525,40 @@ class AutonomousTaskService:
                 },
             )
             raise
-        return DailyTaskResponse.model_validate(await self._require_task(task.id))
+        return DailyTaskResponse.model_validate(await self._require_task(task_id))
+
+    async def _write_task_status_core(
+        self,
+        *,
+        task_id: str,
+        payload: UpdateDailyTaskStatusRequest,
+    ) -> tuple[DailyTask, TaskAttempt | None]:
+        if payload.status not in {"completed", "skipped", "failed"}:
+            raise ValidationError("Only completed, skipped, or failed status updates are supported.")
+        task = await self._require_task(task_id)
+        if task.status not in {"pending", "in_progress"}:
+            raise ValidationError("Only pending or in-progress tasks can be updated.")
+        updated_task = task.with_status(payload.status, result_note=payload.result_note)
+        await self._daily_task_repository.update(updated_task)
+        observe_daily_task_status_transition(
+            from_status=task.status,
+            to_status=updated_task.status,
+            task_type=updated_task.task_type,
+        )
+        await self._audit_service.record(
+            event_type="daily_task.status.updated",
+            resource_type="daily_task",
+            resource_id=task.id,
+            actor="learner",
+            event_data={
+                "daily_task_id": task.id,
+                "previous_status": task.status,
+                "new_status": updated_task.status,
+                "result_note": payload.result_note,
+            },
+        )
+        attempt = await self._status_update_support.record_attempt_and_update_mastery(updated_task)
+        return updated_task, attempt
 
     async def _run_inline_status_followups(self, task: DailyTask) -> None:
         if task.status == "completed":

@@ -5,6 +5,12 @@
 **已完成**: 11/19 (58%)  
 **待完成**: 8/19 (42%)
 
+> 运行时修正（2026-06-12）：
+> `TaskPlanLifecycleService` 的 6 个读方法、`update_task_status()` 主路径、`generate_plan()`
+> 主流程都已真实迁移；其中 attempt/mastery/post-update 已抽到独立 support service。
+> 当前剩余问题不再是 `generate_plan()` 兼容委托，而是 autonomy/runtime-skill 两个 façade
+> 仍未真实下沉，以及部分深层协作逻辑仍通过 callback 与 legacy core 协调。
+
 ---
 
 ## Phase 2: 大文件拆分 (0/3) - 建议延后 ⏸️
@@ -94,9 +100,10 @@
 ---
 
 ### #18 - 迁移 generate_plan ⭐⭐
-**现状**: 
-- 代码行数: 200+行
-- 在AutonomousTaskService中
+**现状**: ✅ **主流程已迁移完成**
+- `TaskPlanLifecycleService.generate_plan()` 已接管主流程
+- 已显式注入 `planner_service` / `workflow_run_service` / `memory_service`
+- goal state 同步、rollout 观测、workflow failure reflection 目前通过 callback 协调
 
 **依赖**:
 - planner_service (核心)
@@ -106,13 +113,12 @@
 - rollout_observation_scheduler (可选，rollout观测)
 
 **复杂性**:
-- 循环依赖: 调用多个辅助方法
-- 状态同步: 需要_sync_goal_state等
-- 副作用: 计划创建、状态更新、审计日志
+- 仍存在协作边界: goal state 同步 / rollout 观测 / failure reflection
+- 这些副作用尚未形成独立服务，目前通过 callback 维持边界
+- `AutonomousTaskService` 中仍保留旧实现，可作为对照，但不再是 API 主路径依赖
 
-**复杂度**: VERY HIGH  
-**预计时间**: 8-12小时  
-**建议**: 需要独立任务，完整规划后再执行
+**状态**: 已完成主迁移，剩余为清理/收口  
+**建议**: 不再单列为头号任务；后续在 Task 16 中收口文档和 callback 边界
 
 ---
 

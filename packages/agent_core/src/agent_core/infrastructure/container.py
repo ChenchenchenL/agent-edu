@@ -17,6 +17,7 @@ from agent_core.application.services.task_autonomy_scheduling import TaskAutonom
 from agent_core.application.services.task_execution import TaskExecutionService
 from agent_core.application.services.task_plan_lifecycle import TaskPlanLifecycleService
 from agent_core.application.services.task_runtime_skill import TaskRuntimeSkillService
+from agent_core.application.services.task_status_update_support import TaskStatusUpdateSupportService
 from agent_core.application.services.workspace import WorkspaceService
 from agent_core.infrastructure.db.repositories import (
     GoalAutonomyStateRepository,
@@ -77,18 +78,9 @@ class RequestScopeContainer:
     def task_services(self) -> TaskServiceBundle:
         """Get the scoped task service bundle with real dependencies."""
         if self._task_services is None:
-            # Import dependencies
-            from agent_core.application.services.audit import AuditService
-            from agent_core.application.services.chat import ChatService
-            from agent_core.application.services.quiz import QuizService
-            from agent_core.application.services.session import SessionService
-            from agent_core.application.services.workflow import WorkflowRunService
             from agent_core.infrastructure.db.repositories import (
-                AuditRepository,
                 DailyTaskRepository,
                 PlanStageRepository,
-                SessionRepository,
-                SessionMessageRepository,
             )
 
             # Repositories
@@ -97,19 +89,34 @@ class RequestScopeContainer:
             daily_task_repository = DailyTaskRepository(self._session)
             workflow_run_repository = WorkflowRunRepository(self._session)
 
-            # Services (Protocol-based)
-            session_service = SessionService(
-                SessionRepository(self._session),
-                SessionMessageRepository(self._session),
-            )
-            chat_service = ChatService(session_service)
-            quiz_service = QuizService(session_service)
-            workflow_run_service = WorkflowRunService(workflow_run_repository)
+            # Build legacy core service first; migration-safe facades may delegate to it.
+            core = self._task_core_builder(self._session)
 
-            # Audit service (simplified - no session_factory for now)
-            audit_service = AuditService(
-                AuditRepository(self._session),
-                None,  # session_factory - optional
+            # Services (Protocol-based)
+            audit_service = core._audit_service
+            session_service = core._session_service
+            chat_service = core._chat_service
+            quiz_service = core._quiz_service
+            workflow_run_service = core._workflow_run_service
+            status_update_support = TaskStatusUpdateSupportService(
+                db_session=self._session,
+                goal_repository=goal_repository,
+                daily_task_repository=daily_task_repository,
+                goal_autonomy_state_repository=core._goal_autonomy_state_repository,
+                autonomy_job_repository=core._autonomy_job_repository,
+                learner_availability_repository=core._learner_availability_repository,
+                learner_topic_mastery_repository=core._learner_topic_mastery_repository,
+                task_attempt_repository=core._task_attempt_repository,
+                autonomy_job_service=core._autonomy_job_service,
+                reflection_service=core._reflection_service,
+                reflection_evidence_service=core._reflection_evidence_service,
+                reflection_outcome_service=core._reflection_outcome_service,
+                rollout_observation_scheduler=core._rollout_observation_scheduler,
+                long_term_memory_materialization_service=core._long_term_memory_materialization_service,
+                audit_service=audit_service,
+                should_schedule_assessment=core._should_schedule_assessment,
+                derive_replan_mode=core._derive_replan_mode,
+                inline_status_followup_handler=core._run_inline_status_followups,
             )
 
             # Build TaskPlanLifecycleService (real implementation)
@@ -120,6 +127,14 @@ class RequestScopeContainer:
                 plan_stage_repository=PlanStageRepository(self._session),
                 daily_task_repository=daily_task_repository,
                 workflow_run_repository=workflow_run_repository,
+                planner_service=core._planner_service,
+                workflow_run_service=workflow_run_service,
+                audit_service=audit_service,
+                memory_service=core._memory_service,
+                status_update_support=status_update_support,
+                sync_goal_state_after_plan=core._sync_goal_state_after_plan,
+                schedule_rollout_observation=core._schedule_surface_rollout_observation,
+                trigger_workflow_failure_reflection=core._trigger_workflow_failure_reflection,
             )
 
             # Build TaskExecutionService (real implementation)
@@ -135,11 +150,15 @@ class RequestScopeContainer:
                 failure_reflection_callback=None,  # TODO: wire reflection service
             )
 
-            # Build legacy core service (still used by other facades during migration)
-            core = self._task_core_builder(self._session)
-
             # Other facades still delegate to core (migration pending)
-            autonomy_scheduling = TaskAutonomySchedulingService(core=core)
+            autonomy_scheduling = TaskAutonomySchedulingService(
+                db_session=self._session,
+                goal_repository=goal_repository,
+                goal_autonomy_state_repository=GoalAutonomyStateRepository(self._session),
+                learner_availability_repository=core._learner_availability_repository,
+                learner_topic_mastery_repository=core._learner_topic_mastery_repository,
+                core=core,
+            )
             runtime_skill = TaskRuntimeSkillService(core=core)
 
             self._task_services = TaskServiceBundle(
