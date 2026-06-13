@@ -250,6 +250,17 @@ The following architectural constraints are mandatory:
     - lease recovery / retry / backoff / durable audit
     - conflict refresh and compression runner
     - observability hooks for backlog / promotion / conflict / materialization / maintenance duration
+  - **Service Architecture Refactoring (Phase 3 partial, 2026-06)**:
+    - Protocol-based service interfaces (13 interfaces)
+    - Dependency injection container (dual-layer: Application + RequestScope)
+    - Service decomposition from monolithic `AutonomousTaskService`:
+      - `TaskPlanLifecycleService`: plan/task CRUD, status updates (60% complete)
+      - `TaskExecutionService`: task execution logic (100% complete)
+      - `TaskAutonomySchedulingService`: autonomy state queries (25% complete)
+      - `TaskRuntimeSkillService`: skill resolution (facade, pending refactor)
+    - Callback pattern for complex coordination without circular dependencies
+    - Backward compatibility maintained via dual-track operation
+    - Documentation: `docs/PHASE3_MIGRATION_REPORT.md`
   - explicit non-goals for this phase:
     - non-HTTP external connectors
     - plugin marketplace/runtime
