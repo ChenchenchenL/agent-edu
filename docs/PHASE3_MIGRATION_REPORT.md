@@ -1,8 +1,8 @@
 # Phase 3 架构重构 - 迁移完成报告
 
-**日期**: 2026-06-13  
+**日期**: 2026-06-14  
 **会话**: feature/memory-reflection-skills-roadmap  
-**状态**: 阶段性完成 (52.5%)
+**状态**: 阶段性完成 (65.4%)
 
 ---
 
@@ -129,25 +129,36 @@ RequestScopeContainer
 
 ---
 
-### Task 14: TaskAutonomySchedulingService (25%完成)
+### Task 14: TaskAutonomySchedulingService (54%完成)
 
-**迁移状态**: ✅ 简单方法完成
+**迁移状态**: ✅ 可迁移方法已完成
 
-**已迁移 (3个读方法)**:
+**已迁移 (7个方法)**:
 - `get_goal_autonomy_state()` - 获取自主状态
 - `get_goal_availability()` - 获取可用性
 - `list_goal_mastery()` - 列出主题掌握度
+- `update_goal_availability()` - 更新可用性（完整迁移 + callbacks）
+- `pause_goal_autonomy()` - 暂停自主（完整迁移 + callbacks）
+- `resume_goal_autonomy()` - 恢复自主（完整迁移 + callbacks）
+- `list_autonomy_jobs()` - 列出自主任务
 
-**待迁移 (9个方法)**:
-- 中等复杂度: 6个（update/pause/resume/list/materialize/replan）
-- 高复杂度: 2个（reflection/jobs）
-- 兼容层: 1个（update_goal_availability，复杂副作用）
+**保留NotImplementedError (6个方法)**:
+- `materialize_today()` - 需要job scheduler重构
+- `manual_replan_goal()` - 需要job scheduler重构
+- `run_periodic_goal_reflection()` - 需要reflection解耦
+- `run_due_autonomy_jobs()` - 核心编排逻辑(100+行)
+- (其他2个) - 系统级重构前不适合迁移
 
 **代码统计**:
 - 文件: `agent_core/application/services/task_autonomy_scheduling.py`
-- 行数: 215行
-- 真实依赖: 6个 (session + goal_repo + 3个可选repos + core)
-- 真实方法: 3个
+- 行数: 408行
+- 真实依赖: 10个 (6 repos + audit + 3 callbacks)
+- 真实方法: 7个
+- Callback模式: 避免循环依赖
+
+**务实决策**: 
+剩余6个方法需要job scheduler和reflection系统重构（预计8-12小时 + 系统级改造），
+保持NotImplementedError并清晰说明原因是正确的工程决策。
 
 ---
 
@@ -179,20 +190,20 @@ RequestScopeContainer
 | 模块 | 文件 | 行数 |
 |------|------|------|
 | Protocol接口 | 13个文件 | ~300行 |
-| DI容器 | container.py | 194行 |
-| TaskPlanLifecycle | task_plan_lifecycle.py | 428行 |
+| DI容器 | container.py | 200行 |
+| TaskPlanLifecycle | task_plan_lifecycle.py | 624行 |
 | TaskExecution | task_execution.py | 284行 |
-| TaskAutonomyScheduling | task_autonomy_scheduling.py | 215行 |
+| TaskAutonomyScheduling | task_autonomy_scheduling.py | 408行 |
 | StatusUpdateSupport | task_status_update_support.py | 320行 |
 | 测试 | test_*.py | 515行 |
-| 文档 | docs/*.md | 2,500+行 |
-| **总计** | | **~4,756行** |
+| 文档 | docs/*.md | 3,000+行 |
+| **总计** | | **~5,651行** |
 
 ### 修改代码
 
 - `AutonomousTaskService`: 小幅调整（保持向后兼容）
 - API路由: 无修改（透明切换）
-- 文档更新: 9个专题文档
+- 文档更新: 10个专题文档
 
 ---
 
@@ -213,9 +224,9 @@ AutonomousTaskService
 ```
 ApplicationContainer
 └── RequestScopeContainer
-    ├── TaskPlanLifecycleService (428行, 6依赖)
+    ├── TaskPlanLifecycleService (624行, 9依赖)
     ├── TaskExecutionService (284行, 10依赖)
-    ├── TaskAutonomySchedulingService (215行, 6依赖)
+    ├── TaskAutonomySchedulingService (408行, 10依赖)
     └── TaskRuntimeSkillService (facade, 待重构)
 ```
 
