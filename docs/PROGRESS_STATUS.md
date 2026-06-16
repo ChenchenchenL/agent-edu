@@ -23,7 +23,7 @@
 
 项目当前处于：
 
-> Phase 1（稳定教学 Agent）已基本打通主链路，并进入 Phase 2（自主任务系统）的最小落地阶段；CLI-first / TUI learner workspace baseline 已开始落地。
+> Phase 1（稳定教学 Agent）已基本打通主链路，并进入 Phase 2（自主任务系统）的最小落地阶段；当前产品表面方向已调整为 Web-first，既有 CLI / TUI baseline 仅作为历史实现与参考资产保留。
 
 更具体地说：
 
@@ -34,7 +34,9 @@
 - 长期记忆自动沉淀链路已接入 chat / task outcome / reflection outcome，并支持 upsert / dedupe 与 provenance 追踪
 - `LearnerGoal -> StudyPlan -> DailyTask -> WorkflowRun` 的最小闭环已经落地
 - Phase 2.1 的最小自治层和 worker baseline 已落地
-- Reflection System v1 已落地，v2 增强版已部分落地：结构化反思记录、规则优先分类、低风险 follow-up action、evidence signals、outcome tracking、strategy card、reflective memory 与治理 API
+- Reflection System v1 已落地，v2 增强版已部分落地
+- 架构重构已完成 `repositories.py` 拆分 (Task #7) 与领域实体文件拆分 (Task #9)。
+- TaskRuntimeSkillService 已完成拆解与清理 (Task #15 完成)：runtime-plan resolution、tool-plan execution、execution context 构建、runtime skill resolution、rollout observation 调度、overlay 查询、skill binding 查询与 review interval 解析均已独立实现；未使用的 `core` 注入已移除、容器接线已清理，且注释和文件头描述已同步更新。
 - 这轮已进一步补齐：
   - review queue 聚合优先级主链
   - outcome evaluation 真正闭环
@@ -68,7 +70,7 @@
 - `chat / hint / quiz / plan_generation` 的 rollout observation 已在成功路径接通；`chat / hint` 使用 assistant message id，`quiz` 使用 quiz id，`plan_generation` 使用成功 workflow run id，并且 `plan_generation` 的 observation 只会在 plan/task 持久化成功之后调度
 - allowlisted autonomy workflow surface 的 rollout observation 已对 `review_scheduling / assessment_generation / replan` 接通成功路径，并对有真实 workflow run anchor 的 runtime failure 接通失败路径；`skipped` 与 validation / precondition failure 仍不进入 observation
 - rollout auto-governance V1 已落地独立 decision job，并对 allowlisted workflow surfaces 自动执行 rollout `promote / rollback`
-- CLI-first dual-mode client、workspace summary API 与 TUI baseline 已落地
+- 历史 CLI/TUI 资产（dual-mode client、workspace summary API、TUI baseline）已落地并保留为参考实现
 - 真实 LLM / embedding 的接入已经不是“配置层预留”，而是“代码层可执行”
 - 但长期记忆治理仍属于“最小完整落地”，第二阶段定时调度与更强自治仍未完成；skill evolution 也仍是“最小治理闭环部分落地”，`SkillCuratorRecommendation` 与周期性 `SkillCuratorJob` MVP 已落地，`archive_candidate` accept 已接入 archive lifecycle，`patch_needed` accept 已能创建 reference-only `skill_patch_request` proposal，approved / effective `skill_patch_request` 已能 realization 为新的 replacement `skill_package` proposal，artifact overlap / duplicate detection 已能生成 `merge_candidate` 输入，`merge_candidate` accept 已能创建 merge-sourced replacement `skill_package` proposal，curator governance evidence v1 已能消费 memory conflict summary / reflection outcome evaluation / resolver health trend，surface / topic coverage regression 已能基于声明外 topic demand 与 governed binding gap 生成 `patch_needed` 输入，skill observability 已有 Prometheus / Grafana / alert 基线，approved / effective replacement proposal 已能 operator staging 为 `staged` replacement artifact，且 staged governed replacement 已补齐 readiness API、strict source-anchor gate、curator ready recommendation 与 activate / replace 证据硬化；dynamic runtime registry V1 已扩到 `chat / hint / quiz / plan_generation / review_scheduling / assessment_generation / replan` 的 execution-plan consumption，tool-plan orchestration V2/V3 已补 internal-only、sandbox/runtime 同构的受控执行器，并支持最多 2 步的 linear chain 与 prior-step output 引用；rollout auto-governance V1 已补独立 decision job、配置化开关与 surface allowlist、Prometheus / Grafana / alert 基线，并默认只对 `review_scheduling / assessment_generation / replan` 自动执行 promote / rollback；但更高阶 orchestration、更多跨 surface 组合、更广覆盖的 auto-governance 和 staged replacement 自动执行仍未完成；长期记忆告警规则基线已落地，动态阈值、告警通知和生产回归还在继续增强
 
@@ -430,7 +432,7 @@
 
 ---
 
-### 15. CLI / TUI learner workspace baseline
+### 15. 历史 CLI / TUI learner workspace baseline
 
 已完成内容：
 
@@ -443,7 +445,7 @@
 - learner workspace summary API
 - filtered task list API
 - knowledge / behavior memory browse API
-- learner-first TUI baseline：左侧任务、中心 transcript、右侧长期记忆摘要
+- learner-first TUI baseline（历史实现与参考资产）：左侧任务、中心 transcript、右侧长期记忆摘要
 - 本地 active profile / goal / last session / last task context 持久化
 
 说明：
@@ -451,6 +453,65 @@
 - 这部分已经让系统具备“终端优先”的最小产品表面
 - 当前仍是最小工作台，不是完整的终端学习操作系统
 - UI 层仍严格复用 API contract，没有复制业务逻辑或直连数据库
+
+---
+
+### 16. 代码库基础设施优化（2026-06-14）
+
+已完成内容：
+
+- **repositories.py 大文件拆分（Task #7）**：
+  - 将 4,268 行、44 个 Repository 类的单体文件拆分为 7 个领域模块：
+    - `repositories/session.py` — SessionRepository / SessionMessageRepository / SessionQuizRepository
+    - `repositories/skill.py` — SkillArtifactRepository / SkillUsageEventRepository / SkillCuratorRecommendationRepository
+    - `repositories/audit.py` — AuditRepository
+    - `repositories/learner.py` — LearnerProfileRepository / LearnerGoalRepository / GoalAutonomyStateRepository / ScheduledAutonomyJobRepository / LearnerAvailabilityRepository / LearnerTopicMasteryRepository / TaskAttemptRepository
+    - `repositories/planning.py` — StudyPlanRepository / PlanStageRepository / DailyTaskRepository / WorkflowRunRepository
+    - `repositories/memory.py` — 11 个记忆相关 Repository
+    - `repositories/reflection.py` — 15 个反思相关 Repository
+    - `repositories/__init__.py` — 统一导出层
+  - 原 `repositories.py` 改为 65 行 re-export 层，保持完整向后兼容
+  - 52 处现有调用方 import 路径无需任何修改
+
+- **代码清理和文档化（Task #16）**：
+  - 删除临时工具脚本 `.gemini/split_repositories.py`
+  - 解决 `skills.py` 中两个硬编码 TODO：将 rollout observation 计数常量
+    `STABLE_REQUIRED_PROMOTE_OBSERVATION_COUNT` 和 `REPLACEMENT_READINESS_PROMOTE_OBSERVATION_MIN`
+    迁入 `SkillLifecycleThresholds`，实现零散空殖常量的零剩留
+  - 清晰化 `container.py` 中模糊的 `TODO: wire reflection service` 为精确架构注释
+  - 更新 `ARCHITECTURE.md`：补充 Phase 2 repositories 拆分记录和 `infrastructure/db/repositories/` 子目录结构说明
+  - 扩充 `test_repositories_split.py`：3 个测试用例 → 16 个
+    （覆盖所有 7 个域模块的新旧路径、`__init__` 完整性 44 类验证、类身份一致性测试）
+  - `packages/` 下零残留 TODO/FIXME
+
+说明：
+
+- 这是纯基础设施优化，不涉及功能变更
+- 可维护性大幅提升：单文件可读性从 4,268 行降至平均 ~200-400 行/域模块
+- 所有常量现均通过 `SkillLifecycleThresholds` 集中管理，消除了残留散点
+- 已通过 AST 语法验证；运行时测试待 Docker 环境执行
+
+---
+
+### 17. 调度方法重构与服务拆分（Task #14）（2026-06-14，后续状态修正）
+
+已完成内容：
+
+- **TaskAutonomySchedulingService 中等与复杂方法迁移**：
+  - 将 `AutonomousTaskService` (God Class) 中的 4 个中等和复杂自主调度核心方法移植至 `TaskAutonomySchedulingService`：
+    - `materialize_today()` — 物化今日工作窗口
+    - `manual_replan_goal()` — 手动重新规划
+    - `run_periodic_goal_reflection()` — 定期反思
+    - `run_due_autonomy_jobs()` — 运行到期任务
+  - 引入了 `TriggerReflectionCallback` 和 `ProcessAutonomyJobCallback` 回调机制，将复杂调度逻辑从 `AutonomousTaskService` 中迁出，但仍通过 callback 与 legacy core 协调反思和作业执行。
+  - `container.py` 已接入这些新服务与回调包装，但当前接线仍明确绑定到 `AutonomousTaskService._...` 私有协作逻辑。
+  - 这一步完成的是“方法迁移”，不是“服务边界完全解耦”。
+
+说明：
+
+- 这是 Phase 3 中一次重要迁移，但不是收尾。
+- `TaskAutonomySchedulingService` 已承接主要自治调度入口；与此同时，`AutonomousTaskService` 仍然存在，且并非纯委托空壳。
+- 当前更准确的结论是：Task #14 在“方法迁移”层面已完成，在“架构解耦”层面仍未完成。
 
 ---
 
@@ -807,13 +868,13 @@
 
 如果只用一句话概括当前进度：
 
-> 项目已经完成第一阶段大部分核心教学能力，并落地了第二阶段最小自主任务系统 + worker baseline，但离“稳定可用的教学 Agent + 长期自动运行的任务系统”还差定时调度、长期治理和更强状态管理。
+> 项目已经完成第一阶段大部分核心教学能力，并落地了第二阶段最小自主任务系统 + worker baseline，代码库架构重构进度已达 84%；但离“稳定可用的教学 Agent + 长期自动运行的任务系统”还差定时调度、长期治理和更强状态管理。
 
 如果用阶段语言概括：
 
 - 不是“仅有愿景”的空仓库
 - 也不是“第一阶段已完全验收”的可交付产品
-- 更接近“Phase 1 核心链路已完成，Phase 2.1 最小闭环已落地，正在做稳定化与生产化收敛”
+- 更接近“Phase 1 核心链路已完成，Phase 2.1 最小闭环已落地，架构重构进度 84%，正在做稳定化与生产化收敛”
 
 ---
 

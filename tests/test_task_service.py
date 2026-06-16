@@ -21,6 +21,7 @@ from agent_core.application.services.reflection_replay import ReflectionReplaySe
 from agent_core.application.services.session import SessionService
 from agent_core.application.services.strategy_cards import StrategyCardService
 from agent_core.application.services.task import AutonomousTaskService
+from agent_core.application.services.task_autonomy_scheduling import TaskAutonomySchedulingService
 from agent_core.application.services.tool_plan_runtime import ToolPlanRuntimeExecutor
 from agent_core.application.services.workflow import WorkflowRunService
 from agent_core.application.tools.registry import HttpToolSpec, InternalToolRegistry, ToolExecutionRequest
@@ -2698,7 +2699,21 @@ async def test_milestone_gate_blocks_downstream_until_completed():
 
     gated_tasks = await task_service.list_tasks(goal.id)
     milestone = next(task for task in gated_tasks if task.task_type == "milestone")
-    state = await task_service.get_goal_autonomy_state(goal.id)
+
+    autonomy_service = TaskAutonomySchedulingService(
+        db_session=fake_session,
+        goal_repository=task_service._goal_repository,
+        goal_autonomy_state_repository=task_service._goal_autonomy_state_repository,
+        learner_availability_repository=task_service._learner_availability_repository,
+        learner_topic_mastery_repository=task_service._learner_topic_mastery_repository,
+        autonomy_job_repository=task_service._autonomy_job_repository,
+        audit_service=audit_service,
+        sync_goal_state_callback=task_service._sync_goal_state,
+        ensure_materialization_job_callback=task_service._ensure_daily_materialization_job,
+        validate_timezone_callback=task_service._validate_timezone,
+    )
+
+    state = await autonomy_service.get_goal_autonomy_state(goal.id)
     assert state.phase == "assessment_due"
     downstream_superseded = [
         task
@@ -2716,7 +2731,7 @@ async def test_milestone_gate_blocks_downstream_until_completed():
         task_id=milestone.id,
         payload=UpdateDailyTaskStatusRequest(status="completed", result_note="Gate passed"),
     )
-    released = await task_service.get_goal_autonomy_state(goal.id)
+    released = await autonomy_service.get_goal_autonomy_state(goal.id)
     assert released.phase == "active"
 
 

@@ -1,0 +1,481 @@
+    async def _process_replan_job(self, job: ScheduledAutonomyJob) -> str | None:
+        goal = await self._require_goal(job.learner_goal_id)
+        mode = str(job.payload.get("mode") or "partial")
+        topic_key = str(job.payload.get("topic_focus") or goal.subject)
+        runtime_plan = await self._resolve_autonomy_execution_plan(
+            learner_goal_id=goal.id,
+            skill_name="plan_study_path",
+            surface="replan",
+            resource_id=job.id,
+            topic_key=topic_key,
+            task_type=None,
+            trigger_source=job.trigger_source,
+            include_staged=True,
+        )
+        skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_replan_skill_for_runtime(
+            goal=goal,
+            resource_id=job.id,
+        )
+        if mode not in AUTONOMY_REPLAN_MODES:
+            await self._record_replan_skill_usage(
+                goal=goal,
+                source_task=None,
+                workflow_run_id=None,
+                outcome_status="failed",
+                trigger_source=job.trigger_source,
+                topic_key=topic_key,
+                input_summary=goal.subject,
+                error_code="ValidationError",
+                resolution=skill_resolution,
+                metadata=self._with_skill_execution_metadata(
+                    runtime_plan,
+                    metadata={
+                        "autonomy_job_id": job.id,
+                        "mode": mode,
+                        "error": "Unsupported autonomy replan mode.",
+                    },
+                ),
+            )
+            raise ValidationError("Unsupported autonomy replan mode.")
+        if mode == "full":
+            try:
+                _, workflow_run_id = await self._generate_plan_with_run_context(
+                    goal_id=goal.id,
+                    trigger_source=job.trigger_source,
+                    commit=False,
+                    scheduled_job_id=job.id,
+                )
+                await self._sync_goal_state(goal.id, phase="active", reason="full_replan")
+                await self._record_replan_skill_usage(
+                    goal=goal,
+                    source_task=None,
+                    workflow_run_id=workflow_run_id,
+                    outcome_status="completed",
+                    trigger_source=job.trigger_source,
+                    topic_key=topic_key,
+                    input_summary=goal.target_outcome,
+                    output_summary="full replan",
+                    resolution=skill_resolution,
+                    metadata=self._with_skill_execution_metadata(
+                        runtime_plan,
+                        metadata={
+                            "autonomy_job_id": job.id,
+                            "mode": mode,
+                            "effective_mode": "full",
+                            "fallback_used": False,
+                        },
+                    ),
+                )
+                await self._schedule_surface_rollout_observation(
+                    learner_goal_id=goal.id,
+                    surface="replan",
+                    trigger_source=job.trigger_source,
+                    source_ref=workflow_run_id,
+                )
+                await self._reflection_service.trigger_reflection(
+                    ReflectionTriggerRequest(
+                        learner_profile_id=goal.learner_profile_id,
+                        learner_goal_id=goal.id,
+                        scope="goal",
+                        target_type="learner_goal",
+                        target_id=goal.id,
+                        trigger_source="plan_replanned",
+                        reflection_depth=1,
+                        source_attempt_id=job.id,
+                        workflow_run_id=workflow_run_id,
+                    )
+                )
+                return workflow_run_id
+            except Exception as exc:
+                await self._record_replan_skill_usage(
+                    goal=goal,
+                    source_task=None,
+                    workflow_run_id=None,
+                    outcome_status="failed",
+                    trigger_source=job.trigger_source,
+                    topic_key=topic_key,
+                    input_summary=goal.target_outcome,
+                    error_code=type(exc).__name__,
+                    resolution=skill_resolution,
+                    metadata=self._with_skill_execution_metadata(
+                        runtime_plan,
+                        metadata={
+                            "autonomy_job_id": job.id,
+                            "mode": mode,
+                            "effective_mode": "full",
+                            "error": str(exc),
+                        },
+                    ),
+                )
+                raise
+        source_task_id = str(job.payload.get("source_task_id") or "")
+        source_task = None
+        if source_task_id:
+            source_task = await self._require_task(source_task_id)
+        else:
+            recent_tasks = await self._daily_task_repository.list_by_goal(goal.id)
+            if recent_tasks:
+                source_task = recent_tasks[-1]
+        source_topic_key = source_task.topic_focus if source_task is not None else topic_key
+        runtime_plan = await self._resolve_autonomy_execution_plan(
+            learner_goal_id=goal.id,
+            skill_name="plan_study_path",
+            surface="replan",
+            resource_id=source_task.id if source_task is not None else job.id,
+            topic_key=source_topic_key,
+            task_type=source_task.task_type if source_task is not None else None,
+            trigger_source=job.trigger_source,
+            include_staged=True,
+        )
+        if source_task is None:
+            try:
+                skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_replan_skill_for_runtime(goal=goal, resource_id=job.id)
+                _, workflow_run_id = await self._generate_plan_with_run_context(
+                    goal_id=goal.id,
+                    trigger_source=job.trigger_source,
+                    commit=False,
+                    scheduled_job_id=job.id,
+                )
+                await self._sync_goal_state(goal.id, phase="active", reason="fallback_full_replan")
+                await self._record_replan_skill_usage(
+                    goal=goal,
+                    source_task=None,
+                    workflow_run_id=workflow_run_id,
+                    outcome_status="completed",
+                    trigger_source=job.trigger_source,
+                    topic_key=source_topic_key,
+                    input_summary=goal.target_outcome,
+                    output_summary="fallback full replan",
+                    resolution=skill_resolution,
+                    metadata=self._with_skill_execution_metadata(
+                        runtime_plan,
+                        metadata={
+                            "autonomy_job_id": job.id,
+                            "mode": mode,
+                            "effective_mode": "full",
+                            "fallback_used": True,
+                            "fallback_reason": "source_task_missing",
+                        },
+                    ),
+                )
+                await self._schedule_surface_rollout_observation(
+                    learner_goal_id=goal.id,
+                    surface="replan",
+                    trigger_source=job.trigger_source,
+                    source_ref=workflow_run_id,
+                )
+                return workflow_run_id
+            except Exception as exc:
+                await self._record_replan_skill_usage(
+                    goal=goal,
+                    source_task=None,
+                    workflow_run_id=None,
+                    outcome_status="failed",
+                    trigger_source=job.trigger_source,
+                    topic_key=source_topic_key,
+                    input_summary=goal.target_outcome,
+                    error_code=type(exc).__name__,
+                    resolution=skill_resolution,
+                    metadata=self._with_skill_execution_metadata(
+                        runtime_plan,
+                        metadata={
+                            "autonomy_job_id": job.id,
+                            "mode": mode,
+                            "effective_mode": "full",
+                            "fallback_used": True,
+                            "fallback_reason": "source_task_missing",
+                            "error": str(exc),
+                        },
+                    ),
+                )
+                raise
+        active_plan = await self._study_plan_repository.get_active_by_goal(goal.id)
+        if active_plan is None:
+            try:
+                skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_replan_skill_for_runtime(goal=goal, resource_id=source_task.id)
+                _, workflow_run_id = await self._generate_plan_with_run_context(
+                    goal_id=goal.id,
+                    trigger_source=job.trigger_source,
+                    commit=False,
+                    scheduled_job_id=job.id,
+                )
+                await self._sync_goal_state(goal.id, phase="active", reason="fallback_full_replan")
+                await self._record_replan_skill_usage(
+                    goal=goal,
+                    source_task=source_task,
+                    workflow_run_id=workflow_run_id,
+                    outcome_status="completed",
+                    trigger_source=job.trigger_source,
+                    topic_key=source_topic_key,
+                    input_summary=source_task.topic_focus,
+                    output_summary="fallback full replan",
+                    resolution=skill_resolution,
+                    metadata=self._with_skill_execution_metadata(
+                        runtime_plan,
+                        metadata={
+                            "autonomy_job_id": job.id,
+                            "mode": mode,
+                            "effective_mode": "full",
+                            "fallback_used": True,
+                            "fallback_reason": "active_plan_missing",
+                            "source_task_id": source_task.id,
+                        },
+                    ),
+                )
+                await self._schedule_surface_rollout_observation(
+                    learner_goal_id=goal.id,
+                    surface="replan",
+                    trigger_source=job.trigger_source,
+                    source_ref=workflow_run_id,
+                )
+                return workflow_run_id
+            except Exception as exc:
+                await self._record_replan_skill_usage(
+                    goal=goal,
+                    source_task=source_task,
+                    workflow_run_id=None,
+                    outcome_status="failed",
+                    trigger_source=job.trigger_source,
+                    topic_key=source_topic_key,
+                    input_summary=source_task.topic_focus,
+                    error_code=type(exc).__name__,
+                    resolution=skill_resolution,
+                    metadata=self._with_skill_execution_metadata(
+                        runtime_plan,
+                        metadata={
+                            "autonomy_job_id": job.id,
+                            "mode": mode,
+                            "effective_mode": "full",
+                            "fallback_used": True,
+                            "fallback_reason": "active_plan_missing",
+                            "source_task_id": source_task.id,
+                            "error": str(exc),
+                        },
+                    ),
+                )
+                raise
+        skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_replan_skill_for_runtime(goal=goal, resource_id=source_task.id)
+        run = await self._workflow_run_service.create_run(
+            workflow_type="plan_extension",
+            trigger_source=job.trigger_source,
+            learner_goal_id=goal.id,
+            study_plan_id=active_plan.id,
+            daily_task_id=source_task.id,
+            scheduled_job_id=job.id,
+        )
+        try:
+            scheduled_for = max(date.today() + timedelta(days=1), source_task.due_on + timedelta(days=1))
+            if self._internal_tool_registry is not None:
+                tool_plan_report = await self._execute_runtime_tool_plan(
+                    runtime_plan=runtime_plan,
+                    context=self._build_tool_plan_execution_context(
+                        surface="replan",
+                        learner_goal_id=goal.id,
+                        resource_id=source_task.id,
+                        source_task_id=source_task.id,
+                        topic_focus=source_task.topic_focus,
+                        study_plan_id=active_plan.id,
+                        workflow_run_id=run.id,
+                        scheduled_job_id=job.id,
+                    ),
+                    default_tool_name="partial_replan",
+                    default_payload={"source_task_id": source_task.id},
+                )
+                repair_step = self._tool_plan_step_result(tool_plan_report, step_id="repair")
+                if repair_step is None and tool_plan_report.steps:
+                    repair_step = tool_plan_report.steps[0]
+                repair_result_payload = repair_step.result_payload if repair_step is not None else None
+                created_ids = [str(item) for item in (repair_result_payload or {}).get("created_task_ids", [])]
+                review_step = self._tool_plan_step_result(tool_plan_report, step_id="followup_review")
+                review_created_task_ids = (
+                    [str(item) for item in (review_step.result_payload or {}).get("created_task_ids", [])]
+                    if review_step is not None
+                    else []
+                )
+                if not created_ids:
+                    run = await self._workflow_run_service.complete_run(
+                        run=run,
+                        result_resource_type="daily_task",
+                        result_resource_ids=[],
+                    )
+                    await self._record_replan_skill_usage(
+                        goal=goal,
+                        source_task=source_task,
+                        workflow_run_id=run.id,
+                        outcome_status="skipped",
+                        trigger_source=job.trigger_source,
+                        topic_key=source_topic_key,
+                        input_summary=source_task.topic_focus,
+                        output_summary="0 repair tasks",
+                        resolution=skill_resolution,
+                        metadata=self._with_skill_execution_metadata(
+                            runtime_plan,
+                            metadata={
+                                "autonomy_job_id": job.id,
+                                "mode": mode,
+                                "effective_mode": "partial",
+                                "source_task_id": source_task.id,
+                                "created_repair_task_ids": [],
+                                "tool_plan_step_count": len(tool_plan_report.steps),
+                                "tool_plan_sequence": [step.tool_name for step in tool_plan_report.steps],
+                                "tool_plan_steps": self._tool_plan_step_summaries(tool_plan_report),
+                                "skip_reason": "tool_created_no_tasks",
+                            },
+                        ),
+                    )
+                    await self._schedule_surface_rollout_observation(
+                        learner_goal_id=goal.id,
+                        surface="replan",
+                        trigger_source=job.trigger_source,
+                        source_ref=run.id,
+                    )
+                    return run.id
+                repair_task = await self._require_task(created_ids[0])
+                if source_task.task_type == "milestone":
+                    superseded = source_task.with_status("superseded", result_note=source_task.result_note)
+                    await self._daily_task_repository.update(superseded)
+            else:
+                repair_task = DailyTask.build(
+                    learner_goal_id=goal.id,
+                    study_plan_id=active_plan.id,
+                    plan_stage_id=source_task.plan_stage_id,
+                    task_origin="replan_scheduler",
+                    task_type="repair",
+                    execution_mode=source_task.execution_mode,
+                    title=f"Repair: {source_task.topic_focus}",
+                    instructions=f"Repair the gap around {source_task.topic_focus}.",
+                    topic_focus=source_task.topic_focus,
+                    difficulty=source_task.difficulty or "medium",
+                    question_count=source_task.question_count,
+                    estimated_minutes=max(15, source_task.estimated_minutes),
+                    scheduled_for=scheduled_for,
+                    due_on=scheduled_for,
+                    source_task_id=source_task.id,
+                )
+                await self._daily_task_repository.create_many([repair_task])
+            await self._audit_service.record(
+                event_type="daily_task.created",
+                resource_type="daily_task",
+                resource_id=repair_task.id,
+                actor="system",
+                event_data={
+                    "daily_task_id": repair_task.id,
+                    "learner_goal_id": goal.id,
+                    "study_plan_id": repair_task.study_plan_id,
+                    "task_type": repair_task.task_type,
+                    "scheduled_for": repair_task.scheduled_for.isoformat(),
+                    "source_task_id": source_task.id,
+                },
+            )
+            for review_task_id in review_created_task_ids:
+                review_task = await self._require_task(review_task_id)
+                await self._audit_service.record(
+                    event_type="daily_task.created",
+                    resource_type="daily_task",
+                    resource_id=review_task.id,
+                    actor="system",
+                    event_data={
+                        "daily_task_id": review_task.id,
+                        "learner_goal_id": goal.id,
+                        "study_plan_id": review_task.study_plan_id,
+                        "task_type": review_task.task_type,
+                        "scheduled_for": review_task.scheduled_for.isoformat(),
+                        "source_task_id": repair_task.id,
+                    },
+                )
+            await self._audit_service.record(
+                event_type="study_plan.replanned.partial",
+                resource_type="study_plan",
+                resource_id=active_plan.id,
+                actor="system",
+                event_data={
+                    "study_plan_id": active_plan.id,
+                    "source_task_id": source_task.id,
+                    "repair_task_id": repair_task.id,
+                    "created_review_task_ids": review_created_task_ids if self._internal_tool_registry is not None else [],
+                },
+            )
+            run = await self._workflow_run_service.complete_run(
+                run=run,
+                result_resource_type="daily_task",
+                result_resource_ids=[repair_task.id],
+            )
+            await self._sync_goal_state(goal.id, phase="active", next_due_at=self._to_datetime(repair_task.scheduled_for), reason="partial_replan")
+            await self._record_replan_skill_usage(
+                goal=goal,
+                source_task=source_task,
+                workflow_run_id=run.id,
+                outcome_status="completed",
+                trigger_source=job.trigger_source,
+                topic_key=source_topic_key,
+                input_summary=source_task.topic_focus,
+                output_summary=f"repair task {repair_task.id}",
+                resolution=skill_resolution,
+                metadata=self._with_skill_execution_metadata(
+                    runtime_plan,
+                    metadata={
+                        "autonomy_job_id": job.id,
+                        "mode": mode,
+                        "effective_mode": "partial",
+                        "source_task_id": source_task.id,
+                        "repair_task_id": repair_task.id,
+                        "created_review_task_ids": review_created_task_ids if self._internal_tool_registry is not None else [],
+                        "tool_plan_step_count": len(tool_plan_report.steps) if self._internal_tool_registry is not None else 1,
+                        "tool_plan_sequence": [step.tool_name for step in tool_plan_report.steps] if self._internal_tool_registry is not None else ["partial_replan"],
+                        "tool_plan_steps": self._tool_plan_step_summaries(tool_plan_report) if self._internal_tool_registry is not None else [],
+                    },
+                ),
+            )
+            await self._schedule_surface_rollout_observation(
+                learner_goal_id=goal.id,
+                surface="replan",
+                trigger_source=job.trigger_source,
+                source_ref=run.id,
+            )
+            await self._reflection_service.trigger_reflection(
+                ReflectionTriggerRequest(
+                    learner_profile_id=goal.learner_profile_id,
+                    learner_goal_id=goal.id,
+                    scope="goal",
+                    target_type="learner_goal",
+                    target_id=goal.id,
+                    trigger_source="plan_replanned",
+                    reflection_depth=1,
+                    daily_task_id=repair_task.id,
+                    workflow_run_id=run.id,
+                    study_plan_id=active_plan.id,
+                    source_attempt_id=job.id,
+                )
+            )
+            return run.id
+        except Exception as exc:
+            await self._record_replan_skill_usage(
+                goal=goal,
+                source_task=source_task,
+                workflow_run_id=run.id,
+                outcome_status="failed",
+                trigger_source=job.trigger_source,
+                topic_key=source_topic_key,
+                input_summary=source_task.topic_focus,
+                error_code=type(exc).__name__,
+                resolution=skill_resolution,
+                metadata=self._with_skill_execution_metadata(
+                    runtime_plan,
+                    metadata={
+                        "autonomy_job_id": job.id,
+                        "mode": mode,
+                        "effective_mode": "partial",
+                        "source_task_id": source_task.id,
+                        "error": str(exc),
+                    },
+                ),
+            )
+            await self._workflow_run_service.fail_run(run=run, error_code=type(exc).__name__)
+            await self._schedule_runtime_failure_rollout_observation(
+                learner_goal_id=goal.id,
+                surface="replan",
+                trigger_source=job.trigger_source,
+                source_ref=run.id,
+            )
+            raise
+

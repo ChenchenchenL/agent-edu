@@ -1,9 +1,27 @@
 # Task Service 真实迁移方案
 
-## 当前状态
+> 状态说明（2026-06-15）：
+> 这份文档保留为迁移阶段的历史方案和分析基线，不再代表当前代码现状。
+> 当前真实状态请优先参考：
+>
+> - `docs/REMAINING_TASKS.md`
+> - `docs/PROGRESS_STATUS.md`
+> - `ARCHITECTURE.md`
+> - `packages/agent_core/src/agent_core/application/services/task_plan_lifecycle.py`
+> - `packages/agent_core/src/agent_core/application/services/task_autonomy_scheduling.py`
+> - `packages/agent_core/src/agent_core/application/services/task_runtime_skill.py`
+>
+> 具体偏差：
+>
+> - 文档开头描述的“4 个服务都是 facade”已经不成立
+> - `TaskPlanLifecycleService.generate_plan()` 已经不是简单委托
+> - `TaskAutonomySchedulingService` 已迁入多项真实逻辑，但仍处于 callback 协调的过渡态
+> - `TaskRuntimeSkillService` 仍然基本符合本文档描述的 facade 状态
 
-### ❌ 问题：假迁移（Facade层）
-当前4个服务只是薄封装，直接委托给39参数的God Class：
+## 历史起点
+
+### ❌ 当时的问题：假迁移（Facade层）
+以下描述的是这份方案编写时的起始状态，不代表当前代码：
 ```python
 class TaskPlanLifecycleService:
     def __init__(self, *, core: AutonomousTaskService):
@@ -13,7 +31,7 @@ class TaskPlanLifecycleService:
         return await self._core.generate_plan(...)  # 直接委托
 ```
 
-### ✅ 目标：真实迁移
+### ✅ 当时目标：真实迁移
 将业务逻辑从 `AutonomousTaskService` 移到4个专注服务，保留旧类作为兼容层。
 
 ---
@@ -322,7 +340,7 @@ git commit -m "refactor: migrate get_plan to TaskPlanLifecycleService"
 ### 成功指标
 - `task.py` 从 3623行 → < 200行
 - 4个facade服务每个 < 800行
-- 测试覆盖率 > 80%
+- 高风险路径具备充分的风险驱动测试覆盖
 - 无性能回归
 - 向后兼容（旧代码仍可通过 `AutonomousTaskService` 调用）
 

@@ -2,7 +2,16 @@
 
 ## 统一使用 Google Style
 
-所有Python代码必须使用Google Style docstring。
+需要写 docstring 的 Python 代码统一使用 Google Style。
+
+最低强制范围：
+
+- public service entrypoints
+- protocol methods
+- repository public methods
+- complex orchestration methods
+
+私有且短小、自解释的 helper 不强制要求 docstring。
 
 ## 模块级文档
 

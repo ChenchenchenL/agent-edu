@@ -48,6 +48,7 @@ from agent_core.application.services.tool_plan_runtime import (
     ToolPlanRuntimeExecutor,
 )
 from agent_core.application.services.task_status_update_support import TaskStatusUpdateSupportService
+from agent_core.application.services.task_autonomy_scheduling import TaskAutonomySchedulingService
 from agent_core.application.services.workflow import WorkflowRunService
 from agent_core.application.tools.registry import InternalToolRegistry
 from agent_core.application.tools.registry import ToolExecutionRequest, ToolSpec
@@ -198,6 +199,35 @@ class AutonomousTaskService:
             should_schedule_assessment=self._should_schedule_assessment,
             derive_replan_mode=self._derive_replan_mode,
             inline_status_followup_handler=self._run_inline_status_followups,
+        )
+        from agent_core.application.services.autonomy_jobs.dispatcher import AutonomyJobDispatcherService
+        from agent_core.application.services.autonomy_jobs.handlers import (
+            ReplanJobHandler,
+            ReviewSchedulingJobHandler,
+            AssessmentGenerationJobHandler,
+            DailyTaskMaterializationJobHandler,
+        )
+        autonomy_job_dispatcher = AutonomyJobDispatcherService()
+        autonomy_job_dispatcher.register_handler("replan", ReplanJobHandler(db_session=db_session, core=self))
+        autonomy_job_dispatcher.register_handler("review_scheduling", ReviewSchedulingJobHandler(db_session=db_session, core=self))
+        autonomy_job_dispatcher.register_handler("assessment_generation", AssessmentGenerationJobHandler(db_session=db_session, core=self))
+        autonomy_job_dispatcher.register_handler("daily_task_materialization", DailyTaskMaterializationJobHandler(db_session=db_session, core=self))
+
+        self._autonomy_scheduling = TaskAutonomySchedulingService(
+            db_session=db_session,
+            goal_repository=goal_repository,
+            goal_autonomy_state_repository=goal_autonomy_state_repository,
+            learner_availability_repository=learner_availability_repository,
+            learner_topic_mastery_repository=learner_topic_mastery_repository,
+            autonomy_job_repository=autonomy_job_repository,
+            audit_service=audit_service,
+            sync_goal_state_callback=lambda goal_id, phase, reason, next_due_at=None: self._sync_goal_state(goal_id, phase=phase, reason=reason, next_due_at=next_due_at),
+            ensure_materialization_job_callback=lambda goal_id, trigger: self._ensure_daily_materialization_job(goal_id, trigger_source=trigger),
+            validate_timezone_callback=self._validate_timezone,
+            autonomy_job_service=autonomy_job_service,
+            trigger_reflection_callback=self._trigger_reflection_callback,
+            process_autonomy_job_callback=self._process_autonomy_job,
+            autonomy_job_dispatcher=autonomy_job_dispatcher,
         )
         self._autonomy_jobs_running = False
         self._register_internal_tools()
@@ -659,10 +689,6 @@ class AutonomousTaskService:
             raise NotFoundError(f"Workflow run '{run_id}' was not found.")
         return WorkflowRunResponse.model_validate(run)
 
-    async def get_goal_autonomy_state(self, goal_id: str) -> GoalAutonomyStateResponse:
-        state = await self._require_goal_autonomy_state(goal_id)
-        return GoalAutonomyStateResponse.model_validate(state)
-
     async def update_goal_availability(
         self,
         *,
@@ -703,22 +729,6 @@ class AutonomousTaskService:
             raise NotFoundError(f"Learner availability for goal '{goal.id}' was not found.")
         return LearnerAvailabilityResponse.model_validate(stored)
 
-    async def get_goal_availability(self, goal_id: str) -> LearnerAvailabilityResponse:
-        await self._require_goal(goal_id)
-        if self._learner_availability_repository is None:
-            raise NotFoundError(f"Learner availability for goal '{goal_id}' was not found.")
-        availability = await self._learner_availability_repository.get_by_goal(goal_id)
-        if availability is None:
-            raise NotFoundError(f"Learner availability for goal '{goal_id}' was not found.")
-        return LearnerAvailabilityResponse.model_validate(availability)
-
-    async def list_goal_mastery(self, goal_id: str) -> list[LearnerTopicMasteryResponse]:
-        await self._require_goal(goal_id)
-        if self._learner_topic_mastery_repository is None:
-            return []
-        masteries = await self._learner_topic_mastery_repository.list_by_goal(goal_id)
-        return [LearnerTopicMasteryResponse.model_validate(item) for item in masteries]
-
     async def pause_goal_autonomy(self, goal_id: str, reason: str | None = None) -> GoalAutonomyStateResponse:
         goal = await self._require_goal(goal_id)
         await self._sync_goal_state(goal_id, phase="paused", reason=reason or "paused")
@@ -755,81 +765,13 @@ class AutonomousTaskService:
         return await self._autonomy_job_repository.list_by_goal(goal_id)
 
     async def materialize_today(self, goal_id: str) -> GoalAutonomyStateResponse:
-        await self._require_goal(goal_id)
-        availability = await self._get_goal_availability_entity(goal_id)
-        timezone_name = self._validate_timezone(availability.timezone if availability is not None else None) or "UTC"
-        zone = ZoneInfo(timezone_name)
-        target_day = datetime.now(zone).date()
-        await self._schedule_autonomy_job(
-            learner_goal_id=goal_id,
-            job_type="daily_task_materialization",
-            trigger_source="manual_materialize_today",
-            due_at=datetime.now(timezone.utc),
-            idempotency_key=f"{goal_id}:manual_materialize_today:{datetime.now(timezone.utc).isoformat()}",
-            payload={
-                "window_days": 3,
-                "target_local_date": target_day.isoformat(),
-                "target_timezone": timezone_name,
-                "scheduled_local_time": "manual",
-            },
-        )
-        await self._db_session.commit()
-        await self.run_due_autonomy_jobs(raise_on_error=True, lease_owner="manual-materialize")
-        refreshed = await self._require_goal_autonomy_state(goal_id)
-        return GoalAutonomyStateResponse.model_validate(refreshed)
+        return await self._autonomy_scheduling.materialize_today(goal_id)
 
     async def manual_replan_goal(self, goal_id: str, payload: ManualReplanRequest) -> GoalAutonomyStateResponse:
-        goal = await self._require_goal(goal_id)
-        if payload.mode not in AUTONOMY_REPLAN_MODES:
-            raise ValidationError("Unsupported autonomy replan mode.")
-        job = await self._schedule_autonomy_job(
-            learner_goal_id=goal.id,
-            job_type="replan",
-            trigger_source=payload.trigger_source,
-            due_at=datetime.now(timezone.utc),
-            idempotency_key=f"{goal.id}:manual_replan:{payload.mode}:{payload.source_task_id or 'latest'}",
-            payload={
-                "mode": payload.mode,
-                "source_task_id": payload.source_task_id or "",
-            },
-        )
-        await self._sync_goal_state(goal.id, phase="replanning", next_due_at=datetime.now(timezone.utc), reason="manual_replan_requested")
-        await self._audit_service.record(
-            event_type="autonomy.replan.requested",
-            resource_type="learner_goal",
-            resource_id=goal.id,
-            actor="learner",
-            event_data={
-                "learner_goal_id": goal.id,
-                "trigger_source": payload.trigger_source,
-                "mode": payload.mode,
-                "source_task_id": payload.source_task_id,
-            },
-        )
-        await self._db_session.commit()
-        await self.run_due_autonomy_jobs(raise_on_error=True, lease_owner="manual-replan")
-        refreshed = await self._require_goal_autonomy_state(goal.id)
-        return GoalAutonomyStateResponse.model_validate(refreshed)
+        return await self._autonomy_scheduling.manual_replan_goal(goal_id, payload)
 
     async def run_periodic_goal_reflection(self, goal_id: str) -> GoalAutonomyStateResponse:
-        goal = await self._require_goal(goal_id)
-        if self._reflection_service is not None:
-            await self._reflection_service.trigger_reflection(
-                ReflectionTriggerRequest(
-                    learner_profile_id=goal.learner_profile_id,
-                    learner_goal_id=goal.id,
-                    scope="goal",
-                    target_type="learner_goal",
-                    target_id=goal.id,
-                    trigger_source="plan_replanned",
-                    reflection_depth=1,
-                    source_attempt_id=f"{goal.id}:{date.today().isoformat()}",
-                )
-            )
-        await self._sync_goal_state(goal.id, phase="active", reason="periodic_goal_reflection")
-        await self._db_session.commit()
-        refreshed = await self._require_goal_autonomy_state(goal.id)
-        return GoalAutonomyStateResponse.model_validate(refreshed)
+        return await self._autonomy_scheduling.run_periodic_goal_reflection(goal_id)
 
     async def run_due_autonomy_jobs(
         self,
@@ -838,115 +780,11 @@ class AutonomousTaskService:
         lease_owner: str = "inline",
         limit: int = 20,
     ) -> int:
-        if self._autonomy_job_repository is None:
-            return 0
-        if self._autonomy_jobs_running:
-            return 0
-        self._autonomy_jobs_running = True
-        try:
-            processed = 0
-            while processed < limit:
-                due_jobs = await self._autonomy_job_repository.list_due(
-                    now=datetime.now(timezone.utc),
-                    limit=limit - processed,
-                )
-                if not due_jobs:
-                    break
-                for job in due_jobs:
-                    claimed = await self._autonomy_job_repository.claim(job, lease_owner=lease_owner, lease_seconds=300)
-                    await self._audit_service.record(
-                        event_type="autonomy.job.claimed",
-                        resource_type="autonomy_job",
-                        resource_id=claimed.id,
-                        actor="system",
-                        event_data={
-                            "autonomy_job_id": claimed.id,
-                            "learner_goal_id": claimed.learner_goal_id,
-                            "job_type": claimed.job_type,
-                            "trigger_source": claimed.trigger_source,
-                            "attempt_count": claimed.attempt_count,
-                        },
-                    )
-                    await self._db_session.commit()
-                    try:
-                        workflow_run_id = await self._process_autonomy_job(claimed)
-                        completed = claimed.complete(workflow_run_id=workflow_run_id)
-                        await self._autonomy_job_repository.update(completed)
-                        await self._audit_service.record(
-                            event_type="autonomy.job.completed",
-                            resource_type="autonomy_job",
-                            resource_id=completed.id,
-                            actor="system",
-                            event_data={
-                                "autonomy_job_id": completed.id,
-                                "learner_goal_id": completed.learner_goal_id,
-                                "job_type": completed.job_type,
-                                "workflow_run_id": workflow_run_id,
-                            },
-                        )
-                        await self._db_session.commit()
-                        processed += 1
-                    except Exception as exc:
-                        if claimed.job_type == LONG_TERM_MEMORY_MATERIALIZATION_REPLAY_JOB_TYPE and claimed.attempt_count < claimed.max_attempts:
-                            retry_due_at = datetime.now(timezone.utc) + long_term_memory_replay_backoff(claimed.attempt_count)
-                            retry = claimed.retry(due_at=retry_due_at)
-                            await self._autonomy_job_repository.update(retry)
-                            await self._audit_service.record_durable(
-                                event_type="long_term_memory.materialization.replay_retry_scheduled",
-                                resource_type="autonomy_job",
-                                resource_id=retry.id,
-                                actor="system",
-                                event_data={
-                                    "autonomy_job_id": retry.id,
-                                    "learner_goal_id": retry.learner_goal_id,
-                                    "job_type": retry.job_type,
-                                    "attempt_count": retry.attempt_count,
-                                    "max_attempts": retry.max_attempts,
-                                    "retry_due_at": retry.due_at.isoformat(),
-                                    "error_code": type(exc).__name__,
-                                    "error": str(exc),
-                                },
-                            )
-                            await self._db_session.commit()
-                            processed += 1
-                            continue
-                        failed = claimed.fail(error_code=type(exc).__name__)
-                        await self._autonomy_job_repository.update(failed)
-                        if claimed.job_type == LONG_TERM_MEMORY_MATERIALIZATION_REPLAY_JOB_TYPE:
-                            await self._audit_service.record_durable(
-                                event_type="long_term_memory.materialization.replay_exhausted",
-                                resource_type="autonomy_job",
-                                resource_id=failed.id,
-                                actor="system",
-                                event_data={
-                                    "autonomy_job_id": failed.id,
-                                    "learner_goal_id": failed.learner_goal_id,
-                                    "job_type": failed.job_type,
-                                    "attempt_count": failed.attempt_count,
-                                    "max_attempts": failed.max_attempts,
-                                    "error_code": type(exc).__name__,
-                                    "error": str(exc),
-                                },
-                            )
-                        await self._audit_service.record_durable(
-                            event_type="autonomy.job.failed",
-                            resource_type="autonomy_job",
-                            resource_id=failed.id,
-                            actor="system",
-                            event_data={
-                                "autonomy_job_id": failed.id,
-                                "learner_goal_id": failed.learner_goal_id,
-                                "job_type": failed.job_type,
-                                "error_code": type(exc).__name__,
-                                "error": str(exc),
-                            },
-                        )
-                        await self._db_session.commit()
-                        if raise_on_error:
-                            raise
-            return processed
-        finally:
-            self._autonomy_jobs_running = False
+        return await self._autonomy_scheduling.run_due_autonomy_jobs(
+            raise_on_error=raise_on_error,
+            lease_owner=lease_owner,
+            limit=limit,
+        )
 
     async def _process_autonomy_job(self, job: ScheduledAutonomyJob) -> str | None:
         if job.job_type == "review_scheduling":
@@ -2218,6 +2056,21 @@ class AutonomousTaskService:
         await self._sync_goal_state(goal_id, phase="active", current_plan_id=plan_id, reason=trigger_source)
         await self._ensure_daily_materialization_job(goal_id, trigger_source=trigger_source)
         await self._schedule_periodic_goal_reflection_job(goal_id, trigger_source=trigger_source)
+
+    async def _trigger_reflection_callback(self, profile_id: str, goal_id: str) -> None:
+        if self._reflection_service is not None:
+            await self._reflection_service.trigger_reflection(
+                ReflectionTriggerRequest(
+                    learner_profile_id=profile_id,
+                    learner_goal_id=goal_id,
+                    scope="goal",
+                    target_type="learner_goal",
+                    target_id=goal_id,
+                    trigger_source="plan_replanned",
+                    reflection_depth=1,
+                    source_attempt_id=f"{goal_id}:{date.today().isoformat()}",
+                )
+            )
 
     async def _record_task_attempt(self, task: DailyTask) -> TaskAttempt | None:
         if self._task_attempt_repository is None:

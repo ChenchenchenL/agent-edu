@@ -41,6 +41,11 @@ class SkillLifecycleThresholds:
     DEPRECATION_NEGATIVE_RATE_THRESHOLD: float = 0.5
     DEPRECATION_MIN_NEGATIVE_COUNT: int = 3
     ARCHIVE_STALE_DAYS: int = 90
+    # Rollout observation counts required before artifact can be stabilised or
+    # a staged replacement considered ready.  Kept separate from the generic
+    # STABLE_MIN_OBSERVATION_COUNT so each gate can be tuned independently.
+    STABLE_REQUIRED_PROMOTE_OBSERVATION_COUNT: int = 2
+    REPLACEMENT_READINESS_PROMOTE_OBSERVATION_MIN: int = 2
 
     def __setattr__(self, name, value):
         """禁止修改属性，确保不可变性"""

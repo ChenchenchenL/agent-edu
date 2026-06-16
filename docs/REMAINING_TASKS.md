@@ -1,277 +1,198 @@
 # 剩余未完成任务清单
 
-## ⏳ 待完成任务总览
+## 文档定位
 
-**已完成**: 11/19 (58%)  
-**待完成**: 8/19 (42%)
+这份文档只回答一个问题：
 
-> 运行时修正（2026-06-12）：
-> `TaskPlanLifecycleService` 的 6 个读方法、`update_task_status()` 主路径、`generate_plan()`
-> 主流程都已真实迁移；其中 attempt/mastery/post-update 已抽到独立 support service。
-> 当前剩余问题不再是 `generate_plan()` 兼容委托，而是 autonomy/runtime-skill 两个 façade
-> 仍未真实下沉，以及部分深层协作逻辑仍通过 callback 与 legacy core 协调。
+> 按当前仓库代码状态，哪些重构任务已经真正完成，哪些只是部分迁移，哪些仍未开始。
+
+它不是历史记录，也不是愿景文档。若与旧总结冲突，以当前代码为准。
 
 ---
 
-## Phase 2: 大文件拆分 (0/3) - 建议延后 ⏸️
+## 当前总体判断
 
-### #7 - 拆分 repositories.py
-**现状**: 4,268行，44个Repository类  
-**目标**: 拆分为6个模块（skill, memory, planning, reflection, learner, audit, session）  
-**复杂度**: HIGH  
-**预计时间**: 8-12小时  
-**状态**: 框架已建立，测试准备完成  
-**建议**: 使用自动化工具或新会话处理
+当前最需要避免的误判有两个：
 
-### #8 - 拆分 skills.py
-**现状**: 4,678行  
-**目标**: 拆分为8个模块  
-**复杂度**: HIGH  
-**预计时间**: 10-15小时  
-**状态**: 未开始  
-**建议**: 延后到Phase 3完成后
+1. 不要把 `TaskPlanLifecycleService` 已实迁，误读成整个任务服务体系已经完成解耦。
+2. 不要把 `TaskAutonomySchedulingService` 的方法迁移完成，误写成 `AutonomousTaskService` 已经退出主舞台。
 
-### #9 - 拆分领域实体文件
-**复杂度**: MEDIUM  
-**预计时间**: 3-5小时  
-**状态**: 未开始
+实际状态是：
+
+- `TaskPlanLifecycleService`：主路径已经真实迁移
+  - `get/list plan`
+  - `get/list task`
+  - `update_task_status()`
+  - `generate_plan()`
+- `TaskAutonomySchedulingService`：已有较多真实逻辑，但仍通过 callback 协调 legacy core
+- `TaskRuntimeSkillService`：已完全完成拆解与清理收口 (移除 `core` 注入、清理容器接线、同步文档与注释)
+- `AutonomousTaskService`：仍然存在，且仍是大类兼容核心，不是空壳委托层
+- `skills.py`：仍是 4700+ 行巨型文件，Task #8 没动
 
 ---
 
-## Phase 3: 架构重构 (5/10) - 继续推进 🔄
+## 任务状态
 
-### #14 - TaskAutonomySchedulingService ⭐⭐⭐
-**方法清单** (12个):
+### #7 - 拆分 repositories.py ✅ 已完成
 
-✅ **简单方法** (可快速迁移 - 1-2小时):
-- `get_goal_autonomy_state()` - 获取自主状态
-- `get_goal_availability()` - 获取学习者可用性
-- `list_goal_mastery()` - 列出主题掌握度
+- 已按 7 个领域拆分到 `infrastructure/db/repositories/`
+- `repositories.py` 保留为 re-export 兼容层
+- 当前判断：完成
 
-⚠️ **中等方法** (需要验证和审计 - 3-4小时):
-- `update_goal_availability()` - 更新可用性
-- `pause_goal_autonomy()` - 暂停自主
-- `resume_goal_autonomy()` - 恢复自主
-- `list_autonomy_jobs()` - 列出自主任务
-- `materialize_today()` - 物化今日工作窗口
-- `manual_replan_goal()` - 手动重新规划
+### #8 - 拆分 skills.py ❌ 未开始
 
-🔴 **复杂方法** (需要集成 - 建议callback):
-- `run_periodic_goal_reflection()` - 定期反思
-- `run_due_autonomy_jobs()` - 运行到期任务
+- 当前文件规模：`application/services/skills.py` 约 4710 行
+- 目标状态：拆为多个聚焦服务模块，旧入口保留兼容层
+- 当前判断：未开始，不应被包装成“接近完成”
 
-**总预计**: 4-6小时  
-**建议**: 先迁移3个简单方法（1-2小时），中等方法用callback
+### #9 - 拆分领域实体文件 ✅ 已完成
 
----
+- `domain/entities/` 已按 7 个领域拆为子包
+- 旧导入路径通过 `__init__.py` facade 保持兼容
+- 当前判断：完成
 
-### #15 - TaskRuntimeSkillService ❌
-**方法清单**: 18个复杂内部方法
+### #12 / #17 - TaskPlanLifecycleService 迁移 🔄 部分完成
 
-**包括**:
-- `resolve_autonomy_execution_plan()`
-- `execute_runtime_tool_plan()`
-- `build_tool_plan_execution_context()`
-- `resolve_review_skill_for_runtime()`
-- ... 等18个
+已完成：
 
-**特点**: 
-- 所有方法都是内部辅助方法
-- 调用core的私有方法
-- 高度耦合skill binding、runtime registry等模块
+- 只读 plan/task/workflow 查询已迁移
+- `update_task_status()` 已迁移到 `TaskPlanLifecycleService`
+- `update_task_status()` 的 attempt/mastery/post-update 已抽到 support service
+- `generate_plan()` 已迁移到 `TaskPlanLifecycleService`
 
-**复杂度**: VERY HIGH  
-**建议**: **不适合当前迁移**，需要先重构skill相关模块
+未完成：
 
----
+- `generate_plan()` 仍依赖 callback 协调：
+  - goal state sync
+  - rollout observation
+  - workflow failure reflection
+- `AutonomousTaskService` 中仍保留旧实现和对照路径
+- 服务边界尚未完全收口
 
-### #16 - 最终清理和文档 ⭐⭐⭐
-**任务**:
-- 清理临时代码
-- 更新ARCHITECTURE.md
-- 创建迁移完成报告
-- 性能测试和benchmark
-- API集成测试补充
+当前判断：
 
-**复杂度**: LOW  
-**预计时间**: 2-3小时  
-**价值**: 高（总结和文档化）
+- 不能再把这块写成“待迁移”
+- 也不能写成“完全完成”
 
----
+### #13 - TaskExecutionService ✅ 基本完成
 
-### #18 - 迁移 generate_plan ⭐⭐
-**现状**: ✅ **主流程已迁移完成**
+- 执行逻辑已独立为专门服务
+- 仍可能保留少量与 legacy core 的兼容协作，但主责任已独立
+- 当前判断：按当前 Phase 3 目标，基本完成
+
+### #14 - TaskAutonomySchedulingService 🔄 部分完成
+
+已真实迁移的方法包括：
+
+- `get_goal_autonomy_state()`
+- `get_goal_availability()`
+- `update_goal_availability()`
+- `list_goal_mastery()`
+- `pause_goal_autonomy()`
+- `resume_goal_autonomy()`
+- `list_autonomy_jobs()`
+- `materialize_today()`
+- `manual_replan_goal()`
+- `run_periodic_goal_reflection()`
+- `run_due_autonomy_jobs()`
+
+但未完成点很明确：
+
+- 复杂副作用仍通过 callback 回调到 legacy core
+- 容器仍把关键协调逻辑绑定回 `AutonomousTaskService._...`
+- `AutonomousTaskService` 仍不是纯委托空壳
+
+当前判断：
+
+- 方法迁移层面可以视为完成
+- 架构解耦层面不能视为完成
+
+### #15 - TaskRuntimeSkillService ✅ 已完全完成
+
+当前状态：
+
+- 以下方法均已具备独立实现，不再调用 `AutonomousTaskService` 私有方法：
+  - `resolve_autonomy_execution_plan()`
+  - `execute_runtime_tool_plan()`
+  - `build_tool_plan_execution_context()`
+  - `resolve_review_skill_for_runtime()`
+  - `resolve_replan_skill_for_runtime()`
+  - `resolve_assessment_skill_for_runtime()`
+  - `schedule_surface_rollout_observation()`
+  - `schedule_runtime_failure_rollout_observation()`
+  - `get_rollout_overlay_payload()`
+  - `get_skill_binding()`
+  - `review_intervals()`
+
+已完成：
+- 构造器已支持独立依赖注入
+- Container 已完成 wire-up
+- 去除 `TaskRuntimeSkillService.__init__()` 中未使用的 `core` 参数
+- 去除 `container.py` 中传给 `TaskRuntimeSkillService(...)` 的 `core` 传参
+- 修正文档和文件头中仍残留的 facade/迁移中表述
+
+### #16 - 最终清理和文档 🔄 持续进行
+
+已完成：
+
+- Repository 拆分后的文档和测试同步已做
+- 若干状态文档已开始回收过时结论
+
+未完成：
+
+- 多份迁移文档仍带有历史阶段口径
+- 文档与代码的完成度数字尚未完全统一
+
+### #18 - generate_plan 迁移主路径 ✅ 已完成，边界清理未完成
+
+已完成：
+
 - `TaskPlanLifecycleService.generate_plan()` 已接管主流程
-- 已显式注入 `planner_service` / `workflow_run_service` / `memory_service`
-- goal state 同步、rollout 观测、workflow failure reflection 目前通过 callback 协调
+- 已注入 `planner_service` / `workflow_run_service` / `memory_service`
 
-**依赖**:
-- planner_service (核心)
-- workflow_run_service (工作流管理)
-- memory_service (可选，记忆解读)
-- audit_service (审计日志)
-- rollout_observation_scheduler (可选，rollout观测)
+未完成：
 
-**复杂性**:
-- 仍存在协作边界: goal state 同步 / rollout 观测 / failure reflection
-- 这些副作用尚未形成独立服务，目前通过 callback 维持边界
-- `AutonomousTaskService` 中仍保留旧实现，可作为对照，但不再是 API 主路径依赖
+- 仍通过 callback 协调跨服务副作用
+- 旧 core 中仍保留旧实现
 
-**状态**: 已完成主迁移，剩余为清理/收口  
-**建议**: 不再单列为头号任务；后续在 Task 16 中收口文档和 callback 边界
+当前判断：
+
+- 不应再作为“待启动的主迁移任务”
+- 后续工作应改为“边界清理和 legacy 收口”
 
 ---
 
-## 📊 完成度统计
+## 下一步优先级
 
-| 类别 | 完成 | 待完成 | 总计 | 进度 |
-|------|------|--------|------|------|
-| Phase 1 | 6 | 0 | 6 | 100% ✅ |
-| Phase 2 | 0 | 3 | 3 | 0% ⏸️ |
-| Phase 3 | 6.54 | 3.46 | 10 | 65.4% 🔄 |
-| **总计** | **12.54** | **6.46** | **19** | **66%** |
+### 高优先级
 
----
+1. 收口 `TaskPlanLifecycleService.generate_plan()` 的 callback 边界
+2. 收口 `TaskAutonomySchedulingService` 对 legacy core 的 callback 依赖
+3. 拆分 `skills.py`
 
-## 🎯 优先级建议
+### 中优先级
 
-### 🥇 高优先级（下次会话推荐）
+1. 清理 `AutonomousTaskService` 中已迁移但仍保留的对照实现
+2. 统一架构文档、进度文档和历史迁移文档口径
 
-#### 1. Task 14部分 - 简单方法迁移
-- **内容**: 迁移3个简单get方法
-- **预计**: 1-2小时
-- **价值**: 快速增加完成度，积累经验
-- **难度**: LOW
+### 低优先级
 
-#### 2. Task 16 - 清理和文档
-- **内容**: 更新架构文档，创建迁移报告
-- **预计**: 2-3小时
-- **价值**: 总结当前成果，为后续工作准备
-- **难度**: LOW
+1. 再做新的“完成度百分比”汇报
 
-**合计**: 3-5小时，完成后进度→68%
+在 `skills.py` 和 task/autonomy callback 边界这两块没动之前，继续堆百分比没有意义。
 
 ---
 
-### 🥈 中优先级（需要规划）
+## 风险提醒
 
-#### 3. Task 14完整 - TaskAutonomySchedulingService
-- **内容**: 迁移中等复杂度方法
-- **预计**: 4-6小时
-- **需要**: 回调模式处理状态同步
-- **难度**: MEDIUM
+当前最容易误导后续实现的不是代码，而是文档口径：
 
-#### 4. Task 18 - generate_plan迁移
-- **内容**: 完整迁移generate_plan方法
-- **预计**: 8-12小时（独立会话）
-- **价值**: 完成TaskPlanLifecycleService
-- **难度**: VERY HIGH
+- 有的文档把“方法迁移”写成“服务解耦完成”
+- 有的文档把“主路径已迁移”写成“仍待迁移”
+- 有的文档仍把历史方案当现状描述
 
-**合计**: 12-18小时，完成后进度→79%
+后续排期和设计讨论应优先引用：
 
----
-
-### 🥉 低优先级（建议延后）
-
-#### 5. Task 15 - TaskRuntimeSkillService
-- **原因**: 不适合当前迁移
-- **需要**: 先重构skill模块
-- **建议**: Phase 4独立处理
-
-#### 6. Task 7-9 - 大文件拆分
-- **原因**: 机械性工作，价值相对较低
-- **建议**: 使用自动化工具或批量处理
-
----
-
-## 💡 完成路径建议
-
-### 方案A: 快速收尾（推荐）✅
-**目标**: 完成Phase 3核心任务，达到70%总进度
-
-**步骤**:
-1. Task 14部分（1-2h）
-2. Task 16（2-3h）
-3. 创建Phase 4规划
-
-**结果**: 13/19 = **68%**，Phase 3完成 **60%**  
-**投入**: 3-5小时  
-**性价比**: ⭐⭐⭐⭐⭐
-
----
-
-### 方案B: 完整Phase 3
-**目标**: 完成所有可迁移的Phase 3任务
-
-**步骤**:
-1. Task 14完整（4-6h）
-2. Task 18（8-12h，独立会话）
-3. Task 16（2-3h）
-
-**结果**: 15/19 = **79%**，Phase 3完成 **80%**（跳过Task 15）  
-**投入**: 15-20小时（2-3个会话）  
-**性价比**: ⭐⭐⭐⭐
-
----
-
-### 方案C: 全面完成
-**目标**: 完成所有任务
-
-**步骤**:
-1. Phase 3剩余任务（15-20h）
-2. Phase 2大文件拆分（20-30h）
-
-**结果**: 19/19 = **100%**  
-**投入**: 35-50小时（5-8个会话）  
-**性价比**: ⭐⭐
-
-**评估**: 投入产出比较低，不推荐
-
----
-
-## 🎯 我的推荐
-
-### 推荐策略：方案A + 部分方案B
-
-#### 第一步：快速收尾（下次会话）
-- ✅ Task 14部分（3个简单方法）
-- ✅ Task 16（清理和文档）
-- **预计**: 3-5小时
-- **进度**: 58% → 68%
-
-#### 第二步：中期规划（独立会话）
-- 📋 Task 18（generate_plan迁移）
-- 📋 Task 14完整（中等复杂度方法）
-- **预计**: 12-18小时
-- **进度**: 68% → 79%
-
-#### 第三步：延后处理
-- ⏸️ Task 15（需要skill模块重构）
-- ⏸️ Task 7-9（大文件拆分，使用工具）
-
----
-
-## ✅ 推荐理由
-
-1. **快速达到70%完成度** - 体现阶段性成果
-2. **完成Phase 3核心价值** - 架构重构主要目标达成
-3. **为后续工作建立清晰基础** - 文档和测试完善
-4. **避免陷入低价值工作** - 跳过机械性拆分任务
-5. **保持灵活性** - 可根据实际需求调整优先级
-
----
-
-## 📅 时间规划示例
-
-### 下次会话（3-5小时）
-- 0-1h: Task 14部分 - get_goal_autonomy_state
-- 1-2h: Task 14部分 - get_goal_availability + list_goal_mastery
-- 2-4h: Task 16 - 更新文档、测试、报告
-- 4-5h: 提交、总结
-
-### 后续会话（8-12小时）
-- 独立处理Task 18 - generate_plan迁移
-
----
-
-**总结**: 建议先完成**方案A**（3-5小时），快速达到68%完成度，然后评估是否继续方案B。
+- 当前服务代码
+- `container.py` 的真实接线
+- 这份 `REMAINING_TASKS.md`

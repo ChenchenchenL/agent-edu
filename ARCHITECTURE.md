@@ -140,10 +140,10 @@ Use these names consistently in code and documentation:
 
 - Bridges the agent system with APIs, storage, queues, external tools, and user-facing surfaces.
 - Isolates infrastructure and transport concerns from domain logic.
-- Current user-facing surface direction is CLI-first:
-  - installable terminal CLI for scriptable operations
-  - learner-first TUI workspace for long-running study sessions
-  - future QQ / 微信 / other connectors should reuse the same application boundary
+- Current user-facing surface direction is Web-first:
+  - browser-based learner and operator workbench surfaces
+  - future connectors such as QQ / 微信 / other channels should reuse the same
+    application boundary
 
 ## Pedagogical Safety
 
@@ -253,13 +253,24 @@ The following architectural constraints are mandatory:
   - **Service Architecture Refactoring (Phase 3 partial, 2026-06)**:
     - Protocol-based service interfaces (13 interfaces)
     - Dependency injection container (dual-layer: Application + RequestScope)
-    - Service decomposition from monolithic `AutonomousTaskService`:
-      - `TaskPlanLifecycleService`: plan/task CRUD, status updates (60% complete)
-      - `TaskExecutionService`: task execution logic (100% complete)
-      - `TaskAutonomySchedulingService`: autonomy state queries (25% complete)
-      - `TaskRuntimeSkillService`: skill resolution (facade, pending refactor)
-    - Callback pattern for complex coordination without circular dependencies
-    - Backward compatibility maintained via dual-track operation
+    - Service decomposition from monolithic `AutonomousTaskService` is in a mixed transition state:
+      - `TaskPlanLifecycleService`: plan/task CRUD, `update_task_status()`, and `generate_plan()` main path have been migrated; some cross-service side effects still use callbacks
+      - `TaskExecutionService`: task execution logic is largely independent
+      - `TaskAutonomySchedulingService`: autonomy queries and several scheduling flows have been migrated, but complex coordination still routes through callbacks into legacy core
+      - `TaskRuntimeSkillService`: runtime skill orchestration methods have been migrated off legacy private-method calls; unused `core` injection has been removed, container wiring simplified, and comment/doc synchronized
+    - Callback pattern currently bridges complex coordination without circular dependencies, but is also the main sign that migration is not yet fully closed
+    - Backward compatibility is maintained through dual-track operation with legacy core still present
+    - **Repository module split (2026-06-14)**:
+      - `infrastructure/db/repositories.py` (4,268 lines, 44 classes) converted to a 65-line re-export layer
+      - 44 Repository classes split into 7 domain modules under `infrastructure/db/repositories/`:
+        - `session.py`: SessionRepository, SessionMessageRepository, SessionQuizRepository
+        - `skill.py`: SkillArtifactRepository, SkillUsageEventRepository, SkillCuratorRecommendationRepository
+        - `audit.py`: AuditRepository
+        - `learner.py`: LearnerProfileRepository, LearnerGoalRepository, GoalAutonomyStateRepository, ScheduledAutonomyJobRepository, LearnerAvailabilityRepository, LearnerTopicMasteryRepository, TaskAttemptRepository
+        - `planning.py`: StudyPlanRepository, PlanStageRepository, DailyTaskRepository, WorkflowRunRepository
+        - `memory.py`: 11 memory-related Repository classes
+        - `reflection.py`: 15 reflection-related Repository classes
+      - All 52 existing call-site imports remain backward-compatible via the re-export layer
     - Documentation: `docs/PHASE3_MIGRATION_REPORT.md`
   - explicit non-goals for this phase:
     - non-HTTP external connectors
@@ -397,6 +408,25 @@ The top-level organization should converge toward:
 - `packages/`: shared domain logic, schemas, memory, workflow, and safety modules
 - `infra/`: deployment, environment, operations, and infrastructure definitions
 - `docs/`: extended design, ADRs, and implementation notes
+
+Current `packages/agent_core/src/agent_core/` structure:
+
+- `api/`: FastAPI routes, dependencies, and access control
+- `application/services/`: application-layer service implementations
+- `application/interfaces/`: protocol-based service interfaces
+- `application/skills/`: skill definitions and runtime
+- `application/tools/`: tool definitions and runtime
+- `cli/`: installable CLI and TUI entry points
+- `domain/entities/`: domain entity definitions
+- `domain/schemas/`: validated boundary schemas
+- `infrastructure/db/models.py`: SQLAlchemy ORM models
+- `infrastructure/db/repositories.py`: re-export layer (backward-compatible shim)
+- `infrastructure/db/repositories/`: domain-split repository modules
+  - `session.py`, `skill.py`, `audit.py`, `learner.py`, `planning.py`, `memory.py`, `reflection.py`
+  - `__init__.py`: unified export of all 44 Repository classes
+- `infrastructure/container.py`: dependency injection container
+- `infrastructure/llm/`: LLM provider implementations
+- `infrastructure/embedding/`: embedding provider implementations
 
 Exact paths can evolve, but responsibilities should remain separated along these lines.
 

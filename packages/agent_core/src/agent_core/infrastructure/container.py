@@ -14,9 +14,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent_core.application.services.memory import MemoryService
 from agent_core.application.services.task import AutonomousTaskService
 from agent_core.application.services.task_autonomy_scheduling import TaskAutonomySchedulingService
+
+from agent_core.application.services.autonomy_jobs.dispatcher import AutonomyJobDispatcherService
+from agent_core.application.services.autonomy_jobs.handlers import (
+    ReplanJobHandler,
+    ReviewSchedulingJobHandler,
+    AssessmentGenerationJobHandler,
+    DailyTaskMaterializationJobHandler,
+)
+
 from agent_core.application.services.task_execution import TaskExecutionService
 from agent_core.application.services.task_plan_lifecycle import TaskPlanLifecycleService
 from agent_core.application.services.task_runtime_skill import TaskRuntimeSkillService
+from agent_core.application.services.review import ReviewService
 from agent_core.application.services.task_status_update_support import TaskStatusUpdateSupportService
 from agent_core.application.services.workspace import WorkspaceService
 from agent_core.infrastructure.db.repositories import (
@@ -132,9 +142,9 @@ class RequestScopeContainer:
                 audit_service=audit_service,
                 memory_service=core._memory_service,
                 status_update_support=status_update_support,
-                sync_goal_state_after_plan=core._sync_goal_state_after_plan,
-                schedule_rollout_observation=core._schedule_surface_rollout_observation,
-                trigger_workflow_failure_reflection=core._trigger_workflow_failure_reflection,
+                sync_goal_state_after_plan=lambda goal_id, plan_id, trigger: core._sync_goal_state_after_plan(goal_id, plan_id, trigger_source=trigger),
+                schedule_rollout_observation=lambda goal_id, surface, trigger, ref: core._schedule_surface_rollout_observation(learner_goal_id=goal_id, surface=surface, trigger_source=trigger, source_ref=ref),
+                trigger_workflow_failure_reflection=lambda profile_id, goal_id, run_id, task_id, plan_id: core._trigger_workflow_failure_reflection(goal_learner_profile_id=profile_id, goal_id=goal_id, workflow_run_id=run_id, daily_task_id=task_id, study_plan_id=plan_id),
             )
 
             # Build TaskExecutionService (real implementation)
@@ -147,10 +157,19 @@ class RequestScopeContainer:
                 quiz_service=quiz_service,
                 workflow_run_service=workflow_run_service,
                 audit_service=audit_service,
-                failure_reflection_callback=None,  # TODO: wire reflection service
+                failure_reflection_callback=None,  # Not wired: reflection coordination still handled by AutonomousTaskService callback; see REMAINING_TASKS.md Task #14/#18
             )
 
-            # Build TaskAutonomySchedulingService (partial real implementation with callbacks)
+            
+            # Setup Autonomy Job Dispatcher
+            autonomy_job_dispatcher = AutonomyJobDispatcherService()
+            autonomy_job_dispatcher.register_handler("replan", ReplanJobHandler(db_session=self._session, core=core))
+            autonomy_job_dispatcher.register_handler("review_scheduling", ReviewSchedulingJobHandler(db_session=self._session, core=core))
+            autonomy_job_dispatcher.register_handler("assessment_generation", AssessmentGenerationJobHandler(db_session=self._session, core=core))
+            autonomy_job_dispatcher.register_handler("daily_task_materialization", DailyTaskMaterializationJobHandler(db_session=self._session, core=core))
+
+            # Build TaskAutonomySchedulingService (real implementation with callbacks)
+
             autonomy_scheduling = TaskAutonomySchedulingService(
                 db_session=self._session,
                 goal_repository=goal_repository,
@@ -159,11 +178,26 @@ class RequestScopeContainer:
                 learner_topic_mastery_repository=core._learner_topic_mastery_repository,
                 autonomy_job_repository=core._autonomy_job_repository,
                 audit_service=audit_service,
-                sync_goal_state_callback=core._sync_goal_state,
-                ensure_materialization_job_callback=core._ensure_daily_materialization_job,
+                sync_goal_state_callback=lambda goal_id, phase, reason, next_due_at=None: core._sync_goal_state(goal_id, phase=phase, reason=reason, next_due_at=next_due_at),
+                ensure_materialization_job_callback=lambda goal_id, trigger: core._ensure_daily_materialization_job(goal_id, trigger_source=trigger),
                 validate_timezone_callback=core._validate_timezone,
+                autonomy_job_service=core._autonomy_job_service,
+                trigger_reflection_callback=core._trigger_reflection_callback,
+                process_autonomy_job_callback=core._process_autonomy_job,
+                autonomy_job_dispatcher=autonomy_job_dispatcher,
             )
-            runtime_skill = TaskRuntimeSkillService(core=core)
+
+            # Build TaskRuntimeSkillService (completed runtime skill orchestration split)
+            runtime_skill = TaskRuntimeSkillService(
+                runtime_registry=core._runtime_registry,
+                skill_usage_service=core._skill_usage_service,
+                goal_skill_binding_resolver=core._goal_skill_binding_resolver,
+                tool_plan_runtime_executor=core._tool_plan_runtime_executor,
+                internal_tool_registry=core._internal_tool_registry,
+                rollout_resolver=core._rollout_resolver,
+                rollout_observation_scheduler=core._rollout_observation_scheduler,
+                review_service=ReviewService(task_attempt_repository=core._task_attempt_repository),
+            )
 
             self._task_services = TaskServiceBundle(
                 core=core,

@@ -413,6 +413,8 @@ class PrometheusHttpMiddleware(BaseHTTPMiddleware):
         finally:
             route = request.scope.get("route")
             route_label = getattr(route, "path", request.url.path)
+            if request.url.path.startswith("/api/v1") and not route_label.startswith("/api/v1"):
+                route_label = "/api/v1" + route_label
             observe_http_request(
                 method=request.method,
                 route=route_label,

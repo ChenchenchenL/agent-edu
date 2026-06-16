@@ -39,7 +39,7 @@
 - 默认验证环境为 Docker compose，后续 smoke test 也应以它为基线
 - 工程组织方式参考 Hermes 的 unified core / skills / session / curator 思路，但 learner model、mastery、curriculum、reflection、pedagogical safety 由本项目自研
 - 详细映射见 [docs/hermes-to-edu-mapping.md](./hermes-to-edu-mapping.md)
-- 当前交互表面优先走 CLI / TUI，设计说明见 [docs/CLI_TUI_DESIGN.md](./CLI_TUI_DESIGN.md)
+- 当前交互表面已调整为 Web-first；历史 CLI / TUI 设计资料仅保留作参考，不再代表当前产品表面方向
 
 ---
 
@@ -465,7 +465,7 @@
 这一阶段的核心变化是：
 
 - 系统从“响应式教学”转向“带有主动组织能力的教学”
-- 同时开始从“纯 API 后端”转向“CLI-first 的学习工作台”
+- 同时开始从“纯 API 后端”扩展过历史 CLI / TUI 工作台实现；当前产品表面方向已调整为 Web-first
 
 但前提仍然成立：
 
@@ -509,7 +509,7 @@
 补充：
 
 - 当前已新增 workspace summary / filtered task list / memory browse API
-- 当前已新增 `agent-edu` CLI 与 learner-first TUI baseline
+- 当前已保留历史 `agent-edu` CLI 与 learner-first TUI baseline 作为参考实现资产
 - terminal surface 仍严格复用 API contract，而不是复制业务逻辑
 
 这一阶段的目标不是简单“存更多数据”，而是：
