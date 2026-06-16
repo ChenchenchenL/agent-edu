@@ -1,6 +1,19 @@
 # agent-edu
 # 自进化教育智能体（Educational Evolutionary Agent）完整架构设计
 
+> 状态说明（2026-06-16）：
+> 这份文档保留为历史系统设计说明和早期整体叙事材料，不再代表当前主规范。
+> 当前应优先参考：
+>
+> - `ARCHITECTURE.md`
+> - `README.md`
+> - `AGENTS.md`
+> - `rules/backend.md`
+> - `rules/frontend.md`
+> - `rules/security.md`
+> - `rules/testing.md`
+> - `rules/review.md`
+
 ---
 
 # 一、项目定义

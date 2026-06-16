@@ -2,10 +2,44 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from agent_core.domain.errors import ConfigurationError
+
+
+SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES: tuple[str, ...] = (
+    "chat",
+    "hint",
+    "quiz",
+    "plan_generation",
+    "review_scheduling",
+    "assessment_generation",
+    "replan",
+)
+SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES_RAW = ",".join(SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES)
+SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES_ALLOWED = frozenset(SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES)
+
+
+def _parse_csv_items(raw_value: str) -> list[str]:
+    return [item.strip() for item in raw_value.split(",") if item.strip()]
+
+
+def _validate_allowed_csv_items(
+    *,
+    raw_value: str,
+    allowed_values: frozenset[str],
+    field_name: str,
+) -> str:
+    invalid_values = sorted({item for item in _parse_csv_items(raw_value) if item not in allowed_values})
+    if invalid_values:
+        invalid_values_text = ", ".join(invalid_values)
+        allowed_values_text = ", ".join(sorted(allowed_values))
+        raise ValueError(
+            f"{field_name} contains unsupported values: {invalid_values_text}. "
+            f"Allowed values: {allowed_values_text}."
+        )
+    return raw_value
 
 
 class Settings(BaseSettings):
@@ -313,18 +347,36 @@ class Settings(BaseSettings):
     )
     skill_rollout_auto_promote_surfaces_raw: str = Field(
         alias="AGENT_EDU_SKILL_ROLLOUT_AUTO_PROMOTE_SURFACES",
-        default="review_scheduling,assessment_generation,replan",
+        default=SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES_RAW,
     )
     skill_rollout_auto_rollback_surfaces_raw: str = Field(
         alias="AGENT_EDU_SKILL_ROLLOUT_AUTO_ROLLBACK_SURFACES",
-        default="review_scheduling,assessment_generation,replan",
+        default=SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES_RAW,
     )
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", env_ignore_empty=True)
 
+    @field_validator(
+        "skill_rollout_auto_promote_surfaces_raw",
+        "skill_rollout_auto_rollback_surfaces_raw",
+    )
+    @classmethod
+    def validate_skill_rollout_auto_governance_surfaces(
+        cls,
+        value: str,
+        info: ValidationInfo,
+    ) -> str:
+        field = cls.model_fields[info.field_name]
+        field_name = field.alias or info.field_name
+        return _validate_allowed_csv_items(
+            raw_value=value,
+            allowed_values=SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES_ALLOWED,
+            field_name=field_name,
+        )
+
     @property
     def allowed_skills(self) -> list[str]:
-        return [item.strip() for item in self.allowed_skills_raw.split(",") if item.strip()]
+        return _parse_csv_items(self.allowed_skills_raw)
 
     @property
     def llm_provider_name(self) -> str:
@@ -351,11 +403,11 @@ class Settings(BaseSettings):
 
     @property
     def skill_rollout_auto_promote_surfaces(self) -> list[str]:
-        return [item.strip() for item in self.skill_rollout_auto_promote_surfaces_raw.split(",") if item.strip()]
+        return _parse_csv_items(self.skill_rollout_auto_promote_surfaces_raw)
 
     @property
     def skill_rollout_auto_rollback_surfaces(self) -> list[str]:
-        return [item.strip() for item in self.skill_rollout_auto_rollback_surfaces_raw.split(",") if item.strip()]
+        return _parse_csv_items(self.skill_rollout_auto_rollback_surfaces_raw)
 
     @property
     def embedding_api_key_value(self) -> str | None:

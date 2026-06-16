@@ -2,10 +2,10 @@
 
 **Agent-Edu** is a production-grade educational agent codebase designed to evolve from a stable teaching agent into a governed multi-agent learning companion with memory, reflection, and controlled capability growth.
 
-For detailed architecture, system design, and the evolutionary roadmap, please refer to:
-- [System Design Document](docs/SYSTEM_DESIGN.md)
+For detailed architecture and project rules, please refer to:
 - [Architecture Blueprint](ARCHITECTURE.md)
 - [Agent Rules & Constraints](AGENTS.md)
+- [Historical System Design Document](docs/SYSTEM_DESIGN.md)
 
 ---
 
@@ -117,5 +117,5 @@ If you prefer to run the API locally without Docker:
 - Architecture details: `ARCHITECTURE.md`
 - Project Agent Rules: `AGENTS.md`
 - Coding Conventions: `CONVENTIONS.md`
-- System Design (Old README): `docs/SYSTEM_DESIGN.md`
+- Historical System Design Document: `docs/SYSTEM_DESIGN.md`
 - Additional documentation in the `docs/` folder.

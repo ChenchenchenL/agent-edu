@@ -24,8 +24,8 @@ class RolloutAutoGovernanceConfig:
     enabled: bool = True
     auto_promote_enabled: bool = True
     auto_rollback_enabled: bool = True
-    promote_surfaces: frozenset[str] = frozenset({"review_scheduling", "assessment_generation", "replan"})
-    rollback_surfaces: frozenset[str] = frozenset({"review_scheduling", "assessment_generation", "replan"})
+    promote_surfaces: frozenset[str] = frozenset({"chat", "hint", "quiz", "plan_generation", "review_scheduling", "assessment_generation", "replan"})
+    rollback_surfaces: frozenset[str] = frozenset({"chat", "hint", "quiz", "plan_generation", "review_scheduling", "assessment_generation", "replan"})
 
 
 class ReflectionProposalRolloutDecisionScheduler:

@@ -2,6 +2,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
+import agent_core.application.services.reflection_proposal_rollout_auto_governance as rollout_auto_governance
 from agent_core.application.services.audit import AuditService
 from agent_core.application.services.autonomy_jobs import AutonomyJobService
 from agent_core.application.services.planner import PlannerService
@@ -17,6 +18,7 @@ from agent_core.application.services.reflection_proposal_rollout_observation_sch
     ReflectionProposalRolloutObservationScheduler,
 )
 from agent_core.application.services.reflection_proposal_rollout_auto_governance import (
+    RolloutAutoGovernanceConfig,
     ReflectionProposalRolloutDecisionOrchestrator,
     ReflectionProposalRolloutDecisionScheduler,
 )
@@ -3643,3 +3645,437 @@ async def test_rollout_auto_governance_rolls_back_staged_rollout() -> None:
     assert result.status == "rolled_back"
     assert decision_repository.items[-1].decision_type == "rollback"
     assert decision_repository.items[-1].operator_id == "system:auto_rollout_governor"
+
+
+@pytest.mark.asyncio
+async def test_rollout_auto_governance_promotes_chat_staged_rollout() -> None:
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(repository=audit_repository)
+    goal = LearnerGoal.build(
+        learner_profile_id="profile-1",
+        title="Master matrices",
+        subject="Matrices",
+        target_outcome="Master matrix multiplication",
+        weekly_study_minutes=180,
+        deadline_date=date.today() + timedelta(days=60),
+        baseline_note=None,
+    )
+    proposal_repository = StubProposalRepository()
+    proposal = _approved_rollout_proposal(learner_goal_id=goal.id, target_scope="chat")
+    await proposal_repository.create(proposal)
+    rollout_repository = StubProposalRolloutRepository()
+    observation_repository = StubProposalRolloutObservationRepository()
+    decision_repository = StubProposalRolloutDecisionRepository()
+    binding_repository = StubGoalSkillBindingRepository()
+    rollout_service = _rollout_service_for_tests(
+        audit_repository=audit_repository,
+        goal=goal,
+        proposal_repository=proposal_repository,
+        rollout_repository=rollout_repository,
+        observation_repository=observation_repository,
+        decision_repository=decision_repository,
+        binding_repository=binding_repository,
+    )
+    rollout = ReflectionProposalRollout.build(
+        proposal_id=proposal.id,
+        learner_goal_id=goal.id,
+        surface="chat",
+        baseline_snapshot={},
+        runtime_overlay_payload={},
+        activated_by="operator",
+    )
+    binding = GoalSkillBinding.build(
+        proposal_id=proposal.id,
+        rollout_id=rollout.id,
+        learner_goal_id=goal.id,
+        surface="chat",
+        priority_score=proposal.priority_score,
+        match_rules={},
+        runtime_directives={},
+        tool_plan=[],
+    )
+    await rollout_repository.create(rollout)
+    await binding_repository.create(binding)
+    observation = ReflectionProposalRolloutObservation.build(
+        rollout_id=rollout.id,
+        proposal_id=proposal.id,
+        learner_goal_id=goal.id,
+        surface="chat",
+        recommendation="promote",
+        observed_sample_count=2,
+        positive_score=0.8,
+        negative_score=0.0,
+        signal_summary={},
+        reason_codes=["chat_improved"],
+    )
+    await observation_repository.create(observation)
+    await rollout_repository.update(rollout.with_status(rollout.status, latest_observation_id=observation.id))
+    orchestrator = ReflectionProposalRolloutDecisionOrchestrator(
+        rollout_repository=rollout_repository,
+        observation_repository=observation_repository,
+        rollout_service=rollout_service,
+        audit_service=audit_service,
+    )
+
+    result = await orchestrator.evaluate_and_execute(
+        rollout_id=rollout.id,
+        source_ref=observation.id,
+    )
+
+    assert result is not None
+    assert result.status == "rolled_out"
+    assert decision_repository.items[-1].decision_type == "promote"
+    assert decision_repository.items[-1].operator_id == "system:auto_rollout_governor"
+
+
+@pytest.mark.asyncio
+async def test_rollout_auto_governance_rolls_back_chat_staged_rollout(monkeypatch) -> None:
+    metric_calls: list[dict[str, str]] = []
+
+    def _capture_metric(**kwargs: str) -> None:
+        metric_calls.append(kwargs)
+
+    monkeypatch.setattr(rollout_auto_governance, "observe_skill_rollout_auto_decision", _capture_metric)
+
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(repository=audit_repository)
+    goal = LearnerGoal.build(
+        learner_profile_id="profile-1",
+        title="Master matrices",
+        subject="Matrices",
+        target_outcome="Master matrix multiplication",
+        weekly_study_minutes=180,
+        deadline_date=date.today() + timedelta(days=60),
+        baseline_note=None,
+    )
+    proposal_repository = StubProposalRepository()
+    proposal = _approved_rollout_proposal(learner_goal_id=goal.id, target_scope="chat")
+    await proposal_repository.create(proposal)
+    rollout_repository = StubProposalRolloutRepository()
+    observation_repository = StubProposalRolloutObservationRepository()
+    decision_repository = StubProposalRolloutDecisionRepository()
+    rollout_service = _rollout_service_for_tests(
+        audit_repository=audit_repository,
+        goal=goal,
+        proposal_repository=proposal_repository,
+        rollout_repository=rollout_repository,
+        observation_repository=observation_repository,
+        decision_repository=decision_repository,
+    )
+    rollout = ReflectionProposalRollout.build(
+        proposal_id=proposal.id,
+        learner_goal_id=goal.id,
+        surface="chat",
+        baseline_snapshot={},
+        runtime_overlay_payload={},
+        activated_by="operator",
+    )
+    await rollout_repository.create(rollout)
+    observation = ReflectionProposalRolloutObservation.build(
+        rollout_id=rollout.id,
+        proposal_id=proposal.id,
+        learner_goal_id=goal.id,
+        surface="chat",
+        recommendation="rollback",
+        observed_sample_count=1,
+        positive_score=0.0,
+        negative_score=1.0,
+        signal_summary={},
+        reason_codes=["chat_regressed"],
+    )
+    await observation_repository.create(observation)
+    await rollout_repository.update(rollout.with_status(rollout.status, latest_observation_id=observation.id))
+    orchestrator = ReflectionProposalRolloutDecisionOrchestrator(
+        rollout_repository=rollout_repository,
+        observation_repository=observation_repository,
+        rollout_service=rollout_service,
+        audit_service=audit_service,
+    )
+
+    result = await orchestrator.evaluate_and_execute(
+        rollout_id=rollout.id,
+        source_ref=observation.id,
+    )
+
+    assert result is not None
+    assert result.status == "rolled_back"
+    assert decision_repository.items[-1].decision_type == "rollback"
+    assert decision_repository.items[-1].operator_id == "system:auto_rollout_governor"
+    assert {
+        "event": "executed",
+        "decision": "rollback",
+        "surface": "chat",
+        "reason_code": "auto_rollback",
+    } in metric_calls
+
+
+@pytest.mark.asyncio
+async def test_rollout_auto_governance_promotes_hint_staged_rollout_and_audits_surface(monkeypatch) -> None:
+    metric_calls: list[dict[str, str]] = []
+
+    def _capture_metric(**kwargs: str) -> None:
+        metric_calls.append(kwargs)
+
+    monkeypatch.setattr(rollout_auto_governance, "observe_skill_rollout_auto_decision", _capture_metric)
+
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(repository=audit_repository)
+    goal = LearnerGoal.build(
+        learner_profile_id="profile-1",
+        title="Master matrices",
+        subject="Matrices",
+        target_outcome="Master matrix multiplication",
+        weekly_study_minutes=180,
+        deadline_date=date.today() + timedelta(days=60),
+        baseline_note=None,
+    )
+    proposal_repository = StubProposalRepository()
+    proposal = _approved_rollout_proposal(learner_goal_id=goal.id, target_scope="hint")
+    await proposal_repository.create(proposal)
+    rollout_repository = StubProposalRolloutRepository()
+    observation_repository = StubProposalRolloutObservationRepository()
+    decision_repository = StubProposalRolloutDecisionRepository()
+    binding_repository = StubGoalSkillBindingRepository()
+    rollout_service = _rollout_service_for_tests(
+        audit_repository=audit_repository,
+        goal=goal,
+        proposal_repository=proposal_repository,
+        rollout_repository=rollout_repository,
+        observation_repository=observation_repository,
+        decision_repository=decision_repository,
+        binding_repository=binding_repository,
+    )
+    rollout = ReflectionProposalRollout.build(
+        proposal_id=proposal.id,
+        learner_goal_id=goal.id,
+        surface="hint",
+        baseline_snapshot={},
+        runtime_overlay_payload={},
+        activated_by="operator",
+    )
+    binding = GoalSkillBinding.build(
+        proposal_id=proposal.id,
+        rollout_id=rollout.id,
+        learner_goal_id=goal.id,
+        surface="hint",
+        priority_score=proposal.priority_score,
+        match_rules={},
+        runtime_directives={},
+        tool_plan=[],
+    )
+    await rollout_repository.create(rollout)
+    await binding_repository.create(binding)
+    observation = ReflectionProposalRolloutObservation.build(
+        rollout_id=rollout.id,
+        proposal_id=proposal.id,
+        learner_goal_id=goal.id,
+        surface="hint",
+        recommendation="promote",
+        observed_sample_count=2,
+        positive_score=0.8,
+        negative_score=0.0,
+        signal_summary={},
+        reason_codes=["hint_improved"],
+    )
+    await observation_repository.create(observation)
+    await rollout_repository.update(rollout.with_status(rollout.status, latest_observation_id=observation.id))
+    orchestrator = ReflectionProposalRolloutDecisionOrchestrator(
+        rollout_repository=rollout_repository,
+        observation_repository=observation_repository,
+        rollout_service=rollout_service,
+        audit_service=audit_service,
+    )
+
+    result = await orchestrator.evaluate_and_execute(
+        rollout_id=rollout.id,
+        source_ref=observation.id,
+    )
+
+    assert result is not None
+    assert result.status == "rolled_out"
+    assert decision_repository.items[-1].decision_type == "promote"
+    assert decision_repository.items[-1].operator_id == "system:auto_rollout_governor"
+    executed = next(
+        item for item in audit_repository.events
+        if item.event_type == "reflection.proposal.rollout.auto_decision.executed"
+    )
+    assert executed.event_data["surface"] == "hint"
+    assert executed.event_data["decision"] == "promote"
+    assert {
+        "event": "executed",
+        "decision": "promote",
+        "surface": "hint",
+        "reason_code": "auto_promote",
+    } in metric_calls
+
+
+@pytest.mark.asyncio
+async def test_rollout_auto_governance_skips_chat_rollback_when_disabled(monkeypatch) -> None:
+    metric_calls: list[dict[str, str]] = []
+
+    def _capture_metric(**kwargs: str) -> None:
+        metric_calls.append(kwargs)
+
+    monkeypatch.setattr(rollout_auto_governance, "observe_skill_rollout_auto_decision", _capture_metric)
+
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(repository=audit_repository)
+    goal = LearnerGoal.build(
+        learner_profile_id="profile-1",
+        title="Master matrices",
+        subject="Matrices",
+        target_outcome="Master matrix multiplication",
+        weekly_study_minutes=180,
+        deadline_date=date.today() + timedelta(days=60),
+        baseline_note=None,
+    )
+    proposal_repository = StubProposalRepository()
+    proposal = _approved_rollout_proposal(learner_goal_id=goal.id, target_scope="chat")
+    await proposal_repository.create(proposal)
+    rollout_repository = StubProposalRolloutRepository()
+    observation_repository = StubProposalRolloutObservationRepository()
+    decision_repository = StubProposalRolloutDecisionRepository()
+    rollout_service = _rollout_service_for_tests(
+        audit_repository=audit_repository,
+        goal=goal,
+        proposal_repository=proposal_repository,
+        rollout_repository=rollout_repository,
+        observation_repository=observation_repository,
+        decision_repository=decision_repository,
+    )
+    rollout = ReflectionProposalRollout.build(
+        proposal_id=proposal.id,
+        learner_goal_id=goal.id,
+        surface="chat",
+        baseline_snapshot={},
+        runtime_overlay_payload={},
+        activated_by="operator",
+    )
+    await rollout_repository.create(rollout)
+    observation = ReflectionProposalRolloutObservation.build(
+        rollout_id=rollout.id,
+        proposal_id=proposal.id,
+        learner_goal_id=goal.id,
+        surface="chat",
+        recommendation="rollback",
+        observed_sample_count=1,
+        positive_score=0.0,
+        negative_score=1.0,
+        signal_summary={},
+        reason_codes=["chat_regressed"],
+    )
+    await observation_repository.create(observation)
+    await rollout_repository.update(rollout.with_status(rollout.status, latest_observation_id=observation.id))
+    orchestrator = ReflectionProposalRolloutDecisionOrchestrator(
+        rollout_repository=rollout_repository,
+        observation_repository=observation_repository,
+        rollout_service=rollout_service,
+        audit_service=audit_service,
+        config=RolloutAutoGovernanceConfig(enabled=False),
+    )
+
+    result = await orchestrator.evaluate_and_execute(
+        rollout_id=rollout.id,
+        source_ref=observation.id,
+    )
+
+    assert result is None
+    assert decision_repository.items == []
+    skipped = next(
+        item for item in audit_repository.events
+        if item.event_type == "reflection.proposal.rollout.auto_decision.skipped"
+    )
+    assert skipped.event_data["surface"] == "chat"
+    assert skipped.event_data["reason_code"] == "auto_governance_disabled_or_inactive"
+    assert {
+        "event": "skipped",
+        "decision": "none",
+        "surface": "chat",
+        "reason_code": "auto_governance_disabled_or_inactive",
+    } in metric_calls
+
+
+@pytest.mark.asyncio
+async def test_rollout_auto_governance_skips_chat_rollback_when_auto_rollback_disabled(monkeypatch) -> None:
+    metric_calls: list[dict[str, str]] = []
+
+    def _capture_metric(**kwargs: str) -> None:
+        metric_calls.append(kwargs)
+
+    monkeypatch.setattr(rollout_auto_governance, "observe_skill_rollout_auto_decision", _capture_metric)
+
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(repository=audit_repository)
+    goal = LearnerGoal.build(
+        learner_profile_id="profile-1",
+        title="Master matrices",
+        subject="Matrices",
+        target_outcome="Master matrix multiplication",
+        weekly_study_minutes=180,
+        deadline_date=date.today() + timedelta(days=60),
+        baseline_note=None,
+    )
+    proposal_repository = StubProposalRepository()
+    proposal = _approved_rollout_proposal(learner_goal_id=goal.id, target_scope="chat")
+    await proposal_repository.create(proposal)
+    rollout_repository = StubProposalRolloutRepository()
+    observation_repository = StubProposalRolloutObservationRepository()
+    decision_repository = StubProposalRolloutDecisionRepository()
+    rollout_service = _rollout_service_for_tests(
+        audit_repository=audit_repository,
+        goal=goal,
+        proposal_repository=proposal_repository,
+        rollout_repository=rollout_repository,
+        observation_repository=observation_repository,
+        decision_repository=decision_repository,
+    )
+    rollout = ReflectionProposalRollout.build(
+        proposal_id=proposal.id,
+        learner_goal_id=goal.id,
+        surface="chat",
+        baseline_snapshot={},
+        runtime_overlay_payload={},
+        activated_by="operator",
+    )
+    await rollout_repository.create(rollout)
+    observation = ReflectionProposalRolloutObservation.build(
+        rollout_id=rollout.id,
+        proposal_id=proposal.id,
+        learner_goal_id=goal.id,
+        surface="chat",
+        recommendation="rollback",
+        observed_sample_count=1,
+        positive_score=0.0,
+        negative_score=1.0,
+        signal_summary={},
+        reason_codes=["chat_regressed"],
+    )
+    await observation_repository.create(observation)
+    await rollout_repository.update(rollout.with_status(rollout.status, latest_observation_id=observation.id))
+    orchestrator = ReflectionProposalRolloutDecisionOrchestrator(
+        rollout_repository=rollout_repository,
+        observation_repository=observation_repository,
+        rollout_service=rollout_service,
+        audit_service=audit_service,
+        config=RolloutAutoGovernanceConfig(auto_rollback_enabled=False),
+    )
+
+    result = await orchestrator.evaluate_and_execute(
+        rollout_id=rollout.id,
+        source_ref=observation.id,
+    )
+
+    assert result is None
+    assert decision_repository.items == []
+    skipped = next(
+        item for item in audit_repository.events
+        if item.event_type == "reflection.proposal.rollout.auto_decision.skipped"
+    )
+    assert skipped.event_data["surface"] == "chat"
+    assert skipped.event_data["reason_code"] == "auto_rollback_surface_not_enabled"
+    assert {
+        "event": "skipped",
+        "decision": "none",
+        "surface": "chat",
+        "reason_code": "auto_rollback_surface_not_enabled",
+    } in metric_calls
