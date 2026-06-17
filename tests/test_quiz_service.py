@@ -1,11 +1,19 @@
 from datetime import datetime, timezone
 
 from agent_core.application.services.audit import AuditService
+from agent_core.application.services.autonomy_jobs import AutonomyJobService
+from agent_core.application.services.dynamic_runtime_registry import DynamicRuntimeRegistryService
 from agent_core.application.services.quiz import QuizService
+from agent_core.application.services.reflection_proposal_rollout_observation_scheduler import (
+    ReflectionProposalRolloutObservationScheduler,
+)
 from agent_core.application.skills.registry import SkillRegistry
+from agent_core.domain.entities.autonomy import ScheduledAutonomyJob
 from agent_core.domain.entities.audit import AuditEvent
 from agent_core.domain.entities.quiz import SessionQuiz, SessionQuizQuestion
+from agent_core.domain.entities.reflection_closure import ReflectionProposalRollout
 from agent_core.domain.entities.session import LearningSession
+from agent_core.domain.entities.skill import SkillExecutionPlan, SkillResolution
 from agent_core.domain.errors import NotFoundError, ValidationError
 from agent_core.domain.schemas.quiz import GenerateQuizRequest, QuizQuestion
 from agent_core.infrastructure.llm.types import QuizDraft
@@ -29,6 +37,44 @@ class StubAuditRepository:
 
     async def create(self, entity: AuditEvent):
         self.events.append(entity)
+
+
+class StubScheduledAutonomyJobRepository:
+    def __init__(self):
+        self.jobs: dict[str, ScheduledAutonomyJob] = {}
+
+    async def create(self, entity: ScheduledAutonomyJob):
+        for job in self.jobs.values():
+            if job.idempotency_key == entity.idempotency_key:
+                return job
+        self.jobs[entity.id] = entity
+        return entity
+
+
+class StubProposalRolloutRepository:
+    def __init__(self):
+        self.items: dict[str, ReflectionProposalRollout] = {}
+
+    async def create(self, entity: ReflectionProposalRollout):
+        self.items[entity.id] = entity
+
+    async def get_by_id(self, rollout_id: str):
+        return self.items.get(rollout_id)
+
+    async def get_active_by_goal_and_surface(
+        self,
+        learner_goal_id: str,
+        surface: str,
+        *,
+        include_staged: bool = True,
+    ):
+        statuses = {"staged", "rolled_out"} if include_staged else {"rolled_out"}
+        active = [
+            item
+            for item in self.items.values()
+            if item.learner_goal_id == learner_goal_id and item.surface == surface and item.status in statuses
+        ]
+        return active[-1] if active else None
 
 
 class StubSessionRepository:
@@ -91,6 +137,76 @@ class StubLLMProvider:
         )
 
 
+class CaptureQuizProvider:
+    provider_name = "capture"
+    model_name = "capture-model"
+
+    def __init__(self):
+        self.last_question_count = None
+        self.last_skill_directives = None
+        self.last_feedback_style = None
+
+    async def generate_quiz_draft(self, *, topic, difficulty, question_count, skill_directives=None, feedback_style=None):
+        self.last_question_count = question_count
+        self.last_skill_directives = list(skill_directives or [])
+        self.last_feedback_style = feedback_style
+        return QuizDraft(
+            topic=topic,
+            difficulty=difficulty,
+            questions=[
+                QuizQuestion(prompt=f"{topic} question {index + 1}", answer=f"answer {index + 1}")
+                for index in range(question_count)
+            ],
+            provider="capture",
+            model="capture-model",
+            latency_ms=5,
+            retry_count=0,
+            response_shape_valid=True,
+        )
+
+
+class StubSkillUsageService:
+    def __init__(self, execution_plan: SkillExecutionPlan | None = None):
+        self.execution_plan = execution_plan
+        self.events = []
+
+    async def resolve_for_runtime(self, *, skill_name: str, surface: str, resource_id: str | None = None):
+        if self.execution_plan is not None:
+            return self.execution_plan.resolution
+        return SkillResolution.build(
+            skill_name=skill_name,
+            surface=surface,
+            implementation_binding=skill_name,
+        )
+
+    async def resolve_execution_plan(
+        self,
+        *,
+        skill_name: str,
+        surface: str,
+        resource_id: str | None = None,
+        skill_binding=None,
+    ):
+        if self.execution_plan is None:
+            resolution = SkillResolution.build(
+                skill_name=skill_name,
+                surface=surface,
+                implementation_binding=skill_name,
+            )
+            return SkillExecutionPlan(
+                resolution=resolution,
+                execution_kind="quiz_draft",
+                runtime_directives={},
+                tool_plan=[],
+                binding_metadata={},
+            )
+        return self.execution_plan
+
+    async def record_usage(self, **kwargs):
+        self.events.append(dict(kwargs))
+        return None
+
+
 async def test_generate_quiz_persists_session_quiz_and_questions():
     session = LearningSession.build(learner_profile_id="profile-1", title="Linear Algebra", subject="Matrices")
     repository = StubQuizRepository()
@@ -148,6 +264,167 @@ async def test_generate_quiz_requires_session_id():
         assert False, "Expected ValidationError"
     except ValidationError:
         assert True
+
+
+async def test_generate_quiz_uses_runtime_execution_plan_directives():
+    session = LearningSession.build(learner_profile_id="profile-1", title="Linear Algebra", subject="Matrices")
+    repository = StubQuizRepository()
+    provider = CaptureQuizProvider()
+    execution_plan = SkillExecutionPlan(
+        resolution=SkillResolution.build(
+            skill_name="create_quiz",
+            surface="quiz",
+            implementation_binding="llm_create_quiz_v1",
+            artifact_id="artifact-1",
+            skill_version="1.0.1",
+            artifact_status="active",
+        ),
+        execution_kind="quiz_draft",
+        runtime_directives={
+            "question_count": 3,
+            "skill_directives": ["guided_correction", "show_work"],
+            "feedback_style": "guided_correction",
+        },
+        tool_plan=[],
+        binding_metadata={"skill_package_rollout": {"proposal_id": "proposal-1"}},
+    )
+    skill_usage_service = StubSkillUsageService(execution_plan)
+    service = QuizService(
+        db_session=FakeSession(),
+        audit_service=AuditService(StubAuditRepository()),
+        session_repository=StubSessionRepository(session),
+        quiz_repository=repository,
+        llm_provider=provider,
+        skill_registry=SkillRegistry.from_allowed_skills(
+            ["explain_concept", "create_quiz", "adaptive_hint"]
+        ),
+        skill_usage_service=skill_usage_service,
+    )
+
+    response = await service.generate_quiz(
+        GenerateQuizRequest(
+            session_id=session.id,
+            topic="Matrices",
+            difficulty="easy",
+            question_count=1,
+        )
+    )
+
+    assert response.question_count == 3
+    assert provider.last_question_count == 3
+    assert provider.last_skill_directives == ["guided_correction", "show_work"]
+    assert provider.last_feedback_style == "guided_correction"
+    assert skill_usage_service.events[-1]["metadata"]["implementation_binding"] == "llm_create_quiz_v1"
+    assert skill_usage_service.events[-1]["metadata"]["execution_kind"] == "quiz_draft"
+
+
+async def test_generate_quiz_usage_metadata_includes_dynamic_runtime_registry_summary():
+    session = LearningSession.build(learner_profile_id="profile-1", title="Linear Algebra", subject="Matrices")
+    repository = StubQuizRepository()
+    provider = CaptureQuizProvider()
+    execution_plan = SkillExecutionPlan(
+        resolution=SkillResolution.build(
+            skill_name="create_quiz",
+            surface="quiz",
+            implementation_binding="llm_create_quiz_v1",
+            artifact_id="artifact-1",
+            skill_version="1.0.1",
+            artifact_status="active",
+        ),
+        execution_kind="quiz_draft",
+        runtime_directives={"question_count": 2},
+        tool_plan=[],
+        binding_metadata={"skill_package_rollout": {"proposal_id": "proposal-1", "rollout_id": "rollout-1", "binding_id": "binding-1"}},
+    )
+    skill_usage_service = StubSkillUsageService(execution_plan)
+    runtime_registry = DynamicRuntimeRegistryService(
+        goal_skill_binding_resolver=None,
+        skill_usage_service=skill_usage_service,
+    )
+    service = QuizService(
+        db_session=FakeSession(),
+        audit_service=AuditService(StubAuditRepository()),
+        session_repository=StubSessionRepository(session),
+        quiz_repository=repository,
+        llm_provider=provider,
+        skill_registry=SkillRegistry.from_allowed_skills(
+            ["explain_concept", "create_quiz", "adaptive_hint"]
+        ),
+        skill_usage_service=skill_usage_service,
+        runtime_registry=runtime_registry,
+    )
+
+    await service.generate_quiz(
+        GenerateQuizRequest(
+            session_id=session.id,
+            topic="Matrices",
+            difficulty="easy",
+            question_count=2,
+        )
+    )
+
+    metadata = skill_usage_service.events[-1]["metadata"]
+    assert metadata["dynamic_registry_version"] == "v1"
+    assert metadata["source_summary"]["artifact_source"] == "artifact"
+
+
+async def test_generate_quiz_schedules_rollout_observation_for_active_surface():
+    session = LearningSession.build(
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+        title="Linear Algebra",
+        subject="Matrices",
+    )
+    repository = StubQuizRepository()
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(audit_repository)
+    job_repository = StubScheduledAutonomyJobRepository()
+    rollout_repository = StubProposalRolloutRepository()
+    await rollout_repository.create(
+        ReflectionProposalRollout.build(
+            proposal_id="proposal-quiz-1",
+            learner_goal_id="goal-1",
+            surface="quiz",
+            baseline_snapshot={},
+            runtime_overlay_payload={},
+            activated_by="operator",
+        ).with_status("rolled_out")
+    )
+    service = QuizService(
+        db_session=FakeSession(),
+        audit_service=audit_service,
+        session_repository=StubSessionRepository(session),
+        quiz_repository=repository,
+        llm_provider=StubLLMProvider(),
+        skill_registry=SkillRegistry.from_allowed_skills(
+            ["explain_concept", "create_quiz", "adaptive_hint"]
+        ),
+        rollout_observation_scheduler=ReflectionProposalRolloutObservationScheduler(
+            rollout_repository=rollout_repository,
+            autonomy_job_service=AutonomyJobService(repository=job_repository, audit_service=audit_service),
+            audit_service=audit_service,
+        ),
+    )
+
+    response = await service.generate_quiz(
+        GenerateQuizRequest(
+            session_id=session.id,
+            topic="Matrices",
+            difficulty="easy",
+            question_count=2,
+        )
+    )
+
+    observation_jobs = [
+        item
+        for item in job_repository.jobs.values()
+        if item.job_type == "reflection_proposal_rollout_observation"
+    ]
+    assert len(observation_jobs) == 1
+    assert observation_jobs[0].learner_goal_id == "goal-1"
+    assert observation_jobs[0].trigger_source == "quiz_generation"
+    assert observation_jobs[0].payload["surface"] == "quiz"
+    assert observation_jobs[0].payload["source_ref"] == response.quiz_id
 
 
 async def test_list_and_get_quiz_for_session():

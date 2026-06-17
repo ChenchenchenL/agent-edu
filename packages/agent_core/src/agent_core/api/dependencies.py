@@ -15,6 +15,7 @@ from agent_core.application.services.autonomy_jobs import AutonomyJobService
 from agent_core.application.services.chat import ChatService
 from agent_core.application.services.goal import LearnerGoalService
 from agent_core.application.services.goal_skill_binding_resolver import GoalSkillBindingResolver
+from agent_core.application.services.dynamic_runtime_registry import DynamicRuntimeRegistryService
 from agent_core.application.services.long_term_memory_materialization import LongTermMemoryMaterializationService
 from agent_core.application.services.long_term_memory_materialization_replay import (
     LongTermMemoryMaterializationReplayExecutor,
@@ -35,6 +36,11 @@ from agent_core.application.services.reflection_outcomes import ReflectionOutcom
 from agent_core.application.services.reflection_proposal_rollout_observation_scheduler import (
     ReflectionProposalRolloutObservationScheduler,
 )
+from agent_core.application.services.reflection_proposal_rollout_auto_governance import (
+    ReflectionProposalRolloutDecisionOrchestrator,
+    ReflectionProposalRolloutDecisionScheduler,
+    RolloutAutoGovernanceConfig,
+)
 from agent_core.application.services.reflection_proposal_rollout_resolver import ReflectionProposalRolloutResolver
 from agent_core.application.services.reflection_proposal_rollouts import ReflectionProposalRolloutService
 from agent_core.application.services.reflection_proposal_sandbox import ReflectionProposalSandboxService
@@ -45,17 +51,28 @@ from agent_core.application.services.skills import (
     SkillArtifactLifecycleService,
     SkillCandidateService,
     SkillCatalogService,
+    SkillCuratorJobConfig,
+    SkillCuratorJobService,
+    SkillCuratorRecommendationService,
+    SkillReplacementReadinessService,
+    SkillReplacementStagingService,
     SkillResolver,
     SkillUsageService,
 )
 from agent_core.application.services.strategy_cards import StrategyCardService
 from agent_core.application.services.task import AutonomousTaskService
+from agent_core.application.services.task_autonomy_scheduling import TaskAutonomySchedulingService
+from agent_core.application.services.task_execution import TaskExecutionService
+from agent_core.application.services.task_plan_lifecycle import TaskPlanLifecycleService
+from agent_core.application.services.task_runtime_skill import TaskRuntimeSkillService
+from agent_core.application.services.tool_plan_runtime import ToolPlanRuntimeExecutor
 from agent_core.application.services.workflow import WorkflowRunService
 from agent_core.application.services.workspace import WorkspaceService
 from agent_core.application.tools.registry import HttpToolSpec, InternalToolRegistry
 from agent_core.application.skills.registry import SkillRegistry
 from agent_core.domain.errors import ConfigurationError
 from agent_core.infrastructure.config.settings import Settings, get_settings
+from agent_core.infrastructure.container import ApplicationContainer
 from agent_core.infrastructure.db.repositories import (
     AuditRepository,
     BehaviorMemoryEmbeddingRepository,
@@ -94,6 +111,7 @@ from agent_core.infrastructure.db.repositories import (
     SessionMessageRepository,
     SessionQuizRepository,
     SkillArtifactRepository,
+    SkillCuratorRecommendationRepository,
     SkillUsageEventRepository,
     SessionRepository,
     StudyPlanRepository,
@@ -379,6 +397,7 @@ def get_planner_service(session: AsyncSession) -> PlannerService:
         rollout_resolver=get_reflection_proposal_rollout_resolver(session),
         goal_skill_binding_resolver=get_goal_skill_binding_resolver(session),
         skill_usage_service=_build_skill_usage_service(session),
+        runtime_registry=get_dynamic_runtime_registry_service(session),
     )
 
 
@@ -432,6 +451,7 @@ def get_chat_service(session: AsyncSession) -> ChatService:
         llm_provider=get_llm_provider(),
         skill_registry=get_skill_registry(),
         skill_usage_service=_build_skill_usage_service(session),
+        runtime_registry=get_dynamic_runtime_registry_service(session),
     )
 
 
@@ -444,7 +464,9 @@ def get_quiz_service(session: AsyncSession) -> QuizService:
         llm_provider=get_llm_provider(),
         skill_registry=get_skill_registry(),
         goal_skill_binding_resolver=get_goal_skill_binding_resolver(session),
+        rollout_observation_scheduler=get_reflection_proposal_rollout_observation_scheduler(session),
         skill_usage_service=_build_skill_usage_service(session),
+        runtime_registry=get_dynamic_runtime_registry_service(session),
     )
 
 
@@ -478,6 +500,99 @@ def get_skill_artifact_lifecycle_service(
         usage_repository=SkillUsageEventRepository(session),
         skill_registry=get_skill_registry(),
         audit_service=get_audit_service(session),
+    )
+
+
+def get_skill_replacement_staging_service(
+    session: AsyncSession = Depends(get_db_session),
+) -> SkillReplacementStagingService:
+    return SkillReplacementStagingService(
+        artifact_repository=SkillArtifactRepository(session),
+        proposal_repository=ReflectionProposalRepository(session),
+        evaluation_repository=ReflectionProposalEvaluationRepository(session),
+        candidate_service=get_skill_candidate_service(session),
+        lifecycle_service=get_skill_artifact_lifecycle_service(session),
+        audit_service=get_audit_service(session),
+    )
+
+
+def get_skill_replacement_readiness_service(
+    session: AsyncSession = Depends(get_db_session),
+) -> SkillReplacementReadinessService:
+    settings = get_settings()
+    return SkillReplacementReadinessService(
+        artifact_repository=SkillArtifactRepository(session),
+        proposal_repository=ReflectionProposalRepository(session),
+        rollout_repository=ReflectionProposalRolloutRepository(session),
+        rollout_observation_repository=ReflectionProposalRolloutObservationRepository(session),
+        goal_skill_binding_repository=GoalSkillBindingRepository(session),
+        usage_repository=SkillUsageEventRepository(session),
+        successful_usage_min=settings.skill_curator_replacement_readiness_successful_usage_min,
+        promote_observation_min=settings.skill_curator_replacement_readiness_promote_observation_min,
+        max_negative_usage_rate=settings.skill_curator_replacement_readiness_max_negative_usage_rate,
+    )
+
+
+def get_skill_curator_recommendation_service(
+    session: AsyncSession = Depends(get_db_session),
+) -> SkillCuratorRecommendationService:
+    return SkillCuratorRecommendationService(
+        recommendation_repository=SkillCuratorRecommendationRepository(session),
+        artifact_repository=SkillArtifactRepository(session),
+        lifecycle_service=get_skill_artifact_lifecycle_service(session),
+        audit_service=get_audit_service(session),
+        proposal_service=get_reflection_proposal_service(session),
+    )
+
+
+def get_skill_curator_job_service(
+    session: AsyncSession = Depends(get_db_session),
+) -> SkillCuratorJobService:
+    settings = get_settings()
+    recommendation_repository = SkillCuratorRecommendationRepository(session)
+    return SkillCuratorJobService(
+        artifact_repository=SkillArtifactRepository(session),
+        usage_repository=SkillUsageEventRepository(session),
+        proposal_repository=ReflectionProposalRepository(session),
+        rollout_repository=ReflectionProposalRolloutRepository(session),
+        rollout_observation_repository=ReflectionProposalRolloutObservationRepository(session),
+        rollout_decision_repository=ReflectionProposalRolloutDecisionRepository(session),
+        goal_skill_binding_repository=GoalSkillBindingRepository(session),
+        recommendation_repository=recommendation_repository,
+        recommendation_service=SkillCuratorRecommendationService(
+            recommendation_repository=recommendation_repository,
+            artifact_repository=SkillArtifactRepository(session),
+            lifecycle_service=get_skill_artifact_lifecycle_service(session),
+            audit_service=get_audit_service(session),
+            proposal_service=get_reflection_proposal_service(session),
+        ),
+        audit_service=get_audit_service(session),
+        memory_conflict_repository=MemoryConflictRepository(session),
+        reflection_outcome_evaluation_repository=ReflectionOutcomeEvaluationRepository(session),
+        config=SkillCuratorJobConfig(
+            enabled=settings.skill_curator_job_enabled,
+            artifact_scan_limit=settings.skill_curator_artifact_scan_limit,
+            usage_lookback_days=settings.skill_curator_usage_lookback_days,
+            coverage_regression_enabled=settings.skill_curator_coverage_regression_enabled,
+            coverage_drift_topic_min=settings.skill_curator_coverage_drift_topic_min,
+            coverage_hole_topic_min=settings.skill_curator_coverage_hole_topic_min,
+            promote_successful_usage_min=settings.skill_curator_promote_successful_usage_min,
+            promote_observation_min=settings.skill_curator_promote_observation_min,
+            max_negative_usage_rate=settings.skill_curator_max_negative_usage_rate,
+            negative_usage_min=settings.skill_curator_negative_usage_min,
+            negative_usage_rate_threshold=settings.skill_curator_negative_usage_rate_threshold,
+            resolver_failure_min=settings.skill_curator_resolver_failure_min,
+            archive_stale_days=settings.skill_curator_archive_stale_days,
+            governance_evidence_enabled=settings.skill_curator_governance_evidence_enabled,
+            governance_evidence_lookback_days=settings.skill_curator_governance_evidence_lookback_days,
+            governance_evidence_limit=settings.skill_curator_governance_evidence_limit,
+            memory_conflict_severity_threshold=settings.skill_curator_memory_conflict_severity_threshold,
+            reflection_ineffective_min=settings.skill_curator_reflection_ineffective_min,
+            reflection_inconclusive_min=settings.skill_curator_reflection_inconclusive_min,
+            replacement_readiness_successful_usage_min=settings.skill_curator_replacement_readiness_successful_usage_min,
+            replacement_readiness_promote_observation_min=settings.skill_curator_replacement_readiness_promote_observation_min,
+            replacement_readiness_max_negative_usage_rate=settings.skill_curator_replacement_readiness_max_negative_usage_rate,
+        ),
     )
 
 
@@ -623,6 +738,7 @@ def get_reflection_proposal_service(session: AsyncSession) -> ReflectionProposal
         repository=ReflectionProposalRepository(session),
         approval_decision_repository=ReflectionProposalApprovalDecisionRepository(session),
         evaluation_repository=ReflectionProposalEvaluationRepository(session),
+        artifact_repository=SkillArtifactRepository(session),
         autonomy_job_service=get_autonomy_job_service(session),
         audit_service=get_audit_service(session),
     )
@@ -636,11 +752,13 @@ def get_reflection_replay_service(session: AsyncSession) -> ReflectionReplayServ
 
 
 def get_reflection_proposal_sandbox_service(session: AsyncSession) -> ReflectionProposalSandboxService:
+    audit_service = get_audit_service(session)
+    tool_registry = InternalToolRegistry(audit_service=audit_service)
     return ReflectionProposalSandboxService(
         sandbox_run_repository=ReflectionProposalSandboxRunRepository(session),
         proposal_service=get_reflection_proposal_service(session),
         replay_service=get_reflection_replay_service(session),
-        audit_service=get_audit_service(session),
+        audit_service=audit_service,
         strategy_card_service=get_strategy_card_service(session),
         session_repository=SessionRepository(session),
         message_repository=SessionMessageRepository(session),
@@ -648,7 +766,11 @@ def get_reflection_proposal_sandbox_service(session: AsyncSession) -> Reflection
         task_attempt_repository=TaskAttemptRepository(session),
         workflow_run_repository=WorkflowRunRepository(session),
         chat_service=get_chat_service(session),
-        internal_tool_registry=InternalToolRegistry(audit_service=get_audit_service(session)),
+        internal_tool_registry=tool_registry,
+        tool_plan_runtime_executor=ToolPlanRuntimeExecutor(
+            internal_tool_registry=tool_registry,
+            audit_service=audit_service,
+        ),
     )
 
 
@@ -671,6 +793,30 @@ def get_reflection_proposal_rollout_observation_scheduler(
         rollout_repository=ReflectionProposalRolloutRepository(session),
         autonomy_job_service=get_autonomy_job_service(session),
         audit_service=get_audit_service(session),
+        decision_scheduler=ReflectionProposalRolloutDecisionScheduler(
+            rollout_repository=ReflectionProposalRolloutRepository(session),
+            autonomy_job_service=get_autonomy_job_service(session),
+            audit_service=get_audit_service(session),
+        ),
+    )
+
+
+def get_reflection_proposal_rollout_decision_orchestrator(
+    session: AsyncSession,
+) -> ReflectionProposalRolloutDecisionOrchestrator:
+    settings = get_settings()
+    return ReflectionProposalRolloutDecisionOrchestrator(
+        rollout_repository=ReflectionProposalRolloutRepository(session),
+        observation_repository=ReflectionProposalRolloutObservationRepository(session),
+        rollout_service=get_reflection_proposal_rollout_service(session),
+        audit_service=get_audit_service(session),
+        config=RolloutAutoGovernanceConfig(
+            enabled=settings.skill_rollout_auto_governance_enabled,
+            auto_promote_enabled=settings.skill_rollout_auto_promote_enabled,
+            auto_rollback_enabled=settings.skill_rollout_auto_rollback_enabled,
+            promote_surfaces=frozenset(settings.skill_rollout_auto_promote_surfaces),
+            rollback_surfaces=frozenset(settings.skill_rollout_auto_rollback_surfaces),
+        ),
     )
 
 
@@ -691,15 +837,17 @@ def get_reflection_proposal_rollout_service(session: AsyncSession) -> Reflection
         reflection_record_repository=ReflectionRecordRepository(session),
         reflection_evidence_repository=ReflectionEvidenceSignalRepository(session),
         task_attempt_repository=TaskAttemptRepository(session),
+        usage_repository=SkillUsageEventRepository(session),
         planner_service=get_planner_service(session),
         workflow_run_service=get_workflow_run_service(session),
         observation_scheduler=get_reflection_proposal_rollout_observation_scheduler(session),
         goal_skill_binding_repository=GoalSkillBindingRepository(session),
+        skill_artifact_repository=SkillArtifactRepository(session),
         audit_service=get_audit_service(session),
     )
 
 
-def get_task_service(session: AsyncSession) -> AutonomousTaskService:
+def _build_autonomous_task_core_service(session: AsyncSession) -> AutonomousTaskService:
     audit_service = get_audit_service(session)
     tool_registry = InternalToolRegistry(audit_service=audit_service)
     settings = get_settings()
@@ -738,6 +886,7 @@ def get_task_service(session: AsyncSession) -> AutonomousTaskService:
         reflection_outcome_service=get_reflection_outcome_service(session),
         reflection_proposal_sandbox_service=get_reflection_proposal_sandbox_service(session),
         reflection_proposal_rollout_service=get_reflection_proposal_rollout_service(session),
+        reflection_proposal_rollout_decision_orchestrator=get_reflection_proposal_rollout_decision_orchestrator(session),
         rollout_resolver=get_reflection_proposal_rollout_resolver(session),
         rollout_observation_scheduler=get_reflection_proposal_rollout_observation_scheduler(session),
         goal_skill_binding_resolver=get_goal_skill_binding_resolver(session),
@@ -747,19 +896,54 @@ def get_task_service(session: AsyncSession) -> AutonomousTaskService:
         long_term_memory_materialization_service=get_long_term_memory_materialization_service(session),
         long_term_memory_replay_executor=get_long_term_memory_materialization_replay_executor(session),
         internal_tool_registry=tool_registry,
+        tool_plan_runtime_executor=ToolPlanRuntimeExecutor(
+            internal_tool_registry=tool_registry,
+            audit_service=audit_service,
+        ),
         skill_usage_service=_build_skill_usage_service(session),
+        runtime_registry=get_dynamic_runtime_registry_service(session),
         audit_service=audit_service,
     )
 
 
-def get_workspace_service(session: AsyncSession) -> WorkspaceService:
-    return WorkspaceService(
-        learner_profile_repository=LearnerProfileRepository(session),
-        learner_goal_repository=LearnerGoalRepository(session),
-        study_plan_repository=StudyPlanRepository(session),
-        session_repository=SessionRepository(session),
-        workflow_run_repository=WorkflowRunRepository(session),
-        goal_autonomy_state_repository=GoalAutonomyStateRepository(session),
-        task_service=get_task_service(session),
-        memory_service=get_memory_service(session),
+@lru_cache(maxsize=1)
+def get_application_container() -> ApplicationContainer:
+    return ApplicationContainer(
+        task_core_builder=_build_autonomous_task_core_service,
+        memory_service_builder=get_memory_service,
     )
+
+
+def _scope(session: AsyncSession):
+    return get_application_container().scope(session)
+
+
+def get_task_service(session: AsyncSession) -> AutonomousTaskService:
+    return _scope(session).task_services().core
+
+
+def get_task_plan_lifecycle_service(session: AsyncSession) -> TaskPlanLifecycleService:
+    return _scope(session).task_services().plan_lifecycle
+
+
+def get_task_execution_service(session: AsyncSession) -> TaskExecutionService:
+    return _scope(session).task_services().execution
+
+
+def get_task_autonomy_scheduling_service(session: AsyncSession) -> TaskAutonomySchedulingService:
+    return _scope(session).task_services().autonomy_scheduling
+
+
+def get_task_runtime_skill_service(session: AsyncSession) -> TaskRuntimeSkillService:
+    return _scope(session).task_services().runtime_skill
+
+
+def get_dynamic_runtime_registry_service(session: AsyncSession) -> DynamicRuntimeRegistryService:
+    return DynamicRuntimeRegistryService(
+        goal_skill_binding_resolver=get_goal_skill_binding_resolver(session),
+        skill_usage_service=_build_skill_usage_service(session),
+    )
+
+
+def get_workspace_service(session: AsyncSession) -> WorkspaceService:
+    return _scope(session).workspace_service()

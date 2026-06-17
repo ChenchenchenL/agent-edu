@@ -7,7 +7,15 @@ from agent_core.application.services.chat import ChatService
 from agent_core.application.services.reflection_proposals import ReflectionProposalService
 from agent_core.application.services.reflection_replay import ReflectionReplayService
 from agent_core.application.services.strategy_cards import StrategyCardService
-from agent_core.application.tools.registry import InternalToolRegistry, ToolExecutionRequest
+from agent_core.application.services.tool_plan_sequence_governance import (
+    build_tool_plan_sequence_contract,
+    summarize_tool_plan_preview,
+)
+from agent_core.application.services.tool_plan_runtime import (
+    ToolPlanExecutionContext,
+    ToolPlanRuntimeExecutor,
+)
+from agent_core.application.tools.registry import InternalToolRegistry
 from agent_core.domain.entities.message import SessionMessage
 from agent_core.domain.entities.reflection_closure import (
     ReflectionProposal,
@@ -41,6 +49,7 @@ class ReflectionProposalSandboxService:
         workflow_run_repository: WorkflowRunRepository | None = None,
         chat_service: ChatService | None = None,
         internal_tool_registry: InternalToolRegistry | None = None,
+        tool_plan_runtime_executor: ToolPlanRuntimeExecutor | None = None,
     ) -> None:
         self._sandbox_run_repository = sandbox_run_repository
         self._proposal_service = proposal_service
@@ -54,6 +63,7 @@ class ReflectionProposalSandboxService:
         self._workflow_run_repository = workflow_run_repository
         self._chat_service = chat_service
         self._internal_tool_registry = internal_tool_registry
+        self._tool_plan_runtime_executor = tool_plan_runtime_executor
 
     async def list_runs(self, proposal_id: str) -> list[ReflectionProposalSandboxRun]:
         return await self._sandbox_run_repository.list_by_proposal(proposal_id)
@@ -98,14 +108,38 @@ class ReflectionProposalSandboxService:
         )
         try:
             tool_previews: list[dict[str, object]] = []
+            tool_plan_contract_summary: dict[str, object] | None = None
+            tool_plan_preview_summary: dict[str, object] | None = None
             if proposal.proposal_type == "skill_package" and proposal.target_scope in {"review_scheduling", "assessment_generation", "replan"}:
+                contract = build_tool_plan_sequence_contract(
+                    surface=proposal.target_scope,
+                    tool_plan=[dict(item) for item in proposal.structured_patch_payload.get("tool_plan") or []],
+                )
+                if contract is not None:
+                    tool_plan_contract_summary = {
+                        "surface": contract.surface,
+                        "expected_sequence": list(contract.expected_sequence),
+                        "expected_step_count": contract.expected_step_count,
+                        "is_multi_step": contract.is_multi_step,
+                        "requires_repair_task_id": contract.requires_repair_task_id,
+                        "requires_created_review_task_ids": contract.requires_created_review_task_ids,
+                    }
                 tool_previews = await self.run_tool_plan_preview(proposal)
+                if contract is not None:
+                    tool_plan_preview_summary = summarize_tool_plan_preview(
+                        contract=contract,
+                        tool_previews=tool_previews,
+                    )
             evaluation = await self._replay_service.evaluate(
                 proposal=proposal,
                 baseline_policy_snapshot=baseline_snapshot,
                 candidate_policy_snapshot=candidate_snapshot,
                 evaluator_type="archived_replay_live_llm",
                 sandbox_run_id=started.id,
+                sandbox_context={
+                    "tool_plan_contract_summary": dict(tool_plan_contract_summary or {}),
+                    "tool_plan_preview_summary": dict(tool_plan_preview_summary or {}),
+                },
             )
             summary = {
                 "proposal_type": proposal.proposal_type,
@@ -116,6 +150,10 @@ class ReflectionProposalSandboxService:
                 "score_delta": evaluation.score_delta,
                 "insufficient_samples": sample_count < 2,
                 "tool_previews": tool_previews,
+                "tool_plan_sequence": [item["tool_name"] for item in tool_previews],
+                "tool_plan_step_count": len(tool_previews),
+                "tool_plan_contract_summary": dict(tool_plan_contract_summary or {}),
+                "tool_plan_preview_summary": dict(tool_plan_preview_summary or {}),
             }
             if sample_count < 2 and evaluation.evaluation_status == "effective":
                 evaluation = replace(evaluation, evaluation_status="inconclusive")
@@ -197,6 +235,14 @@ class ReflectionProposalSandboxService:
                 "tool_plan": [],
                 "strategy_summary": strategy_summary,
             }
+        if proposal.proposal_type == "skill_patch_request":
+            return {
+                "surface": proposal.target_scope,
+                "artifact_id": proposal.structured_patch_payload.get("artifact_id"),
+                "skill_name": proposal.structured_patch_payload.get("skill_name"),
+                "skill_version": proposal.structured_patch_payload.get("skill_version"),
+                "strategy_summary": strategy_summary,
+            }
         raise ValidationError("Unsupported reflection proposal type.")
 
     def _build_candidate_snapshot(
@@ -244,30 +290,52 @@ class ReflectionProposalSandboxService:
                 return "mixed", 0
             attempts = await self._task_attempt_repository.list_recent_by_goal(proposal.learner_goal_id, limit=5)
             return "mixed", min(len(attempts), 5)
+        if proposal.proposal_type == "skill_patch_request":
+            usage_event_ids = proposal.structured_patch_payload.get("usage_event_ids") or []
+            return "mixed", min(len(usage_event_ids), 5)
         return "mixed", 0
 
     async def run_tool_plan_preview(self, proposal: ReflectionProposal) -> list[dict[str, object]]:
-        if self._internal_tool_registry is None:
+        if self._tool_plan_runtime_executor is None:
             return []
-        previews: list[dict[str, object]] = []
-        for item in proposal.structured_patch_payload.get("tool_plan") or []:
-            tool_name = str(item.get("tool_name") or "")
-            payload_template = dict(item.get("payload_template") or {})
-            payload = {
-                key: proposal.learner_goal_id if str(value) == "$learner_goal_id" else value
-                for key, value in payload_template.items()
+        report = await self._tool_plan_runtime_executor.execute(
+            surface=proposal.target_scope,
+            tool_plan=[dict(item) for item in proposal.structured_patch_payload.get("tool_plan") or []],
+            context=ToolPlanExecutionContext(
+                surface=proposal.target_scope,
+                learner_goal_id=proposal.learner_goal_id,
+                resource_id=proposal.id,
+                actor="system",
+                source_task_id=self._preview_source_task_id(proposal),
+                topic_focus=self._preview_topic_focus(proposal),
+            ),
+            dry_run=True,
+        )
+        return [
+            {
+                "step_id": step.step_id,
+                "tool_name": step.tool_name,
+                "preview": step.result_payload or {},
             }
-            preview = await self._internal_tool_registry.execute(
-                ToolExecutionRequest(
-                    name=tool_name,
-                    payload=payload,
-                    actor="system",
-                    resource_id=proposal.id,
-                    dry_run=True,
-                )
-            )
-            previews.append({"tool_name": tool_name, "preview": preview or {}})
-        return previews
+            for step in report.steps
+        ]
+
+    @staticmethod
+    def _preview_source_task_id(proposal: ReflectionProposal) -> str | None:
+        task_payload = dict((proposal.evidence_snapshot or {}).get("task") or {})
+        for key in ("source_task_id", "daily_task_id", "task_id"):
+            value = task_payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        return None
+
+    @staticmethod
+    def _preview_topic_focus(proposal: ReflectionProposal) -> str | None:
+        task_payload = dict((proposal.evidence_snapshot or {}).get("task") or {})
+        value = task_payload.get("topic_focus") or proposal.structured_patch_payload.get("topic_focus")
+        if isinstance(value, str) and value.strip():
+            return value
+        return None
 
     def _provider_name(self) -> str | None:
         provider = getattr(getattr(self._chat_service, "_llm_provider", None), "provider_name", None)

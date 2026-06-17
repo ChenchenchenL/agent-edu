@@ -27,7 +27,8 @@ Do not duplicate the same rule in multiple documents unless one document is summ
 - Directories: `kebab-case`
 - General file names: `kebab-case`
 - Classes, types, interfaces, and schemas: `PascalCase`
-- Functions, methods, variables, and fields: `camelCase`
+- Python functions, methods, variables, and fields: `snake_case`
+- TypeScript functions, methods, variables, and fields: `camelCase`
 - Constants and environment variables: `UPPER_SNAKE_CASE`
 - Agent role identifiers: `TutorAgent`, `PlannerAgent`, `MemoryAgent`, `SafetyAgent`
 - Skill identifiers: `verb_noun`, such as `create_quiz` or `diagnose_weakness`

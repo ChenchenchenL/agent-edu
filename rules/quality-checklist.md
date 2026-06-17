@@ -7,8 +7,8 @@
 ## Code Quality
 
 - [ ] **No code smells**
-  - No functions >50 lines
-  - No nesting >3 levels
+  - No functions >80 effective lines
+  - No nesting >4 levels
   - No magic numbers (use named constants)
   - No commented-out code blocks
 
@@ -33,7 +33,7 @@
 ## Testing
 
 - [ ] **Unit tests exist**
-  - >80% coverage for core business logic
+  - Core business logic has meaningful risk coverage
   - Test names clearly describe what they test
   - Tests are deterministic (no race conditions)
 
@@ -41,6 +41,7 @@
   - Happy path covered
   - Edge cases covered
   - Error conditions covered
+  - High-risk failure paths covered where applicable
 
 - [ ] **Mocking strategy**
   - External dependencies mocked
@@ -50,7 +51,8 @@
 - [ ] **Test quality**
   - Arrange-Act-Assert structure
   - No test interdependencies
-  - Fast execution (<5s for unit tests)
+  - Unit tests provide fast local feedback without obvious unnecessary slowness
+  - No coverage-only claims in place of critical-path validation
 
 ---
 

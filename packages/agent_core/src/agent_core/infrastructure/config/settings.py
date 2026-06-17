@@ -2,10 +2,44 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from agent_core.domain.errors import ConfigurationError
+
+
+SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES: tuple[str, ...] = (
+    "chat",
+    "hint",
+    "quiz",
+    "plan_generation",
+    "review_scheduling",
+    "assessment_generation",
+    "replan",
+)
+SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES_RAW = ",".join(SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES)
+SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES_ALLOWED = frozenset(SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES)
+
+
+def _parse_csv_items(raw_value: str) -> list[str]:
+    return [item.strip() for item in raw_value.split(",") if item.strip()]
+
+
+def _validate_allowed_csv_items(
+    *,
+    raw_value: str,
+    allowed_values: frozenset[str],
+    field_name: str,
+) -> str:
+    invalid_values = sorted({item for item in _parse_csv_items(raw_value) if item not in allowed_values})
+    if invalid_values:
+        invalid_values_text = ", ".join(invalid_values)
+        allowed_values_text = ", ".join(sorted(allowed_values))
+        raise ValueError(
+            f"{field_name} contains unsupported values: {invalid_values_text}. "
+            f"Allowed values: {allowed_values_text}."
+        )
+    return raw_value
 
 
 class Settings(BaseSettings):
@@ -176,12 +210,173 @@ class Settings(BaseSettings):
         ge=1,
         le=20,
     )
+    skill_curator_job_enabled: bool = Field(alias="AGENT_EDU_SKILL_CURATOR_JOB_ENABLED", default=True)
+    skill_curator_artifact_scan_limit: int = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_ARTIFACT_SCAN_LIMIT",
+        default=20,
+        ge=1,
+        le=200,
+    )
+    skill_curator_usage_lookback_days: int = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_USAGE_LOOKBACK_DAYS",
+        default=30,
+        ge=1,
+        le=365,
+    )
+    skill_curator_coverage_regression_enabled: bool = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_COVERAGE_REGRESSION_ENABLED",
+        default=True,
+    )
+    skill_curator_coverage_drift_topic_min: int = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_COVERAGE_DRIFT_TOPIC_MIN",
+        default=3,
+        ge=1,
+        le=1000,
+    )
+    skill_curator_coverage_hole_topic_min: int = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_COVERAGE_HOLE_TOPIC_MIN",
+        default=2,
+        ge=1,
+        le=1000,
+    )
+    skill_curator_promote_successful_usage_min: int = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_PROMOTE_SUCCESSFUL_USAGE_MIN",
+        default=5,
+        ge=1,
+        le=1000,
+    )
+    skill_curator_promote_observation_min: int = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_PROMOTE_OBSERVATION_MIN",
+        default=2,
+        ge=1,
+        le=100,
+    )
+    skill_curator_max_negative_usage_rate: float = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_MAX_NEGATIVE_USAGE_RATE",
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+    )
+    skill_curator_negative_usage_min: int = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_NEGATIVE_USAGE_MIN",
+        default=3,
+        ge=1,
+        le=1000,
+    )
+    skill_curator_negative_usage_rate_threshold: float = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_NEGATIVE_USAGE_RATE_THRESHOLD",
+        default=0.4,
+        ge=0.0,
+        le=1.0,
+    )
+    skill_curator_resolver_failure_min: int = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_RESOLVER_FAILURE_MIN",
+        default=3,
+        ge=1,
+        le=1000,
+    )
+    skill_curator_archive_stale_days: int = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_ARCHIVE_STALE_DAYS",
+        default=30,
+        ge=1,
+        le=3650,
+    )
+    skill_curator_governance_evidence_enabled: bool = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_GOVERNANCE_EVIDENCE_ENABLED",
+        default=True,
+    )
+    skill_curator_governance_evidence_lookback_days: int = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_GOVERNANCE_EVIDENCE_LOOKBACK_DAYS",
+        default=30,
+        ge=1,
+        le=365,
+    )
+    skill_curator_governance_evidence_limit: int = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_GOVERNANCE_EVIDENCE_LIMIT",
+        default=20,
+        ge=1,
+        le=200,
+    )
+    skill_curator_memory_conflict_severity_threshold: float = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_MEMORY_CONFLICT_SEVERITY_THRESHOLD",
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+    )
+    skill_curator_reflection_ineffective_min: int = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_REFLECTION_INEFFECTIVE_MIN",
+        default=1,
+        ge=1,
+        le=100,
+    )
+    skill_curator_reflection_inconclusive_min: int = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_REFLECTION_INCONCLUSIVE_MIN",
+        default=2,
+        ge=1,
+        le=100,
+    )
+    skill_curator_replacement_readiness_successful_usage_min: int = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_REPLACEMENT_READINESS_SUCCESSFUL_USAGE_MIN",
+        default=3,
+        ge=1,
+        le=1000,
+    )
+    skill_curator_replacement_readiness_promote_observation_min: int = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_REPLACEMENT_READINESS_PROMOTE_OBSERVATION_MIN",
+        default=2,
+        ge=1,
+        le=100,
+    )
+    skill_curator_replacement_readiness_max_negative_usage_rate: float = Field(
+        alias="AGENT_EDU_SKILL_CURATOR_REPLACEMENT_READINESS_MAX_NEGATIVE_USAGE_RATE",
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+    )
+    skill_rollout_auto_governance_enabled: bool = Field(
+        alias="AGENT_EDU_SKILL_ROLLOUT_AUTO_GOVERNANCE_ENABLED",
+        default=True,
+    )
+    skill_rollout_auto_promote_enabled: bool = Field(
+        alias="AGENT_EDU_SKILL_ROLLOUT_AUTO_PROMOTE_ENABLED",
+        default=True,
+    )
+    skill_rollout_auto_rollback_enabled: bool = Field(
+        alias="AGENT_EDU_SKILL_ROLLOUT_AUTO_ROLLBACK_ENABLED",
+        default=True,
+    )
+    skill_rollout_auto_promote_surfaces_raw: str = Field(
+        alias="AGENT_EDU_SKILL_ROLLOUT_AUTO_PROMOTE_SURFACES",
+        default=SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES_RAW,
+    )
+    skill_rollout_auto_rollback_surfaces_raw: str = Field(
+        alias="AGENT_EDU_SKILL_ROLLOUT_AUTO_ROLLBACK_SURFACES",
+        default=SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES_RAW,
+    )
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", env_ignore_empty=True)
 
+    @field_validator(
+        "skill_rollout_auto_promote_surfaces_raw",
+        "skill_rollout_auto_rollback_surfaces_raw",
+    )
+    @classmethod
+    def validate_skill_rollout_auto_governance_surfaces(
+        cls,
+        value: str,
+        info: ValidationInfo,
+    ) -> str:
+        field = cls.model_fields[info.field_name]
+        field_name = field.alias or info.field_name
+        return _validate_allowed_csv_items(
+            raw_value=value,
+            allowed_values=SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES_ALLOWED,
+            field_name=field_name,
+        )
+
     @property
     def allowed_skills(self) -> list[str]:
-        return [item.strip() for item in self.allowed_skills_raw.split(",") if item.strip()]
+        return _parse_csv_items(self.allowed_skills_raw)
 
     @property
     def llm_provider_name(self) -> str:
@@ -205,6 +400,14 @@ class Settings(BaseSettings):
     @property
     def hint_model_name(self) -> str:
         return self.hint_model or self.llm_model
+
+    @property
+    def skill_rollout_auto_promote_surfaces(self) -> list[str]:
+        return _parse_csv_items(self.skill_rollout_auto_promote_surfaces_raw)
+
+    @property
+    def skill_rollout_auto_rollback_surfaces(self) -> list[str]:
+        return _parse_csv_items(self.skill_rollout_auto_rollback_surfaces_raw)
 
     @property
     def embedding_api_key_value(self) -> str | None:

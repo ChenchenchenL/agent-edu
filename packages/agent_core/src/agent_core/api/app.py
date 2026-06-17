@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI
 
+from agent_core.api.dependencies import get_session_factory
 from agent_core.api.error_handlers import register_error_handlers
 from agent_core.api.routes.goals import router as goals_router
 from agent_core.api.routes.autonomy import router as autonomy_router
@@ -14,11 +17,15 @@ from agent_core.api.routes.reflection import router as reflection_router
 from agent_core.api.routes.sessions import router as sessions_router
 from agent_core.api.routes.skills import router as skills_router
 from agent_core.api.routes.workspace import router as workspace_router
+from agent_core.application.services.skills import refresh_skill_observability_metrics
 from agent_core.infrastructure.config.settings import get_settings
+from agent_core.infrastructure.db.repositories import SkillArtifactRepository, SkillCuratorRecommendationRepository
 from agent_core.infrastructure.observability.metrics import (
     PrometheusHttpMiddleware,
     build_metrics_response,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
@@ -34,6 +41,19 @@ def create_app() -> FastAPI:
     if settings.metrics_enabled:
         app.add_middleware(PrometheusHttpMiddleware)
         app.add_api_route("/metrics", build_metrics_response, methods=["GET"], include_in_schema=False)
+
+        async def _refresh_skill_metrics_on_startup() -> None:
+            session_factory = get_session_factory()
+            try:
+                async with session_factory() as session:
+                    await refresh_skill_observability_metrics(
+                        artifact_repository=SkillArtifactRepository(session),
+                        recommendation_repository=SkillCuratorRecommendationRepository(session),
+                    )
+            except Exception:
+                logger.exception("Failed to refresh skill observability metrics at startup.")
+
+        app.router.add_event_handler("startup", _refresh_skill_metrics_on_startup)
 
     register_error_handlers(app)
     app.include_router(health_router)

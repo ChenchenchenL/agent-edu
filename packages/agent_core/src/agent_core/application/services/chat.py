@@ -1,9 +1,15 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_core.application.services.audit import AuditService
 from agent_core.application.services.goal_skill_binding_resolver import ActiveGoalSkillBinding, GoalSkillBindingResolver
+from agent_core.application.services.dynamic_runtime_registry import (
+    DynamicRuntimeRegistryService,
+    RuntimeSkillExecutionPlan,
+)
 from agent_core.application.services.long_term_memory_materialization import LongTermMemoryMaterializationService
 from agent_core.application.services.long_term_memory_materialization_replay import (
     LongTermMemoryMaterializationReplayScheduler,
@@ -21,7 +27,7 @@ from agent_core.application.skills.registry import SkillRegistry
 from agent_core.domain.entities.memory import MemoryEvent, MemoryRetrievalResult
 from agent_core.domain.entities.message import SessionMessage
 from agent_core.domain.entities.session import LearningSession
-from agent_core.domain.entities.skill import SkillResolution
+from agent_core.domain.entities.skill import SkillExecutionPlan, SkillResolution
 from agent_core.domain.errors import NotFoundError, ValidationError
 from agent_core.domain.schemas.session import MessageRequest, MessageResponse, MessageTurnMetrics
 from agent_core.infrastructure.db.repositories import SessionMessageRepository, SessionQuizRepository, SessionRepository
@@ -42,6 +48,8 @@ class _ChatRuntimeContext:
     session: LearningSession
     skills: list[str]
     skill_resolution: SkillResolution | None
+    skill_execution_plan: SkillExecutionPlan | None
+    runtime_plan: RuntimeSkillExecutionPlan | None
     history: list[SessionMessage]
     cross_session_context: list[str]
     hint_context: HintContext | None
@@ -81,6 +89,7 @@ class ChatService:
         rollout_observation_scheduler: ReflectionProposalRolloutObservationScheduler | None = None,
         goal_skill_binding_resolver: GoalSkillBindingResolver | None = None,
         skill_usage_service: SkillUsageService | None = None,
+        runtime_registry: DynamicRuntimeRegistryService | None = None,
     ) -> None:
         self._db_session = db_session
         self._session_repository = session_repository
@@ -95,6 +104,7 @@ class ChatService:
         self._rollout_observation_scheduler = rollout_observation_scheduler
         self._goal_skill_binding_resolver = goal_skill_binding_resolver
         self._skill_usage_service = skill_usage_service
+        self._runtime_registry = runtime_registry
         self._audit_service = audit_service
         self._llm_provider = llm_provider
         self._skill_registry = skill_registry
@@ -138,7 +148,30 @@ class ChatService:
             raise NotFoundError(f"Session '{session_id}' was not found.")
 
         skills = self._skill_registry.trace_for_mode(payload.mode)
-        skill_resolution = await self._resolve_skill_for_runtime(
+        skill_binding = None
+        if self._goal_skill_binding_resolver is not None and session.learner_goal_id is not None:
+            skill_binding = await self._goal_skill_binding_resolver.get_active_binding(
+                learner_goal_id=session.learner_goal_id,
+                surface=payload.mode or "chat",
+                topic_key=session.subject,
+                trigger_source=payload.mode,
+                include_staged=True,
+            )
+        runtime_plan = await self._resolve_runtime_plan(
+            learner_goal_id=session.learner_goal_id,
+            skill_name=skills[0],
+            surface=payload.mode,
+            resource_id=session.id,
+            topic_key=session.subject,
+            trigger_source=payload.mode,
+        )
+        skill_execution_plan = runtime_plan.plan if runtime_plan is not None else await self._resolve_skill_execution_plan(
+            skill_name=skills[0],
+            surface=payload.mode,
+            resource_id=session.id,
+            skill_binding=skill_binding,
+        )
+        skill_resolution = skill_execution_plan.resolution if skill_execution_plan is not None else await self._resolve_skill_for_runtime(
             skill_name=skills[0],
             surface=payload.mode,
             resource_id=session.id,
@@ -277,19 +310,12 @@ class ChatService:
                 surface=payload.mode,
                 include_staged=True,
             )
-        skill_binding = None
-        if self._goal_skill_binding_resolver is not None and session.learner_goal_id is not None:
-            skill_binding = await self._goal_skill_binding_resolver.get_active_binding(
-                learner_goal_id=session.learner_goal_id,
-                surface=payload.mode or "chat",
-                topic_key=session.subject,
-                trigger_source=payload.mode,
-                include_staged=True,
-            )
         return _ChatRuntimeContext(
             session=session,
             skills=skills,
-            skill_resolution=skill_resolution,
+            skill_resolution=skill_execution_plan.resolution if skill_execution_plan is not None else skill_resolution,
+            skill_execution_plan=skill_execution_plan,
+            runtime_plan=runtime_plan,
             history=history,
             cross_session_context=cross_session_context,
             hint_context=hint_context,
@@ -318,8 +344,8 @@ class ChatService:
             strategy_card=context.strategy_card,
             rollout_overlay_payload=context.rollout_overlay_payload,
             skill_directives=(
-                list(context.skill_binding.runtime_directives.get("skill_directives") or [])
-                if context.skill_binding is not None
+                list(context.skill_execution_plan.runtime_directives.get("skill_directives") or [])
+                if context.skill_execution_plan is not None
                 else None
             ),
         )
@@ -371,23 +397,15 @@ class ChatService:
                 input_summary=payload.content,
                 error_code=type(exc).__name__,
                 resolution=context.skill_resolution,
-                metadata=(
-                    context.skill_binding.with_usage_metadata(
-                        {
-                            "operation": "chat" if payload.mode == "chat" else "hint",
-                            "history_count": len(context.history),
-                            "memory_context_count": len(context.retrieval_result.memories),
-                            "response_shape_valid": False,
-                        },
-                        skill_name=context.skills[0],
-                    )
-                    if context.skill_binding is not None
-                    else {
+                metadata=self._build_usage_metadata(
+                    base_metadata={
                         "operation": "chat" if payload.mode == "chat" else "hint",
                         "history_count": len(context.history),
                         "memory_context_count": len(context.retrieval_result.memories),
                         "response_shape_valid": False,
-                    }
+                    },
+                    execution_plan=context.skill_execution_plan,
+                    runtime_plan=context.runtime_plan,
                 ),
             )
             if commit:
@@ -502,27 +520,17 @@ class ChatService:
                 input_summary=payload.content,
                 output_summary=artifacts.assistant_message.content,
                 resolution=context.skill_resolution,
-                metadata=(
-                    context.skill_binding.with_usage_metadata(
-                        {
-                            "user_message_id": artifacts.user_message.id,
-                            "assistant_message_id": artifacts.assistant_message.id,
-                            "response_shape_valid": reply.response_shape_valid,
-                            "retry_count": reply.retry_count,
-                            "provider": reply.provider,
-                            "model": reply.model,
-                        },
-                        skill_name=context.skills[0],
-                    )
-                    if context.skill_binding is not None
-                    else {
+                metadata=self._build_usage_metadata(
+                    base_metadata={
                         "user_message_id": artifacts.user_message.id,
                         "assistant_message_id": artifacts.assistant_message.id,
                         "response_shape_valid": reply.response_shape_valid,
                         "retry_count": reply.retry_count,
                         "provider": reply.provider,
                         "model": reply.model,
-                    }
+                    },
+                    execution_plan=context.skill_execution_plan,
+                    runtime_plan=context.runtime_plan,
                 ),
             )
             await self._post_turn_side_effects(context=context, artifacts=artifacts, payload=payload)
@@ -659,7 +667,7 @@ class ChatService:
             and context.session.learner_goal_id is not None
             and payload.mode in {"chat", "hint"}
         ):
-            await self._rollout_observation_scheduler.schedule_active(
+            await self._schedule_surface_rollout_observation(
                 learner_goal_id=context.session.learner_goal_id,
                 surface=payload.mode,
                 trigger_source="session_turn_completed",
@@ -679,6 +687,45 @@ class ChatService:
             skill_name=skill_name,
             surface=surface,
             resource_id=resource_id,
+        )
+
+    async def _resolve_skill_execution_plan(
+        self,
+        *,
+        skill_name: str,
+        surface: str,
+        resource_id: str,
+        skill_binding: ActiveGoalSkillBinding | None,
+    ) -> SkillExecutionPlan | None:
+        if self._skill_usage_service is None:
+            return None
+        return await self._skill_usage_service.resolve_execution_plan(
+            skill_name=skill_name,
+            surface=surface,
+            resource_id=resource_id,
+            skill_binding=skill_binding,
+        )
+
+    async def _resolve_runtime_plan(
+        self,
+        *,
+        learner_goal_id: str | None,
+        skill_name: str,
+        surface: str,
+        resource_id: str,
+        topic_key: str | None,
+        trigger_source: str | None,
+    ) -> RuntimeSkillExecutionPlan | None:
+        if self._runtime_registry is None:
+            return None
+        return await self._runtime_registry.resolve_runtime_plan(
+            learner_goal_id=learner_goal_id,
+            skill_name=skill_name,
+            surface=surface,
+            resource_id=resource_id,
+            topic_key=topic_key,
+            trigger_source=trigger_source,
+            include_staged=True,
         )
 
     async def _record_skill_usage(
@@ -713,6 +760,36 @@ class ChatService:
             error_code=error_code,
             resolution=resolution,
             metadata=metadata,
+        )
+
+    async def _schedule_surface_rollout_observation(
+        self,
+        *,
+        learner_goal_id: str,
+        surface: str,
+        trigger_source: str,
+        source_ref: str,
+    ) -> None:
+        if self._rollout_observation_scheduler is None:
+            return
+        await self._rollout_observation_scheduler.schedule_active(
+            learner_goal_id=learner_goal_id,
+            surface=surface,
+            trigger_source=trigger_source,
+            source_ref=source_ref,
+        )
+
+    @staticmethod
+    def _build_usage_metadata(
+        *,
+        base_metadata: dict[str, object],
+        execution_plan: SkillExecutionPlan | None,
+        runtime_plan: RuntimeSkillExecutionPlan | None = None,
+    ) -> dict[str, object]:
+        return DynamicRuntimeRegistryService.usage_metadata_for_plan(
+            execution_plan=execution_plan,
+            runtime_plan=runtime_plan,
+            base_metadata=base_metadata,
         )
 
     async def _materialize_chat_turn_isolated(

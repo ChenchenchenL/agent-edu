@@ -111,20 +111,26 @@ When `AGENT_EDU_METRICS_ENABLED=1`, the API exposes:
 
 Prometheus scrapes `api:8000/metrics`.
 
-Prometheus also loads `ops/prometheus/alerts.yml`, which currently contains the
-long-term memory alert baseline:
+Prometheus also loads `ops/prometheus/alerts.yml`, which currently contains:
 
-- `MemoryCandidateBacklogHigh`
-- `MemoryMaterializationFailureRateHigh`
-- `MemoryMaintenanceSlow`
-- `MemoryOpenConflictsGrowing`
+- the long-term memory alert baseline:
+  - `MemoryCandidateBacklogHigh`
+  - `MemoryMaterializationFailureRateHigh`
+  - `MemoryMaintenanceSlow`
+  - `MemoryOpenConflictsGrowing`
+- the skill health alert baseline:
+  - `SkillResolverFailureRateHigh`
+  - `SkillNegativeUsageRateHigh`
+  - `SkillCuratorPendingBacklogHigh`
+  - `SkillCoverageRegressionRecommendationRateHigh`
+  - `SkillCuratorJobSlow`
 
 Grafana is provisioned with:
 
 - a default Prometheus datasource
 - the `AgentEdu Overview` dashboard
 
-The dashboard includes the long-term memory panels needed for first-pass
+The dashboard includes the long-term memory and skill panels needed for first-pass
 operations review:
 
 - memory candidate backlog
@@ -132,6 +138,12 @@ operations review:
 - memory conflict rate and current open conflicts
 - long-term memory materialization failure rate
 - memory maintenance p95 duration
+- skill usage rate by surface / outcome
+- skill resolver failure rate
+- skill artifact status counts
+- skill curator pending recommendation counts
+- skill curator recommendation rate
+- skill curator job p95 duration
 
 Default local ports:
 
@@ -159,4 +171,11 @@ When a Docker or real-provider regression fails, inspect in this order:
    - conflict rate and open conflicts
    - materialization failure rate
    - maintenance duration
-6. session, message, quiz, and memory tables if persistence behavior looks inconsistent
+6. Skill panels and alerts for:
+   - usage rate and negative outcome rate
+   - resolver failure rate
+   - artifact status counts
+   - curator pending backlog
+   - coverage regression recommendation spikes
+   - curator job latency
+7. session, message, quiz, skill, and memory tables if persistence behavior looks inconsistent

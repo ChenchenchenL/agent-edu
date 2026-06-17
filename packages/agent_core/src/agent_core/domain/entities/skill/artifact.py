@@ -55,6 +55,33 @@ SKILL_OUTCOME_SIGNAL_KEYS = {
     "score_delta",
     "confidence",
 }
+SKILL_CURATOR_RECOMMENDATION_TYPES = {
+    "activate_candidate",
+    "promote_candidate",
+    "patch_needed",
+    "replace_candidate",
+    "merge_candidate",
+    "archive_candidate",
+    "rollback_review",
+    "flag_for_review",
+    "restore_candidate",
+}
+SKILL_CURATOR_RECOMMENDED_ACTIONS = {
+    "none",
+    "activate_staged",
+    "stabilize_active",
+    "suppress_selectable",
+    "deactivate_active",
+    "restore_suppressed",
+    "replace_selectable",
+    "archive_deprecated",
+}
+SKILL_CURATOR_RECOMMENDATION_STATUSES = {
+    "pending",
+    "accepted",
+    "dismissed",
+    "superseded",
+}
 
 
 def _utcnow() -> datetime:
@@ -66,7 +93,7 @@ def _validate_score(name: str, value: float) -> None:
         raise ValidationError(f"{name} must be between 0 and 1.")
 
 
-@dataclass(frozen=True)
+@dataclass(kw_only=True)
 class SkillArtifact:
     id: str
     name: str
@@ -89,6 +116,13 @@ class SkillArtifact:
     created_by: str
     approved_by: str | None
     approved_at: datetime | None
+    deprecated_by: str | None
+    deprecated_at: datetime | None
+    suppressed_reason_code: str | None
+    suppressed_reason_note: str | None
+    suppressed_by: str | None
+    suppressed_at: datetime | None
+    suppressed_previous_status: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -116,6 +150,13 @@ class SkillArtifact:
         created_by: str = "system",
         approved_by: str | None = None,
         approved_at: datetime | None = None,
+        deprecated_by: str | None = None,
+        deprecated_at: datetime | None = None,
+        suppressed_reason_code: str | None = None,
+        suppressed_reason_note: str | None = None,
+        suppressed_by: str | None = None,
+        suppressed_at: datetime | None = None,
+        suppressed_previous_status: str | None = None,
     ) -> "SkillArtifact":
         if not name.strip():
             raise ValidationError("skill artifact name is required.")
@@ -157,6 +198,13 @@ class SkillArtifact:
             created_by=created_by,
             approved_by=approved_by,
             approved_at=approved_at,
+            deprecated_by=deprecated_by,
+            deprecated_at=deprecated_at,
+            suppressed_reason_code=suppressed_reason_code,
+            suppressed_reason_note=suppressed_reason_note,
+            suppressed_by=suppressed_by,
+            suppressed_at=suppressed_at,
+            suppressed_previous_status=suppressed_previous_status,
             created_at=now,
             updated_at=now,
         )
@@ -211,176 +259,115 @@ class SkillArtifact:
             updated_at=now,
         )
 
-    def mark_deprecated(self) -> "SkillArtifact":
+    def mark_replacement_active(self, *, operator_id: str, superseded_artifact: "SkillArtifact") -> "SkillArtifact":
+        if self.status != "staged":
+            raise ValidationError("Only staged skill artifacts can replace a selectable artifact.")
+        if superseded_artifact.status not in {"active", "stable"}:
+            raise ValidationError("Only active or stable skill artifacts can be superseded.")
+        if self.id == superseded_artifact.id:
+            raise ValidationError("A skill artifact cannot replace itself.")
+        if self.name != superseded_artifact.name or self.scope != superseded_artifact.scope:
+            raise ValidationError("Replacement skill artifact must match superseded name and scope.")
+        if not operator_id.strip():
+            raise ValidationError("operator_id is required.")
+        now = _utcnow()
+        return replace(
+            self,
+            lineage_id=superseded_artifact.lineage_id,
+            parent_artifact_id=superseded_artifact.id,
+            supersedes_artifact_id=superseded_artifact.id,
+            status="active",
+            approved_by=operator_id,
+            approved_at=now,
+            updated_at=now,
+        )
+
+    def mark_stable(self, *, operator_id: str) -> "SkillArtifact":
         if self.status != "active":
-            raise ValidationError("Only active skill artifacts can be deprecated.")
-        return replace(self, status="deprecated", updated_at=_utcnow())
-
-
-@dataclass(frozen=True)
-class SkillResolution:
-    skill_name: str
-    surface: str
-    artifact_id: str | None
-    skill_version: str | None
-    artifact_status: str | None
-    resolver_status: str
-    selection_reason: str
-    implementation_binding: str
-
-    @classmethod
-    def build(
-        cls,
-        *,
-        skill_name: str,
-        surface: str,
-        implementation_binding: str,
-        artifact_id: str | None = None,
-        skill_version: str | None = None,
-        artifact_status: str | None = None,
-        resolver_status: str = "resolved",
-        selection_reason: str = "production_default",
-    ) -> "SkillResolution":
-        if not skill_name.strip():
-            raise ValidationError("skill_name is required.")
-        if surface not in SKILL_USAGE_SURFACES:
-            raise ValidationError("Unsupported skill usage surface.")
-        if not implementation_binding.strip():
-            raise ValidationError("implementation_binding is required.")
-        if resolver_status not in SKILL_RESOLVER_STATUSES:
-            raise ValidationError("Unsupported skill resolver_status.")
-        if selection_reason not in SKILL_SELECTION_REASONS:
-            raise ValidationError("Unsupported skill selection_reason.")
-        return cls(
-            skill_name=skill_name,
-            surface=surface,
-            artifact_id=artifact_id,
-            skill_version=skill_version,
-            artifact_status=artifact_status,
-            resolver_status=resolver_status,
-            selection_reason=selection_reason,
-            implementation_binding=implementation_binding,
+            raise ValidationError("Only active skill artifacts can be stabilized.")
+        if not operator_id.strip():
+            raise ValidationError("operator_id is required.")
+        now = _utcnow()
+        return replace(
+            self,
+            status="stable",
+            approved_by=operator_id,
+            approved_at=now,
+            updated_at=now,
         )
 
+    def mark_deprecated(self, *, operator_id: str) -> "SkillArtifact":
+        """Deprecate a production artifact.
 
-@dataclass(frozen=True)
-class SkillUsageEvent:
-    id: str
-    skill_artifact_id: str | None
-    skill_name: str
-    skill_version: str | None
-    skill_status_at_use: str | None
-    learner_profile_id: str | None
-    learner_goal_id: str | None
-    session_id: str | None
-    daily_task_id: str | None
-    workflow_run_id: str | None
-    surface: str
-    topic_key: str | None
-    trigger_source: str | None
-    outcome_status: str
-    latency_ms: int | None
-    cost_units: float | None
-    input_summary: str | None
-    input_fingerprint: str | None
-    output_summary: str | None
-    output_fingerprint: str | None
-    error_code: str | None
-    resolver_status: str
-    selection_reason: str
-    outcome_signals: dict[str, Any]
-    metadata: dict[str, Any]
-    created_at: datetime
-
-    @classmethod
-    def build(
-        cls,
-        *,
-        skill_artifact_id: str | None,
-        skill_name: str,
-        skill_version: str | None,
-        surface: str,
-        outcome_status: str,
-        skill_status_at_use: str | None = None,
-        learner_profile_id: str | None = None,
-        learner_goal_id: str | None = None,
-        session_id: str | None = None,
-        daily_task_id: str | None = None,
-        workflow_run_id: str | None = None,
-        topic_key: str | None = None,
-        trigger_source: str | None = None,
-        latency_ms: int | None = None,
-        cost_units: float | None = None,
-        input_summary: str | None = None,
-        input_fingerprint: str | None = None,
-        output_summary: str | None = None,
-        output_fingerprint: str | None = None,
-        error_code: str | None = None,
-        resolver_status: str = "resolved",
-        selection_reason: str = "production_default",
-        outcome_signals: dict[str, Any] | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> "SkillUsageEvent":
-        if not skill_name.strip():
-            raise ValidationError("skill_name is required.")
-        if surface not in SKILL_USAGE_SURFACES:
-            raise ValidationError("Unsupported skill usage surface.")
-        if outcome_status not in SKILL_USAGE_OUTCOME_STATUSES:
-            raise ValidationError("Unsupported skill usage outcome_status.")
-        if skill_status_at_use is not None and skill_status_at_use not in SKILL_ARTIFACT_STATUSES:
-            raise ValidationError("Unsupported skill_status_at_use.")
-        if resolver_status not in SKILL_RESOLVER_STATUSES:
-            raise ValidationError("Unsupported skill resolver_status.")
-        if selection_reason not in SKILL_SELECTION_REASONS:
-            raise ValidationError("Unsupported skill selection_reason.")
-        if latency_ms is not None and latency_ms < 0:
-            raise ValidationError("latency_ms must be non-negative.")
-        if cost_units is not None and cost_units < 0:
-            raise ValidationError("cost_units must be non-negative.")
-        normalized_signals = cls._normalize_outcome_signals(outcome_signals)
-        return cls(
-            id=str(uuid4()),
-            skill_artifact_id=skill_artifact_id,
-            skill_name=skill_name,
-            skill_version=skill_version,
-            skill_status_at_use=skill_status_at_use,
-            learner_profile_id=learner_profile_id,
-            learner_goal_id=learner_goal_id,
-            session_id=session_id,
-            daily_task_id=daily_task_id,
-            workflow_run_id=workflow_run_id,
-            surface=surface,
-            topic_key=topic_key,
-            trigger_source=trigger_source,
-            outcome_status=outcome_status,
-            latency_ms=latency_ms,
-            cost_units=cost_units,
-            input_summary=input_summary,
-            input_fingerprint=input_fingerprint,
-            output_summary=output_summary,
-            output_fingerprint=output_fingerprint,
-            error_code=error_code,
-            resolver_status=resolver_status,
-            selection_reason=selection_reason,
-            outcome_signals=normalized_signals,
-            metadata=dict(metadata or {}),
-            created_at=_utcnow(),
+        Business policy allows active, stable, and suppressed production
+        artifacts to be deprecated, but candidate and staged artifacts must use
+        their own lifecycle paths.
+        """
+        if self.status not in {"active", "stable", "suppressed"}:
+            raise ValidationError("Only active, stable, or suppressed skill artifacts can be deprecated.")
+        if not operator_id.strip():
+            raise ValidationError("operator_id is required.")
+        now = _utcnow()
+        return replace(
+            self,
+            status="deprecated",
+            deprecated_by=operator_id,
+            deprecated_at=now,
+            suppressed_reason_code=None,
+            suppressed_reason_note=None,
+            suppressed_by=None,
+            suppressed_at=None,
+            suppressed_previous_status=None,
+            updated_at=now,
         )
 
-    @staticmethod
-    def _normalize_outcome_signals(outcome_signals: dict[str, Any] | None) -> dict[str, Any]:
-        signals = dict(outcome_signals or {})
-        unsupported = set(signals) - SKILL_OUTCOME_SIGNAL_KEYS
-        if unsupported:
-            raise ValidationError("Unsupported skill outcome signal.")
-        for key, value in signals.items():
-            if isinstance(value, (dict, list)):
-                raise ValidationError("Skill outcome signals must be scalar values.")
-            if isinstance(value, str) and len(value) > 128:
-                raise ValidationError("Skill outcome signal strings must be 128 characters or fewer.")
-            if key in {"score_delta", "confidence"} and value is not None:
-                if not isinstance(value, (int, float)):
-                    raise ValidationError("Numeric outcome signals must be numbers.")
-                if key == "confidence":
-                    _validate_score("confidence", float(value))
-        return signals
+    def mark_suppressed(
+        self,
+        *,
+        operator_id: str,
+        reason_code: str,
+        reason_note: str | None,
+    ) -> "SkillArtifact":
+        if self.status not in {"active", "stable"}:
+            raise ValidationError("Only active or stable skill artifacts can be suppressed.")
+        if not operator_id.strip():
+            raise ValidationError("operator_id is required.")
+        if not reason_code.strip():
+            raise ValidationError("reason_code is required.")
+        now = _utcnow()
+        return replace(
+            self,
+            status="suppressed",
+            suppressed_reason_code=reason_code,
+            suppressed_reason_note=reason_note,
+            suppressed_by=operator_id,
+            suppressed_at=now,
+            suppressed_previous_status=self.status,
+            updated_at=now,
+        )
+
+    def restore_suppressed(self, *, operator_id: str) -> "SkillArtifact":
+        if self.status != "suppressed":
+            raise ValidationError("Only suppressed skill artifacts can be restored.")
+        if self.suppressed_previous_status not in {"active", "stable"}:
+            raise ValidationError("Suppressed skill artifact is missing a restorable previous status.")
+        if not operator_id.strip():
+            raise ValidationError("operator_id is required.")
+        now = _utcnow()
+        return replace(
+            self,
+            status=self.suppressed_previous_status,
+            suppressed_reason_code=None,
+            suppressed_reason_note=None,
+            suppressed_by=None,
+            suppressed_at=None,
+            suppressed_previous_status=None,
+            updated_at=now,
+        )
+
+    def mark_archived(self, *, operator_id: str) -> "SkillArtifact":
+        if self.status != "deprecated":
+            raise ValidationError("Only deprecated skill artifacts can be archived.")
+        if not operator_id.strip():
+            raise ValidationError("operator_id is required.")
+        return replace(self, status="archived", updated_at=_utcnow())

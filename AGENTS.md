@@ -33,7 +33,7 @@ before making changes.
 Apply rules based on the files being modified and the risks involved.
 
 Examples:
-- UI/components/pages -> frontend.md
+- Web UI/components/pages -> frontend.md
 - API/services/db/workers/agents/memory/workflow -> backend.md
 - Tests -> testing.md
 - Auth/input handling/tool execution/memory writes/reflection/evolution approvals -> security.md

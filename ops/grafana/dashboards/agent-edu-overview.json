@@ -409,6 +409,165 @@
       ],
       "title": "Memory Maintenance p95 Duration",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "id": 12,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(agent_edu_skill_usage_events_total[5m])) by (surface, outcome_status)",
+          "legendFormat": "{{surface}} {{outcome_status}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Skill Usage Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "id": 13,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(agent_edu_skill_resolutions_total{resolver_status=~\"missing_artifact|blocked|incompatible\"}[15m])) by (surface, resolver_status)",
+          "legendFormat": "{{surface}} {{resolver_status}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Skill Resolver Failure Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      },
+      "id": 14,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(agent_edu_skill_artifacts) by (status)",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(agent_edu_skill_curator_pending_recommendations) by (recommendation_type)",
+          "legendFormat": "pending {{recommendation_type}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Skill Artifact And Pending Recommendation Counts",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 56
+      },
+      "id": 15,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(agent_edu_skill_curator_recommendations_total[15m])) by (recommendation_type, event)",
+          "legendFormat": "{{recommendation_type}} {{event}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(agent_edu_skill_curator_job_duration_seconds_bucket{status=\"completed\"}[15m])) by (le))",
+          "legendFormat": "curator job p95",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(agent_edu_skill_rollout_auto_decisions_total[15m])) by (event, decision, surface)",
+          "legendFormat": \"{{surface}} {{event}} {{decision}}\",
+          "refId": "C"
+        }
+      ],
+      "title": "Skill Curator And Rollout Auto-Governance",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",
@@ -426,6 +585,6 @@
   "timezone": "",
   "title": "AgentEdu Overview",
   "uid": "agent-edu-overview",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }

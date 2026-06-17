@@ -140,10 +140,10 @@ Use these names consistently in code and documentation:
 
 - Bridges the agent system with APIs, storage, queues, external tools, and user-facing surfaces.
 - Isolates infrastructure and transport concerns from domain logic.
-- Current user-facing surface direction is CLI-first:
-  - installable terminal CLI for scriptable operations
-  - learner-first TUI workspace for long-running study sessions
-  - future QQ / 微信 / other connectors should reuse the same application boundary
+- Current user-facing surface direction is Web-first:
+  - browser-based learner and operator workbench surfaces
+  - future connectors such as QQ / 微信 / other channels should reuse the same
+    application boundary
 
 ## Pedagogical Safety
 
@@ -250,6 +250,28 @@ The following architectural constraints are mandatory:
     - lease recovery / retry / backoff / durable audit
     - conflict refresh and compression runner
     - observability hooks for backlog / promotion / conflict / materialization / maintenance duration
+  - **Service Architecture Refactoring (Phase 3 partial, 2026-06)**:
+    - Protocol-based service interfaces (13 interfaces)
+    - Dependency injection container (dual-layer: Application + RequestScope)
+    - Service decomposition from monolithic `AutonomousTaskService` is in a mixed transition state:
+      - `TaskPlanLifecycleService`: plan/task CRUD, `update_task_status()`, and `generate_plan()` main path have been migrated; some cross-service side effects still use callbacks
+      - `TaskExecutionService`: task execution logic is largely independent
+      - `TaskAutonomySchedulingService`: autonomy queries and several scheduling flows have been migrated, but complex coordination still routes through callbacks into legacy core
+      - `TaskRuntimeSkillService`: runtime skill orchestration methods have been migrated off legacy private-method calls; unused `core` injection has been removed, container wiring simplified, and comment/doc synchronized
+    - Callback pattern currently bridges complex coordination without circular dependencies, but is also the main sign that migration is not yet fully closed
+    - Backward compatibility is maintained through dual-track operation with legacy core still present
+    - **Repository module split (2026-06-14)**:
+      - `infrastructure/db/repositories.py` (4,268 lines, 44 classes) converted to a 65-line re-export layer
+      - 44 Repository classes split into 7 domain modules under `infrastructure/db/repositories/`:
+        - `session.py`: SessionRepository, SessionMessageRepository, SessionQuizRepository
+        - `skill.py`: SkillArtifactRepository, SkillUsageEventRepository, SkillCuratorRecommendationRepository
+        - `audit.py`: AuditRepository
+        - `learner.py`: LearnerProfileRepository, LearnerGoalRepository, GoalAutonomyStateRepository, ScheduledAutonomyJobRepository, LearnerAvailabilityRepository, LearnerTopicMasteryRepository, TaskAttemptRepository
+        - `planning.py`: StudyPlanRepository, PlanStageRepository, DailyTaskRepository, WorkflowRunRepository
+        - `memory.py`: 11 memory-related Repository classes
+        - `reflection.py`: 15 reflection-related Repository classes
+      - All 52 existing call-site imports remain backward-compatible via the re-export layer
+    - Documentation: `docs/PHASE3_MIGRATION_REPORT.md`
   - explicit non-goals for this phase:
     - non-HTTP external connectors
     - plugin marketplace/runtime
@@ -316,21 +338,46 @@ The following architectural constraints are mandatory:
       - `ReflectionProposalRolloutObservation`
       - `ReflectionProposalRolloutDecision`
       - goal-scoped staged activation
-      - chat / hint / plan_generation / review_scheduling / assessment_generation / replan rollout surfaces
+      - chat / hint / quiz / plan_generation / review_scheduling / assessment_generation / replan rollout surfaces
       - rollout overlay consumption in chat / planner / task runtime
       - manual promote / rollback
+      - rollout auto-governance V1 via a separate autonomy decision job; observation remains signal-only and does not inline rollout state transitions
+      - current auto-governance allowlist is `review_scheduling / assessment_generation / replan`; `chat / hint / quiz / plan_generation` remain manual-only for rollout promote / rollback
       - planner rollback baseline replan
+    - skill evolution MVP:
+      - `skill_package` and `skill_patch_request` proposal types
+      - `SkillArtifact` versioned lifecycle asset
+      - `SkillUsageEvent` usage attribution
+      - `SkillCuratorRecommendation` review carrier and `SkillCuratorJob` MVP
+      - `patch_needed -> skill_patch_request -> replacement skill_package proposal -> staged replacement` governed path
+      - `merge_candidate -> merge-sourced replacement skill_package proposal -> staged replacement` governed path
+      - artifact overlap / duplicate detection input that emits `merge_candidate / none` recommendations without mutating artifacts
+      - curator governance evidence input from memory conflict summaries, reflection outcome evaluations, and resolver health trends that emits or enriches `flag_for_review / none` recommendations without mutating artifacts
+      - surface / topic coverage regression input that emits `patch_needed / none` recommendations from declared-topic drift and governed binding gaps without mutating artifacts
+      - Prometheus / Grafana / alert baseline for skill usage, resolver failures, artifact status, curator backlog, recommendation rates, and curator job latency
+      - rollout auto-governance observability for auto decision queued / executed / skipped and alerting on elevated auto rollback / skip rates
+      - operator-protected replacement staging that preserves lineage / parent / supersedes provenance without automatic activate / replace
+      - shared staged-replacement readiness evaluation, strict source-anchor gate, and curator ready recommendation before manual activate / replace
+      - readiness read API returns `recommended_action` plus the unified replacement-readiness evidence summary used by operator review and curator recommendation
 - Still pending:
   - deeper prompt / workflow optimization outputs
   - bundle / global rollout governance
-  - auto promote / auto rollback
+  - broader rollout auto-governance beyond allowlisted workflow surfaces
+  - staged replacement auto-activate / auto-replace
   - deeper session-signal evidence extraction
-  - reflection-to-skill proposal handoff
+  - dynamic runtime skill registry V2, including richer multi-step tool-plan orchestration and fuller active-artifact runtime sourcing
 
 ### Phase 5: Skill Evolution
 
 - Generate controlled proposals for new or improved skills.
 - Evaluate proposals in sandboxed conditions before promotion.
+- Current MVP can carry `patch_needed` and `merge_candidate` recommendations through governed replacement `skill_package` proposals and operator-staged replacement artifacts.
+- Curator evidence v1 can incorporate memory conflict summaries, reflection outcome evaluations, and resolver health trends into review recommendations.
+- Replacement staging stops at `staged`; activation or replacement remains governed by later evidence gates.
+- Dynamic runtime registry V1 remains governed configuration sourcing, not dynamic code loading: handler registration and internal tool registration stay code-controlled, while artifacts and bindings provide directives, tool-plan, and rollout metadata.
+- Chat, planner, and task/autonomy paths now share the same runtime-plan contract and usage attribution shape; chat / hint / quiz / plan_generation can emit rollout observation signals on success, while allowlisted task/autonomy workflow surfaces can emit observation on success and on runtime failure when a real workflow-run anchor exists, without inlining rollout state transitions.
+- Rollout auto-governance V1 is intentionally narrower than replacement governance: it can auto-promote or auto-rollback allowlisted rollouts, but it does not auto-activate or auto-replace staged replacement artifacts.
+- Replacement governance remains manual execution after evidence gates, and both direct `activate_staged` and `replace_selectable` now re-check readiness under locked artifact/selectable reads before state transition; recommendation accept failure emits durable `accept_failed` audit and leaves the recommendation pending.
 
 ### Phase 6: Multi-Agent Society
 
@@ -361,6 +408,25 @@ The top-level organization should converge toward:
 - `packages/`: shared domain logic, schemas, memory, workflow, and safety modules
 - `infra/`: deployment, environment, operations, and infrastructure definitions
 - `docs/`: extended design, ADRs, and implementation notes
+
+Current `packages/agent_core/src/agent_core/` structure:
+
+- `api/`: FastAPI routes, dependencies, and access control
+- `application/services/`: application-layer service implementations
+- `application/interfaces/`: protocol-based service interfaces
+- `application/skills/`: skill definitions and runtime
+- `application/tools/`: tool definitions and runtime
+- `cli/`: installable CLI and TUI entry points
+- `domain/entities/`: domain entity definitions
+- `domain/schemas/`: validated boundary schemas
+- `infrastructure/db/models.py`: SQLAlchemy ORM models
+- `infrastructure/db/repositories.py`: re-export layer (backward-compatible shim)
+- `infrastructure/db/repositories/`: domain-split repository modules
+  - `session.py`, `skill.py`, `audit.py`, `learner.py`, `planning.py`, `memory.py`, `reflection.py`
+  - `__init__.py`: unified export of all 44 Repository classes
+- `infrastructure/container.py`: dependency injection container
+- `infrastructure/llm/`: LLM provider implementations
+- `infrastructure/embedding/`: embedding provider implementations
 
 Exact paths can evolve, but responsibilities should remain separated along these lines.
 

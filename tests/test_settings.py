@@ -1,7 +1,54 @@
 import pytest
+from pydantic import ValidationError
 
 from agent_core.domain.errors import ConfigurationError
-from agent_core.infrastructure.config.settings import Settings
+from agent_core.infrastructure.config.settings import (
+    SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES,
+    Settings,
+)
+
+
+def test_settings_default_rollout_auto_governance_surfaces(monkeypatch):
+    monkeypatch.setenv("AGENT_EDU_DATABASE_URL", "sqlite+aiosqlite:///./test.db")
+    monkeypatch.setenv("AGENT_EDU_REDIS_URL", "redis://redis:6379/0")
+    monkeypatch.delenv("AGENT_EDU_SKILL_ROLLOUT_AUTO_PROMOTE_SURFACES", raising=False)
+    monkeypatch.delenv("AGENT_EDU_SKILL_ROLLOUT_AUTO_ROLLBACK_SURFACES", raising=False)
+
+    settings = Settings(_env_file=None)
+
+    expected = list(SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES)
+    assert settings.skill_rollout_auto_promote_surfaces == expected
+    assert settings.skill_rollout_auto_rollback_surfaces == expected
+
+
+def test_settings_rollout_auto_governance_surfaces_trim_empty_items(monkeypatch):
+    monkeypatch.setenv("AGENT_EDU_DATABASE_URL", "sqlite+aiosqlite:///./test.db")
+    monkeypatch.setenv("AGENT_EDU_REDIS_URL", "redis://redis:6379/0")
+    monkeypatch.setenv("AGENT_EDU_SKILL_ROLLOUT_AUTO_PROMOTE_SURFACES", " chat, , hint,")
+    monkeypatch.setenv("AGENT_EDU_SKILL_ROLLOUT_AUTO_ROLLBACK_SURFACES", "quiz, , replan, ")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.skill_rollout_auto_promote_surfaces == ["chat", "hint"]
+    assert settings.skill_rollout_auto_rollback_surfaces == ["quiz", "replan"]
+
+
+@pytest.mark.parametrize(
+    ("env_key", "env_value"),
+    [
+        ("AGENT_EDU_SKILL_ROLLOUT_AUTO_PROMOTE_SURFACES", "chat,hnit"),
+        ("AGENT_EDU_SKILL_ROLLOUT_AUTO_ROLLBACK_SURFACES", "quiz,unknown_surface"),
+    ],
+)
+def test_settings_reject_invalid_rollout_auto_governance_surface(monkeypatch, env_key, env_value):
+    monkeypatch.setenv("AGENT_EDU_DATABASE_URL", "sqlite+aiosqlite:///./test.db")
+    monkeypatch.setenv("AGENT_EDU_REDIS_URL", "redis://redis:6379/0")
+    monkeypatch.delenv("AGENT_EDU_SKILL_ROLLOUT_AUTO_PROMOTE_SURFACES", raising=False)
+    monkeypatch.delenv("AGENT_EDU_SKILL_ROLLOUT_AUTO_ROLLBACK_SURFACES", raising=False)
+    monkeypatch.setenv(env_key, env_value)
+
+    with pytest.raises(ValidationError, match="unsupported values"):
+        Settings(_env_file=None)
 
 
 def test_settings_load_dashscope_provider_configuration(monkeypatch):

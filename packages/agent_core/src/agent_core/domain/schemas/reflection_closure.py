@@ -207,6 +207,11 @@ class ApproveReflectionProposalRequest(BaseModel):
     reason_note: str | None = Field(default=None, max_length=2000)
 
 
+class RealizeSkillPatchRequest(BaseModel):
+    reason_code: str = Field(min_length=1, max_length=128)
+    reason_note: str | None = Field(default=None, max_length=2000)
+
+
 class RejectReflectionProposalRequest(BaseModel):
     reason_code: str = Field(min_length=1, max_length=128)
     reason_note: str | None = Field(default=None, max_length=2000)

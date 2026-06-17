@@ -2,7 +2,11 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_core.api.access_control import AccessContext, require_goal_access
-from agent_core.api.dependencies import get_access_context, get_db_session, get_task_service
+from agent_core.api.dependencies import (
+    get_access_context,
+    get_db_session,
+    get_task_autonomy_scheduling_service,
+)
 from agent_core.domain.schemas.autonomy import (
     GoalAutonomyStateResponse,
     LearnerAvailabilityResponse,
@@ -23,7 +27,7 @@ async def get_goal_autonomy_state(
     context: AccessContext = Depends(get_access_context),
 ) -> GoalAutonomyStateResponse:
     await require_goal_access(goal_id, context, session)
-    service = get_task_service(session)
+    service = get_task_autonomy_scheduling_service(session)
     return await service.get_goal_autonomy_state(goal_id)
 
 
@@ -35,7 +39,7 @@ async def pause_goal_autonomy(
     context: AccessContext = Depends(get_access_context),
 ) -> GoalAutonomyStateResponse:
     await require_goal_access(goal_id, context, session)
-    service = get_task_service(session)
+    service = get_task_autonomy_scheduling_service(session)
     return await service.pause_goal_autonomy(goal_id, reason=payload.reason)
 
 
@@ -46,7 +50,7 @@ async def resume_goal_autonomy(
     context: AccessContext = Depends(get_access_context),
 ) -> GoalAutonomyStateResponse:
     await require_goal_access(goal_id, context, session)
-    service = get_task_service(session)
+    service = get_task_autonomy_scheduling_service(session)
     return await service.resume_goal_autonomy(goal_id)
 
 
@@ -58,7 +62,7 @@ async def update_goal_availability(
     context: AccessContext = Depends(get_access_context),
 ) -> LearnerAvailabilityResponse:
     await require_goal_access(goal_id, context, session)
-    service = get_task_service(session)
+    service = get_task_autonomy_scheduling_service(session)
     return await service.update_goal_availability(goal_id=goal_id, payload=payload)
 
 
@@ -69,7 +73,7 @@ async def get_goal_availability(
     context: AccessContext = Depends(get_access_context),
 ) -> LearnerAvailabilityResponse:
     await require_goal_access(goal_id, context, session)
-    service = get_task_service(session)
+    service = get_task_autonomy_scheduling_service(session)
     return await service.get_goal_availability(goal_id)
 
 
@@ -80,7 +84,7 @@ async def list_goal_mastery(
     context: AccessContext = Depends(get_access_context),
 ) -> list[LearnerTopicMasteryResponse]:
     await require_goal_access(goal_id, context, session)
-    service = get_task_service(session)
+    service = get_task_autonomy_scheduling_service(session)
     return await service.list_goal_mastery(goal_id)
 
 
@@ -91,7 +95,7 @@ async def list_goal_autonomy_jobs(
     context: AccessContext = Depends(get_access_context),
 ) -> list[ScheduledAutonomyJobResponse]:
     await require_goal_access(goal_id, context, session)
-    service = get_task_service(session)
+    service = get_task_autonomy_scheduling_service(session)
     jobs = await service.list_autonomy_jobs(goal_id)
     return [ScheduledAutonomyJobResponse.model_validate(item) for item in jobs]
 
@@ -104,7 +108,7 @@ async def manual_replan_goal(
     context: AccessContext = Depends(get_access_context),
 ) -> GoalAutonomyStateResponse:
     await require_goal_access(goal_id, context, session)
-    service = get_task_service(session)
+    service = get_task_autonomy_scheduling_service(session)
     return await service.manual_replan_goal(goal_id, payload)
 
 
@@ -115,7 +119,7 @@ async def materialize_goal_today(
     context: AccessContext = Depends(get_access_context),
 ) -> GoalAutonomyStateResponse:
     await require_goal_access(goal_id, context, session)
-    service = get_task_service(session)
+    service = get_task_autonomy_scheduling_service(session)
     return await service.materialize_today(goal_id)
 
 
@@ -126,5 +130,5 @@ async def run_goal_periodic_reflection(
     context: AccessContext = Depends(get_access_context),
 ) -> GoalAutonomyStateResponse:
     await require_goal_access(goal_id, context, session)
-    service = get_task_service(session)
+    service = get_task_autonomy_scheduling_service(session)
     return await service.run_periodic_goal_reflection(goal_id)

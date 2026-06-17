@@ -10,7 +10,8 @@ from agent_core.api.dependencies import (
     get_goal_service,
     get_reflective_memory_service,
     get_strategy_card_service,
-    get_task_service,
+    get_task_autonomy_scheduling_service,
+    get_task_plan_lifecycle_service,
 )
 from agent_core.domain.schemas.goal import (
     CreateLearnerGoalRequest,
@@ -77,7 +78,7 @@ async def create_study_plan(
     context: AccessContext = Depends(get_access_context),
 ) -> StudyPlanResponse:
     await require_goal_access(goal_id, context, session)
-    service = get_task_service(session)
+    service = get_task_plan_lifecycle_service(session)
     return await service.generate_plan(goal_id=goal_id, trigger_source=payload.trigger_source)
 
 
@@ -88,7 +89,7 @@ async def list_study_plans(
     context: AccessContext = Depends(get_access_context),
 ) -> list[StudyPlanResponse]:
     await require_goal_access(goal_id, context, session)
-    service = get_task_service(session)
+    service = get_task_plan_lifecycle_service(session)
     return await service.list_plans(goal_id)
 
 
@@ -103,7 +104,7 @@ async def list_goal_tasks(
     context: AccessContext = Depends(get_access_context),
 ) -> list[DailyTaskResponse]:
     await require_goal_access(goal_id, context, session)
-    service = get_task_service(session)
+    service = get_task_plan_lifecycle_service(session)
     return await service.list_tasks(
         goal_id,
         statuses=set(status) if status else None,
@@ -120,7 +121,7 @@ async def list_goal_workflow_runs(
     context: AccessContext = Depends(get_access_context),
 ) -> list[WorkflowRunResponse]:
     await require_goal_access(goal_id, context, session)
-    service = get_task_service(session)
+    service = get_task_plan_lifecycle_service(session)
     return await service.list_workflow_runs(goal_id)
 
 

@@ -9,6 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent_core.application.services.audit import AuditService
 from agent_core.application.services.autonomy_jobs import AutonomyJobService
 from agent_core.application.services.chat import ChatService
+from agent_core.application.services.dynamic_runtime_registry import (
+    DynamicRuntimeRegistryService,
+    RuntimeSkillExecutionPlan,
+)
 from agent_core.application.services.goal_skill_binding_resolver import ActiveGoalSkillBinding, GoalSkillBindingResolver
 from agent_core.application.services.long_term_memory_materialization import LongTermMemoryMaterializationService
 from agent_core.application.services.long_term_memory_materialization_replay import (
@@ -28,12 +32,23 @@ from agent_core.application.services.reflection_outcomes import ReflectionOutcom
 from agent_core.application.services.reflection_proposal_rollout_observation_scheduler import (
     ReflectionProposalRolloutObservationScheduler,
 )
+from agent_core.application.services.reflection_proposal_rollout_auto_governance import (
+    ReflectionProposalRolloutDecisionOrchestrator,
+)
 from agent_core.application.services.reflection_proposal_rollout_resolver import ReflectionProposalRolloutResolver
 from agent_core.application.services.reflection_proposal_rollouts import ReflectionProposalRolloutService
 from agent_core.application.services.reflection_proposal_sandbox import ReflectionProposalSandboxService
 from agent_core.application.services.session import SessionService
 from agent_core.application.services.skills import SkillUsageService
 from agent_core.application.services.strategy_cards import StrategyCardService
+from agent_core.application.services.tool_plan_runtime import (
+    MultiStepToolPlanExecutionReport,
+    ToolPlanExecutionContext,
+    ToolPlanStepResult,
+    ToolPlanRuntimeExecutor,
+)
+from agent_core.application.services.task_status_update_support import TaskStatusUpdateSupportService
+from agent_core.application.services.task_autonomy_scheduling import TaskAutonomySchedulingService
 from agent_core.application.services.workflow import WorkflowRunService
 from agent_core.application.tools.registry import InternalToolRegistry
 from agent_core.application.tools.registry import ToolExecutionRequest, ToolSpec
@@ -49,7 +64,7 @@ from agent_core.domain.entities.autonomy import (
 )
 from agent_core.domain.entities.goal import LearnerGoal
 from agent_core.domain.entities.planning import DailyTask, StudyPlan
-from agent_core.domain.entities.skill import SkillResolution
+from agent_core.domain.entities.skill import SkillExecutionPlan, SkillResolution
 from agent_core.domain.errors import NotFoundError, ValidationError
 from agent_core.domain.schemas.planning import (
     DailyTaskResponse,
@@ -111,6 +126,7 @@ class AutonomousTaskService:
         reflection_outcome_service: ReflectionOutcomeService | None = None,
         reflection_proposal_sandbox_service: ReflectionProposalSandboxService | None = None,
         reflection_proposal_rollout_service: ReflectionProposalRolloutService | None = None,
+        reflection_proposal_rollout_decision_orchestrator: ReflectionProposalRolloutDecisionOrchestrator | None = None,
         rollout_resolver: ReflectionProposalRolloutResolver | None = None,
         rollout_observation_scheduler: ReflectionProposalRolloutObservationScheduler | None = None,
         goal_skill_binding_resolver: GoalSkillBindingResolver | None = None,
@@ -120,7 +136,9 @@ class AutonomousTaskService:
         long_term_memory_materialization_service: LongTermMemoryMaterializationService | None = None,
         long_term_memory_replay_executor: LongTermMemoryMaterializationReplayExecutor | None = None,
         internal_tool_registry: InternalToolRegistry | None = None,
+        tool_plan_runtime_executor: ToolPlanRuntimeExecutor | None = None,
         skill_usage_service: SkillUsageService | None = None,
+        runtime_registry: DynamicRuntimeRegistryService | None = None,
         audit_service: AuditService,
     ) -> None:
         self._db_session = db_session
@@ -145,6 +163,7 @@ class AutonomousTaskService:
         self._reflection_outcome_service = reflection_outcome_service
         self._reflection_proposal_sandbox_service = reflection_proposal_sandbox_service
         self._reflection_proposal_rollout_service = reflection_proposal_rollout_service
+        self._reflection_proposal_rollout_decision_orchestrator = reflection_proposal_rollout_decision_orchestrator
         self._rollout_resolver = rollout_resolver
         self._rollout_observation_scheduler = rollout_observation_scheduler
         self._goal_skill_binding_resolver = goal_skill_binding_resolver
@@ -157,8 +176,59 @@ class AutonomousTaskService:
         )
         self._long_term_memory_replay_executor = long_term_memory_replay_executor
         self._internal_tool_registry = internal_tool_registry
+        self._tool_plan_runtime_executor = tool_plan_runtime_executor
         self._skill_usage_service = skill_usage_service
+        self._runtime_registry = runtime_registry
         self._audit_service = audit_service
+        self._status_update_support = TaskStatusUpdateSupportService(
+            db_session=db_session,
+            goal_repository=goal_repository,
+            daily_task_repository=daily_task_repository,
+            goal_autonomy_state_repository=goal_autonomy_state_repository,
+            autonomy_job_repository=autonomy_job_repository,
+            learner_availability_repository=learner_availability_repository,
+            learner_topic_mastery_repository=learner_topic_mastery_repository,
+            task_attempt_repository=task_attempt_repository,
+            autonomy_job_service=autonomy_job_service,
+            reflection_service=reflection_service,
+            reflection_evidence_service=reflection_evidence_service,
+            reflection_outcome_service=reflection_outcome_service,
+            rollout_observation_scheduler=rollout_observation_scheduler,
+            long_term_memory_materialization_service=long_term_memory_materialization_service,
+            audit_service=audit_service,
+            should_schedule_assessment=self._should_schedule_assessment,
+            derive_replan_mode=self._derive_replan_mode,
+            inline_status_followup_handler=self._run_inline_status_followups,
+        )
+        from agent_core.application.services.autonomy_jobs.dispatcher import AutonomyJobDispatcherService
+        from agent_core.application.services.autonomy_jobs.handlers import (
+            ReplanJobHandler,
+            ReviewSchedulingJobHandler,
+            AssessmentGenerationJobHandler,
+            DailyTaskMaterializationJobHandler,
+        )
+        autonomy_job_dispatcher = AutonomyJobDispatcherService()
+        autonomy_job_dispatcher.register_handler("replan", ReplanJobHandler(db_session=db_session, core=self))
+        autonomy_job_dispatcher.register_handler("review_scheduling", ReviewSchedulingJobHandler(db_session=db_session, core=self))
+        autonomy_job_dispatcher.register_handler("assessment_generation", AssessmentGenerationJobHandler(db_session=db_session, core=self))
+        autonomy_job_dispatcher.register_handler("daily_task_materialization", DailyTaskMaterializationJobHandler(db_session=db_session, core=self))
+
+        self._autonomy_scheduling = TaskAutonomySchedulingService(
+            db_session=db_session,
+            goal_repository=goal_repository,
+            goal_autonomy_state_repository=goal_autonomy_state_repository,
+            learner_availability_repository=learner_availability_repository,
+            learner_topic_mastery_repository=learner_topic_mastery_repository,
+            autonomy_job_repository=autonomy_job_repository,
+            audit_service=audit_service,
+            sync_goal_state_callback=lambda goal_id, phase, reason, next_due_at=None: self._sync_goal_state(goal_id, phase=phase, reason=reason, next_due_at=next_due_at),
+            ensure_materialization_job_callback=lambda goal_id, trigger: self._ensure_daily_materialization_job(goal_id, trigger_source=trigger),
+            validate_timezone_callback=self._validate_timezone,
+            autonomy_job_service=autonomy_job_service,
+            trigger_reflection_callback=self._trigger_reflection_callback,
+            process_autonomy_job_callback=self._process_autonomy_job,
+            autonomy_job_dispatcher=autonomy_job_dispatcher,
+        )
         self._autonomy_jobs_running = False
         self._register_internal_tools()
 
@@ -170,6 +240,22 @@ class AutonomousTaskService:
         commit: bool = True,
         scheduled_job_id: str | None = None,
     ) -> StudyPlanResponse:
+        plan, _ = await self._generate_plan_with_run_context(
+            goal_id=goal_id,
+            trigger_source=trigger_source,
+            commit=commit,
+            scheduled_job_id=scheduled_job_id,
+        )
+        return plan
+
+    async def _generate_plan_with_run_context(
+        self,
+        *,
+        goal_id: str,
+        trigger_source: str,
+        commit: bool = True,
+        scheduled_job_id: str | None = None,
+    ) -> tuple[StudyPlanResponse, str]:
         goal = await self._require_goal(goal_id)
         active_plan = await self._study_plan_repository.get_active_by_goal(goal.id)
         if active_plan is not None and trigger_source not in {"manual_replan", "task_failed", "task_skipped"}:
@@ -250,6 +336,12 @@ class AutonomousTaskService:
                 result_resource_ids=[materialized.study_plan.id, *[task.id for task in materialized.tasks]],
             )
             await self._sync_goal_state_after_plan(goal.id, materialized.study_plan.id, trigger_source=trigger_source)
+            await self._schedule_surface_rollout_observation(
+                learner_goal_id=goal.id,
+                surface="plan_generation",
+                trigger_source=trigger_source,
+                source_ref=run.id,
+            )
             if commit:
                 await self._db_session.commit()
         except Exception as exc:
@@ -262,7 +354,7 @@ class AutonomousTaskService:
                 study_plan_id=active_plan.id if active_plan is not None else None,
             )
             raise
-        return await self.get_plan(materialized.study_plan.id)
+        return await self.get_plan(materialized.study_plan.id), run.id
 
     async def list_plans(self, goal_id: str) -> list[StudyPlanResponse]:
         await self._require_goal(goal_id)
@@ -437,67 +529,25 @@ class AutonomousTaskService:
         task_id: str,
         payload: UpdateDailyTaskStatusRequest,
     ) -> DailyTaskResponse:
-        if payload.status not in {"completed", "skipped", "failed"}:
-            raise ValidationError("Only completed, skipped, or failed status updates are supported.")
-        task = await self._require_task(task_id)
-        if task.status not in {"pending", "in_progress"}:
-            raise ValidationError("Only pending or in-progress tasks can be updated.")
-        updated_task = task.with_status(payload.status, result_note=payload.result_note)
-        inline_followups = self._autonomy_job_repository is None
+        original_task = await self._daily_task_repository.get_by_id(task_id)
         try:
-            await self._daily_task_repository.update(updated_task)
-            observe_daily_task_status_transition(
-                from_status=task.status,
-                to_status=updated_task.status,
-                task_type=updated_task.task_type,
+            updated_task, attempt = await self._write_task_status_core(
+                task_id=task_id,
+                payload=payload,
             )
-            await self._audit_service.record(
-                event_type="daily_task.status.updated",
-                resource_type="daily_task",
-                resource_id=task.id,
-                actor="learner",
-                event_data={
-                    "daily_task_id": task.id,
-                    "previous_status": task.status,
-                    "new_status": updated_task.status,
-                    "result_note": payload.result_note,
-                },
-            )
-            attempt = await self._record_task_attempt(updated_task)
-            await self._update_topic_mastery(updated_task)
-            if self._long_term_memory_materialization_service is not None and attempt is not None:
-                goal = await self._require_goal(updated_task.learner_goal_id)
-                await self._materialize_task_outcome_isolated(
-                    learner_profile_id=goal.learner_profile_id,
-                    task=updated_task,
-                    attempt=attempt,
-                )
-            await self._derive_task_evidence(updated_task)
-            await self._enqueue_autonomy_followups(updated_task)
-            if self._rollout_observation_scheduler is not None:
-                await self._rollout_observation_scheduler.schedule_active(
-                    learner_goal_id=updated_task.learner_goal_id,
-                    surface="plan_generation",
-                    trigger_source="task_status_updated",
-                    source_ref=updated_task.id,
-                )
-            if self._reflection_service is not None:
-                await self._trigger_post_task_reflection(updated_task)
-                await self._evaluate_recent_reflection_outcomes(updated_task)
-            if inline_followups:
-                await self._run_inline_status_followups(updated_task)
+            await self._status_update_support.coordinate_post_update(updated_task, attempt)
             await self._db_session.commit()
         except Exception as exc:
             await self._db_session.rollback()
             await self._audit_service.record_durable(
                 event_type="daily_task.status.update.failed",
                 resource_type="daily_task",
-                resource_id=task.id,
+                resource_id=task_id,
                 actor="learner",
                 event_data={
-                    "daily_task_id": task.id,
-                    "workflow_run_id": task.last_workflow_run_id,
-                    "previous_status": task.status,
+                    "daily_task_id": task_id,
+                    "workflow_run_id": original_task.last_workflow_run_id if original_task is not None else None,
+                    "previous_status": original_task.status if original_task is not None else None,
                     "requested_status": payload.status,
                     "result_note": payload.result_note,
                     "error_code": type(exc).__name__,
@@ -505,7 +555,40 @@ class AutonomousTaskService:
                 },
             )
             raise
-        return DailyTaskResponse.model_validate(await self._require_task(task.id))
+        return DailyTaskResponse.model_validate(await self._require_task(task_id))
+
+    async def _write_task_status_core(
+        self,
+        *,
+        task_id: str,
+        payload: UpdateDailyTaskStatusRequest,
+    ) -> tuple[DailyTask, TaskAttempt | None]:
+        if payload.status not in {"completed", "skipped", "failed"}:
+            raise ValidationError("Only completed, skipped, or failed status updates are supported.")
+        task = await self._require_task(task_id)
+        if task.status not in {"pending", "in_progress"}:
+            raise ValidationError("Only pending or in-progress tasks can be updated.")
+        updated_task = task.with_status(payload.status, result_note=payload.result_note)
+        await self._daily_task_repository.update(updated_task)
+        observe_daily_task_status_transition(
+            from_status=task.status,
+            to_status=updated_task.status,
+            task_type=updated_task.task_type,
+        )
+        await self._audit_service.record(
+            event_type="daily_task.status.updated",
+            resource_type="daily_task",
+            resource_id=task.id,
+            actor="learner",
+            event_data={
+                "daily_task_id": task.id,
+                "previous_status": task.status,
+                "new_status": updated_task.status,
+                "result_note": payload.result_note,
+            },
+        )
+        attempt = await self._status_update_support.record_attempt_and_update_mastery(updated_task)
+        return updated_task, attempt
 
     async def _run_inline_status_followups(self, task: DailyTask) -> None:
         if task.status == "completed":
@@ -606,10 +689,6 @@ class AutonomousTaskService:
             raise NotFoundError(f"Workflow run '{run_id}' was not found.")
         return WorkflowRunResponse.model_validate(run)
 
-    async def get_goal_autonomy_state(self, goal_id: str) -> GoalAutonomyStateResponse:
-        state = await self._require_goal_autonomy_state(goal_id)
-        return GoalAutonomyStateResponse.model_validate(state)
-
     async def update_goal_availability(
         self,
         *,
@@ -650,22 +729,6 @@ class AutonomousTaskService:
             raise NotFoundError(f"Learner availability for goal '{goal.id}' was not found.")
         return LearnerAvailabilityResponse.model_validate(stored)
 
-    async def get_goal_availability(self, goal_id: str) -> LearnerAvailabilityResponse:
-        await self._require_goal(goal_id)
-        if self._learner_availability_repository is None:
-            raise NotFoundError(f"Learner availability for goal '{goal_id}' was not found.")
-        availability = await self._learner_availability_repository.get_by_goal(goal_id)
-        if availability is None:
-            raise NotFoundError(f"Learner availability for goal '{goal_id}' was not found.")
-        return LearnerAvailabilityResponse.model_validate(availability)
-
-    async def list_goal_mastery(self, goal_id: str) -> list[LearnerTopicMasteryResponse]:
-        await self._require_goal(goal_id)
-        if self._learner_topic_mastery_repository is None:
-            return []
-        masteries = await self._learner_topic_mastery_repository.list_by_goal(goal_id)
-        return [LearnerTopicMasteryResponse.model_validate(item) for item in masteries]
-
     async def pause_goal_autonomy(self, goal_id: str, reason: str | None = None) -> GoalAutonomyStateResponse:
         goal = await self._require_goal(goal_id)
         await self._sync_goal_state(goal_id, phase="paused", reason=reason or "paused")
@@ -702,81 +765,13 @@ class AutonomousTaskService:
         return await self._autonomy_job_repository.list_by_goal(goal_id)
 
     async def materialize_today(self, goal_id: str) -> GoalAutonomyStateResponse:
-        await self._require_goal(goal_id)
-        availability = await self._get_goal_availability_entity(goal_id)
-        timezone_name = self._validate_timezone(availability.timezone if availability is not None else None) or "UTC"
-        zone = ZoneInfo(timezone_name)
-        target_day = datetime.now(zone).date()
-        await self._schedule_autonomy_job(
-            learner_goal_id=goal_id,
-            job_type="daily_task_materialization",
-            trigger_source="manual_materialize_today",
-            due_at=datetime.now(timezone.utc),
-            idempotency_key=f"{goal_id}:manual_materialize_today:{datetime.now(timezone.utc).isoformat()}",
-            payload={
-                "window_days": 3,
-                "target_local_date": target_day.isoformat(),
-                "target_timezone": timezone_name,
-                "scheduled_local_time": "manual",
-            },
-        )
-        await self._db_session.commit()
-        await self.run_due_autonomy_jobs(raise_on_error=True, lease_owner="manual-materialize")
-        refreshed = await self._require_goal_autonomy_state(goal_id)
-        return GoalAutonomyStateResponse.model_validate(refreshed)
+        return await self._autonomy_scheduling.materialize_today(goal_id)
 
     async def manual_replan_goal(self, goal_id: str, payload: ManualReplanRequest) -> GoalAutonomyStateResponse:
-        goal = await self._require_goal(goal_id)
-        if payload.mode not in AUTONOMY_REPLAN_MODES:
-            raise ValidationError("Unsupported autonomy replan mode.")
-        job = await self._schedule_autonomy_job(
-            learner_goal_id=goal.id,
-            job_type="replan",
-            trigger_source=payload.trigger_source,
-            due_at=datetime.now(timezone.utc),
-            idempotency_key=f"{goal.id}:manual_replan:{payload.mode}:{payload.source_task_id or 'latest'}",
-            payload={
-                "mode": payload.mode,
-                "source_task_id": payload.source_task_id or "",
-            },
-        )
-        await self._sync_goal_state(goal.id, phase="replanning", next_due_at=datetime.now(timezone.utc), reason="manual_replan_requested")
-        await self._audit_service.record(
-            event_type="autonomy.replan.requested",
-            resource_type="learner_goal",
-            resource_id=goal.id,
-            actor="learner",
-            event_data={
-                "learner_goal_id": goal.id,
-                "trigger_source": payload.trigger_source,
-                "mode": payload.mode,
-                "source_task_id": payload.source_task_id,
-            },
-        )
-        await self._db_session.commit()
-        await self.run_due_autonomy_jobs(raise_on_error=True, lease_owner="manual-replan")
-        refreshed = await self._require_goal_autonomy_state(goal.id)
-        return GoalAutonomyStateResponse.model_validate(refreshed)
+        return await self._autonomy_scheduling.manual_replan_goal(goal_id, payload)
 
     async def run_periodic_goal_reflection(self, goal_id: str) -> GoalAutonomyStateResponse:
-        goal = await self._require_goal(goal_id)
-        if self._reflection_service is not None:
-            await self._reflection_service.trigger_reflection(
-                ReflectionTriggerRequest(
-                    learner_profile_id=goal.learner_profile_id,
-                    learner_goal_id=goal.id,
-                    scope="goal",
-                    target_type="learner_goal",
-                    target_id=goal.id,
-                    trigger_source="plan_replanned",
-                    reflection_depth=1,
-                    source_attempt_id=f"{goal.id}:{date.today().isoformat()}",
-                )
-            )
-        await self._sync_goal_state(goal.id, phase="active", reason="periodic_goal_reflection")
-        await self._db_session.commit()
-        refreshed = await self._require_goal_autonomy_state(goal.id)
-        return GoalAutonomyStateResponse.model_validate(refreshed)
+        return await self._autonomy_scheduling.run_periodic_goal_reflection(goal_id)
 
     async def run_due_autonomy_jobs(
         self,
@@ -785,115 +780,11 @@ class AutonomousTaskService:
         lease_owner: str = "inline",
         limit: int = 20,
     ) -> int:
-        if self._autonomy_job_repository is None:
-            return 0
-        if self._autonomy_jobs_running:
-            return 0
-        self._autonomy_jobs_running = True
-        try:
-            processed = 0
-            while processed < limit:
-                due_jobs = await self._autonomy_job_repository.list_due(
-                    now=datetime.now(timezone.utc),
-                    limit=limit - processed,
-                )
-                if not due_jobs:
-                    break
-                for job in due_jobs:
-                    claimed = await self._autonomy_job_repository.claim(job, lease_owner=lease_owner, lease_seconds=300)
-                    await self._audit_service.record(
-                        event_type="autonomy.job.claimed",
-                        resource_type="autonomy_job",
-                        resource_id=claimed.id,
-                        actor="system",
-                        event_data={
-                            "autonomy_job_id": claimed.id,
-                            "learner_goal_id": claimed.learner_goal_id,
-                            "job_type": claimed.job_type,
-                            "trigger_source": claimed.trigger_source,
-                            "attempt_count": claimed.attempt_count,
-                        },
-                    )
-                    await self._db_session.commit()
-                    try:
-                        workflow_run_id = await self._process_autonomy_job(claimed)
-                        completed = claimed.complete(workflow_run_id=workflow_run_id)
-                        await self._autonomy_job_repository.update(completed)
-                        await self._audit_service.record(
-                            event_type="autonomy.job.completed",
-                            resource_type="autonomy_job",
-                            resource_id=completed.id,
-                            actor="system",
-                            event_data={
-                                "autonomy_job_id": completed.id,
-                                "learner_goal_id": completed.learner_goal_id,
-                                "job_type": completed.job_type,
-                                "workflow_run_id": workflow_run_id,
-                            },
-                        )
-                        await self._db_session.commit()
-                        processed += 1
-                    except Exception as exc:
-                        if claimed.job_type == LONG_TERM_MEMORY_MATERIALIZATION_REPLAY_JOB_TYPE and claimed.attempt_count < claimed.max_attempts:
-                            retry_due_at = datetime.now(timezone.utc) + long_term_memory_replay_backoff(claimed.attempt_count)
-                            retry = claimed.retry(due_at=retry_due_at)
-                            await self._autonomy_job_repository.update(retry)
-                            await self._audit_service.record_durable(
-                                event_type="long_term_memory.materialization.replay_retry_scheduled",
-                                resource_type="autonomy_job",
-                                resource_id=retry.id,
-                                actor="system",
-                                event_data={
-                                    "autonomy_job_id": retry.id,
-                                    "learner_goal_id": retry.learner_goal_id,
-                                    "job_type": retry.job_type,
-                                    "attempt_count": retry.attempt_count,
-                                    "max_attempts": retry.max_attempts,
-                                    "retry_due_at": retry.due_at.isoformat(),
-                                    "error_code": type(exc).__name__,
-                                    "error": str(exc),
-                                },
-                            )
-                            await self._db_session.commit()
-                            processed += 1
-                            continue
-                        failed = claimed.fail(error_code=type(exc).__name__)
-                        await self._autonomy_job_repository.update(failed)
-                        if claimed.job_type == LONG_TERM_MEMORY_MATERIALIZATION_REPLAY_JOB_TYPE:
-                            await self._audit_service.record_durable(
-                                event_type="long_term_memory.materialization.replay_exhausted",
-                                resource_type="autonomy_job",
-                                resource_id=failed.id,
-                                actor="system",
-                                event_data={
-                                    "autonomy_job_id": failed.id,
-                                    "learner_goal_id": failed.learner_goal_id,
-                                    "job_type": failed.job_type,
-                                    "attempt_count": failed.attempt_count,
-                                    "max_attempts": failed.max_attempts,
-                                    "error_code": type(exc).__name__,
-                                    "error": str(exc),
-                                },
-                            )
-                        await self._audit_service.record_durable(
-                            event_type="autonomy.job.failed",
-                            resource_type="autonomy_job",
-                            resource_id=failed.id,
-                            actor="system",
-                            event_data={
-                                "autonomy_job_id": failed.id,
-                                "learner_goal_id": failed.learner_goal_id,
-                                "job_type": failed.job_type,
-                                "error_code": type(exc).__name__,
-                                "error": str(exc),
-                            },
-                        )
-                        await self._db_session.commit()
-                        if raise_on_error:
-                            raise
-            return processed
-        finally:
-            self._autonomy_jobs_running = False
+        return await self._autonomy_scheduling.run_due_autonomy_jobs(
+            raise_on_error=raise_on_error,
+            lease_owner=lease_owner,
+            limit=limit,
+        )
 
     async def _process_autonomy_job(self, job: ScheduledAutonomyJob) -> str | None:
         if job.job_type == "review_scheduling":
@@ -918,6 +809,8 @@ class AutonomousTaskService:
             workflow_run_id = await self._process_reflection_proposal_evaluation_job(job)
         elif job.job_type == "reflection_proposal_rollout_observation":
             workflow_run_id = await self._process_reflection_proposal_rollout_observation_job(job)
+        elif job.job_type == "reflection_proposal_rollout_decision":
+            workflow_run_id = await self._process_reflection_proposal_rollout_decision_job(job)
         elif job.job_type == LONG_TERM_MEMORY_MATERIALIZATION_REPLAY_JOB_TYPE:
             workflow_run_id = await self._process_long_term_memory_materialization_replay_job(job)
         else:
@@ -942,7 +835,38 @@ class AutonomousTaskService:
             raise ValidationError("Missing source_task_id for review scheduling job.")
         source_task = await self._require_task(source_task_id)
         goal = await self._require_goal(source_task.learner_goal_id)
+        runtime_plan = await self._resolve_autonomy_execution_plan(
+            learner_goal_id=goal.id,
+            skill_name="schedule_review",
+            surface="review_scheduling",
+            resource_id=source_task.id or goal.id,
+            topic_key=source_task.topic_focus,
+            task_type="review",
+            trigger_source=job.trigger_source,
+            include_staged=True,
+        )
+        skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_review_skill_for_runtime(
+            goal=goal,
+            source_task=source_task,
+        )
         if source_task.task_type == "review":
+            await self._record_review_skill_usage(
+                goal=goal,
+                source_task=source_task,
+                workflow_run_id=None,
+                outcome_status="skipped",
+                trigger_source=job.trigger_source,
+                output_summary="source task is already a review task",
+                resolution=skill_resolution,
+                metadata=self._with_skill_execution_metadata(
+                    runtime_plan,
+                    metadata={
+                        "autonomy_job_id": job.id,
+                        "source_task_id": source_task.id,
+                        "skip_reason": "source_task_already_review",
+                    },
+                ),
+            )
             return None
         run = await self._workflow_run_service.create_run(
             workflow_type="review_scheduling",
@@ -952,81 +876,143 @@ class AutonomousTaskService:
             daily_task_id=source_task.id,
             scheduled_job_id=job.id,
         )
-        mastery = await self._get_topic_mastery(goal.id, source_task.topic_focus)
-        review_tasks: list[DailyTask] = []
-        if self._internal_tool_registry is not None:
-            result = await self._internal_tool_registry.execute(
-                ToolExecutionRequest(
-                    name="review_scheduling",
-                    payload={"source_task_id": source_task.id},
-                    actor="system",
-                    resource_id=source_task.id,
-                )
-            )
-            created_ids = [str(item) for item in (result or {}).get("created_task_ids", [])]
-            review_tasks = [await self._require_task(task_id) for task_id in created_ids]
-        else:
-            existing_reviews = await self._daily_task_repository.list_by_source_task(source_task.id)
-            existing_due_dates = {task.scheduled_for for task in existing_reviews}
-            intervals = await self._review_intervals(goal.id, mastery)
-            for offset in intervals:
-                scheduled_for = source_task.due_on + timedelta(days=offset)
-                if scheduled_for > goal.deadline_date or scheduled_for in existing_due_dates:
-                    continue
-                review_tasks.append(
-                    DailyTask.build(
+        try:
+            mastery = await self._get_topic_mastery(goal.id, source_task.topic_focus)
+            review_tasks: list[DailyTask] = []
+            if self._internal_tool_registry is not None:
+                tool_plan_report = await self._execute_runtime_tool_plan(
+                    runtime_plan=runtime_plan,
+                    context=self._build_tool_plan_execution_context(
+                        surface="review_scheduling",
                         learner_goal_id=goal.id,
-                        study_plan_id=source_task.study_plan_id,
-                        plan_stage_id=source_task.plan_stage_id,
-                        task_origin="review_scheduler",
-                        task_type="review",
-                        execution_mode="quiz",
-                        title=f"Review: {source_task.topic_focus}",
-                        instructions=f"Review {source_task.topic_focus} and reinforce the key idea.",
-                        topic_focus=source_task.topic_focus,
-                        difficulty=source_task.difficulty or "medium",
-                        question_count=source_task.question_count or 3,
-                        estimated_minutes=max(15, source_task.estimated_minutes // 2),
-                        scheduled_for=scheduled_for,
-                        due_on=scheduled_for,
+                        resource_id=source_task.id,
                         source_task_id=source_task.id,
-                    )
+                        topic_focus=source_task.topic_focus,
+                        study_plan_id=source_task.study_plan_id,
+                        scheduled_job_id=job.id,
+                    ),
+                    default_tool_name="review_scheduling",
+                    default_payload={"source_task_id": source_task.id},
                 )
-            if review_tasks:
-                await self._daily_task_repository.create_many(review_tasks)
-            for task in review_tasks:
-                await self._audit_service.record(
-                    event_type="daily_task.created",
-                    resource_type="daily_task",
-                    resource_id=task.id,
-                    actor="system",
-                    event_data={
-                        "daily_task_id": task.id,
-                        "learner_goal_id": goal.id,
-                        "study_plan_id": task.study_plan_id,
-                        "task_type": task.task_type,
-                        "scheduled_for": task.scheduled_for.isoformat(),
+                result = tool_plan_report.steps[-1].result_payload if tool_plan_report.steps else None
+                created_ids = [str(item) for item in (result or {}).get("created_task_ids", [])]
+                review_tasks = [await self._require_task(task_id) for task_id in created_ids]
+            else:
+                existing_reviews = await self._daily_task_repository.list_by_source_task(source_task.id)
+                existing_due_dates = {task.scheduled_for for task in existing_reviews}
+                intervals = await self._review_intervals(
+                    goal.id,
+                    mastery,
+                    runtime_directives=self._effective_runtime_directives(goal.id, "review_scheduling", runtime_plan),
+                )
+                for offset in intervals:
+                    scheduled_for = source_task.due_on + timedelta(days=offset)
+                    if scheduled_for > goal.deadline_date or scheduled_for in existing_due_dates:
+                        continue
+                    review_tasks.append(
+                        DailyTask.build(
+                            learner_goal_id=goal.id,
+                            study_plan_id=source_task.study_plan_id,
+                            plan_stage_id=source_task.plan_stage_id,
+                            task_origin="review_scheduler",
+                            task_type="review",
+                            execution_mode="quiz",
+                            title=f"Review: {source_task.topic_focus}",
+                            instructions=f"Review {source_task.topic_focus} and reinforce the key idea.",
+                            topic_focus=source_task.topic_focus,
+                            difficulty=source_task.difficulty or "medium",
+                            question_count=source_task.question_count or 3,
+                            estimated_minutes=max(15, source_task.estimated_minutes // 2),
+                            scheduled_for=scheduled_for,
+                            due_on=scheduled_for,
+                            source_task_id=source_task.id,
+                        )
+                    )
+                if review_tasks:
+                    await self._daily_task_repository.create_many(review_tasks)
+                for task in review_tasks:
+                    await self._audit_service.record(
+                        event_type="daily_task.created",
+                        resource_type="daily_task",
+                        resource_id=task.id,
+                        actor="system",
+                        event_data={
+                            "daily_task_id": task.id,
+                            "learner_goal_id": goal.id,
+                            "study_plan_id": task.study_plan_id,
+                            "task_type": task.task_type,
+                            "scheduled_for": task.scheduled_for.isoformat(),
+                            "source_task_id": source_task.id,
+                        },
+                    )
+            await self._audit_service.record(
+                event_type="review.tasks.scheduled",
+                resource_type="daily_task",
+                resource_id=source_task.id,
+                actor="system",
+                event_data={
+                    "source_daily_task_id": source_task.id,
+                    "created_review_task_ids": [task.id for task in review_tasks],
+                    "mastery_score": mastery.mastery_score if mastery is not None else None,
+                },
+            )
+            run = await self._workflow_run_service.complete_run(
+                run=run,
+                result_resource_type="daily_task",
+                result_resource_ids=[task.id for task in review_tasks],
+            )
+            await self._record_review_skill_usage(
+                goal=goal,
+                source_task=source_task,
+                workflow_run_id=run.id,
+                outcome_status="completed",
+                trigger_source=job.trigger_source,
+                output_summary=f"{len(review_tasks)} review tasks",
+                resolution=skill_resolution,
+                metadata=self._with_skill_execution_metadata(
+                    runtime_plan,
+                    metadata={
+                        "autonomy_job_id": job.id,
                         "source_task_id": source_task.id,
+                        "created_review_task_ids": [task.id for task in review_tasks],
+                        "mastery_score": mastery.mastery_score if mastery is not None else None,
                     },
                 )
-        await self._audit_service.record(
-            event_type="review.tasks.scheduled",
-            resource_type="daily_task",
-            resource_id=source_task.id,
-            actor="system",
-            event_data={
-                "source_daily_task_id": source_task.id,
-                "created_review_task_ids": [task.id for task in review_tasks],
-                "mastery_score": mastery.mastery_score if mastery is not None else None,
-            },
-        )
-        run = await self._workflow_run_service.complete_run(
-            run=run,
-            result_resource_type="daily_task",
-            result_resource_ids=[task.id for task in review_tasks],
-        )
-        await self._sync_goal_state(goal.id, phase="active", next_due_at=self._to_datetime(review_tasks[0].scheduled_for) if review_tasks else None, reason="review_scheduled")
-        return run.id
+            )
+            await self._schedule_surface_rollout_observation(
+                learner_goal_id=goal.id,
+                surface="review_scheduling",
+                trigger_source=job.trigger_source,
+                source_ref=run.id,
+            )
+            await self._sync_goal_state(goal.id, phase="active", next_due_at=self._to_datetime(review_tasks[0].scheduled_for) if review_tasks else None, reason="review_scheduled")
+            return run.id
+        except Exception as exc:
+            await self._record_review_skill_usage(
+                goal=goal,
+                source_task=source_task,
+                workflow_run_id=run.id,
+                outcome_status="failed",
+                trigger_source=job.trigger_source,
+                error_code=type(exc).__name__,
+                resolution=skill_resolution,
+                metadata=self._with_skill_execution_metadata(
+                    runtime_plan,
+                    metadata={
+                        "autonomy_job_id": job.id,
+                        "source_task_id": source_task.id,
+                        "error": str(exc),
+                    },
+                ),
+            )
+            await self._workflow_run_service.fail_run(run=run, error_code=type(exc).__name__)
+            await self._schedule_runtime_failure_rollout_observation(
+                learner_goal_id=goal.id,
+                surface="review_scheduling",
+                trigger_source=job.trigger_source,
+                source_ref=run.id,
+            )
+            raise
 
     async def _process_reflection_proposal_evaluation_job(self, job: ScheduledAutonomyJob) -> str | None:
         if self._reflection_proposal_sandbox_service is None:
@@ -1048,6 +1034,19 @@ class AutonomousTaskService:
             trigger_source=job.trigger_source,
         )
         return observation.id
+
+    async def _process_reflection_proposal_rollout_decision_job(self, job: ScheduledAutonomyJob) -> str | None:
+        if self._reflection_proposal_rollout_decision_orchestrator is None:
+            raise ValidationError("Reflection proposal rollout decision orchestrator is not configured.")
+        rollout_id = str(job.payload.get("rollout_id") or "")
+        if not rollout_id:
+            raise ValidationError("Missing rollout_id for reflection proposal rollout decision job.")
+        source_ref = str(job.payload.get("source_ref") or job.id)
+        rollout = await self._reflection_proposal_rollout_decision_orchestrator.evaluate_and_execute(
+            rollout_id=rollout_id,
+            source_ref=source_ref,
+        )
+        return rollout.id if rollout is not None else None
 
     async def _process_plan_extension_job(self, job: ScheduledAutonomyJob) -> str | None:
         goal = await self._require_goal(job.learner_goal_id)
@@ -1121,16 +1120,437 @@ class AutonomousTaskService:
     async def _process_replan_job(self, job: ScheduledAutonomyJob) -> str | None:
         goal = await self._require_goal(job.learner_goal_id)
         mode = str(job.payload.get("mode") or "partial")
+        topic_key = str(job.payload.get("topic_focus") or goal.subject)
+        runtime_plan = await self._resolve_autonomy_execution_plan(
+            learner_goal_id=goal.id,
+            skill_name="plan_study_path",
+            surface="replan",
+            resource_id=job.id,
+            topic_key=topic_key,
+            task_type=None,
+            trigger_source=job.trigger_source,
+            include_staged=True,
+        )
+        skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_replan_skill_for_runtime(
+            goal=goal,
+            resource_id=job.id,
+        )
         if mode not in AUTONOMY_REPLAN_MODES:
+            await self._record_replan_skill_usage(
+                goal=goal,
+                source_task=None,
+                workflow_run_id=None,
+                outcome_status="failed",
+                trigger_source=job.trigger_source,
+                topic_key=topic_key,
+                input_summary=goal.subject,
+                error_code="ValidationError",
+                resolution=skill_resolution,
+                metadata=self._with_skill_execution_metadata(
+                    runtime_plan,
+                    metadata={
+                        "autonomy_job_id": job.id,
+                        "mode": mode,
+                        "error": "Unsupported autonomy replan mode.",
+                    },
+                ),
+            )
             raise ValidationError("Unsupported autonomy replan mode.")
         if mode == "full":
-            await self.generate_plan(
-                goal_id=goal.id,
-                trigger_source=job.trigger_source,
-                commit=False,
-                scheduled_job_id=job.id,
+            try:
+                _, workflow_run_id = await self._generate_plan_with_run_context(
+                    goal_id=goal.id,
+                    trigger_source=job.trigger_source,
+                    commit=False,
+                    scheduled_job_id=job.id,
+                )
+                await self._sync_goal_state(goal.id, phase="active", reason="full_replan")
+                await self._record_replan_skill_usage(
+                    goal=goal,
+                    source_task=None,
+                    workflow_run_id=workflow_run_id,
+                    outcome_status="completed",
+                    trigger_source=job.trigger_source,
+                    topic_key=topic_key,
+                    input_summary=goal.target_outcome,
+                    output_summary="full replan",
+                    resolution=skill_resolution,
+                    metadata=self._with_skill_execution_metadata(
+                        runtime_plan,
+                        metadata={
+                            "autonomy_job_id": job.id,
+                            "mode": mode,
+                            "effective_mode": "full",
+                            "fallback_used": False,
+                        },
+                    ),
+                )
+                await self._schedule_surface_rollout_observation(
+                    learner_goal_id=goal.id,
+                    surface="replan",
+                    trigger_source=job.trigger_source,
+                    source_ref=workflow_run_id,
+                )
+                await self._reflection_service.trigger_reflection(
+                    ReflectionTriggerRequest(
+                        learner_profile_id=goal.learner_profile_id,
+                        learner_goal_id=goal.id,
+                        scope="goal",
+                        target_type="learner_goal",
+                        target_id=goal.id,
+                        trigger_source="plan_replanned",
+                        reflection_depth=1,
+                        source_attempt_id=job.id,
+                        workflow_run_id=workflow_run_id,
+                    )
+                )
+                return workflow_run_id
+            except Exception as exc:
+                await self._record_replan_skill_usage(
+                    goal=goal,
+                    source_task=None,
+                    workflow_run_id=None,
+                    outcome_status="failed",
+                    trigger_source=job.trigger_source,
+                    topic_key=topic_key,
+                    input_summary=goal.target_outcome,
+                    error_code=type(exc).__name__,
+                    resolution=skill_resolution,
+                    metadata=self._with_skill_execution_metadata(
+                        runtime_plan,
+                        metadata={
+                            "autonomy_job_id": job.id,
+                            "mode": mode,
+                            "effective_mode": "full",
+                            "error": str(exc),
+                        },
+                    ),
+                )
+                raise
+        source_task_id = str(job.payload.get("source_task_id") or "")
+        source_task = None
+        if source_task_id:
+            source_task = await self._require_task(source_task_id)
+        else:
+            recent_tasks = await self._daily_task_repository.list_by_goal(goal.id)
+            if recent_tasks:
+                source_task = recent_tasks[-1]
+        source_topic_key = source_task.topic_focus if source_task is not None else topic_key
+        runtime_plan = await self._resolve_autonomy_execution_plan(
+            learner_goal_id=goal.id,
+            skill_name="plan_study_path",
+            surface="replan",
+            resource_id=source_task.id if source_task is not None else job.id,
+            topic_key=source_topic_key,
+            task_type=source_task.task_type if source_task is not None else None,
+            trigger_source=job.trigger_source,
+            include_staged=True,
+        )
+        if source_task is None:
+            try:
+                skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_replan_skill_for_runtime(goal=goal, resource_id=job.id)
+                _, workflow_run_id = await self._generate_plan_with_run_context(
+                    goal_id=goal.id,
+                    trigger_source=job.trigger_source,
+                    commit=False,
+                    scheduled_job_id=job.id,
+                )
+                await self._sync_goal_state(goal.id, phase="active", reason="fallback_full_replan")
+                await self._record_replan_skill_usage(
+                    goal=goal,
+                    source_task=None,
+                    workflow_run_id=workflow_run_id,
+                    outcome_status="completed",
+                    trigger_source=job.trigger_source,
+                    topic_key=source_topic_key,
+                    input_summary=goal.target_outcome,
+                    output_summary="fallback full replan",
+                    resolution=skill_resolution,
+                    metadata=self._with_skill_execution_metadata(
+                        runtime_plan,
+                        metadata={
+                            "autonomy_job_id": job.id,
+                            "mode": mode,
+                            "effective_mode": "full",
+                            "fallback_used": True,
+                            "fallback_reason": "source_task_missing",
+                        },
+                    ),
+                )
+                await self._schedule_surface_rollout_observation(
+                    learner_goal_id=goal.id,
+                    surface="replan",
+                    trigger_source=job.trigger_source,
+                    source_ref=workflow_run_id,
+                )
+                return workflow_run_id
+            except Exception as exc:
+                await self._record_replan_skill_usage(
+                    goal=goal,
+                    source_task=None,
+                    workflow_run_id=None,
+                    outcome_status="failed",
+                    trigger_source=job.trigger_source,
+                    topic_key=source_topic_key,
+                    input_summary=goal.target_outcome,
+                    error_code=type(exc).__name__,
+                    resolution=skill_resolution,
+                    metadata=self._with_skill_execution_metadata(
+                        runtime_plan,
+                        metadata={
+                            "autonomy_job_id": job.id,
+                            "mode": mode,
+                            "effective_mode": "full",
+                            "fallback_used": True,
+                            "fallback_reason": "source_task_missing",
+                            "error": str(exc),
+                        },
+                    ),
+                )
+                raise
+        active_plan = await self._study_plan_repository.get_active_by_goal(goal.id)
+        if active_plan is None:
+            try:
+                skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_replan_skill_for_runtime(goal=goal, resource_id=source_task.id)
+                _, workflow_run_id = await self._generate_plan_with_run_context(
+                    goal_id=goal.id,
+                    trigger_source=job.trigger_source,
+                    commit=False,
+                    scheduled_job_id=job.id,
+                )
+                await self._sync_goal_state(goal.id, phase="active", reason="fallback_full_replan")
+                await self._record_replan_skill_usage(
+                    goal=goal,
+                    source_task=source_task,
+                    workflow_run_id=workflow_run_id,
+                    outcome_status="completed",
+                    trigger_source=job.trigger_source,
+                    topic_key=source_topic_key,
+                    input_summary=source_task.topic_focus,
+                    output_summary="fallback full replan",
+                    resolution=skill_resolution,
+                    metadata=self._with_skill_execution_metadata(
+                        runtime_plan,
+                        metadata={
+                            "autonomy_job_id": job.id,
+                            "mode": mode,
+                            "effective_mode": "full",
+                            "fallback_used": True,
+                            "fallback_reason": "active_plan_missing",
+                            "source_task_id": source_task.id,
+                        },
+                    ),
+                )
+                await self._schedule_surface_rollout_observation(
+                    learner_goal_id=goal.id,
+                    surface="replan",
+                    trigger_source=job.trigger_source,
+                    source_ref=workflow_run_id,
+                )
+                return workflow_run_id
+            except Exception as exc:
+                await self._record_replan_skill_usage(
+                    goal=goal,
+                    source_task=source_task,
+                    workflow_run_id=None,
+                    outcome_status="failed",
+                    trigger_source=job.trigger_source,
+                    topic_key=source_topic_key,
+                    input_summary=source_task.topic_focus,
+                    error_code=type(exc).__name__,
+                    resolution=skill_resolution,
+                    metadata=self._with_skill_execution_metadata(
+                        runtime_plan,
+                        metadata={
+                            "autonomy_job_id": job.id,
+                            "mode": mode,
+                            "effective_mode": "full",
+                            "fallback_used": True,
+                            "fallback_reason": "active_plan_missing",
+                            "source_task_id": source_task.id,
+                            "error": str(exc),
+                        },
+                    ),
+                )
+                raise
+        skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_replan_skill_for_runtime(goal=goal, resource_id=source_task.id)
+        run = await self._workflow_run_service.create_run(
+            workflow_type="plan_extension",
+            trigger_source=job.trigger_source,
+            learner_goal_id=goal.id,
+            study_plan_id=active_plan.id,
+            daily_task_id=source_task.id,
+            scheduled_job_id=job.id,
+        )
+        try:
+            scheduled_for = max(date.today() + timedelta(days=1), source_task.due_on + timedelta(days=1))
+            if self._internal_tool_registry is not None:
+                tool_plan_report = await self._execute_runtime_tool_plan(
+                    runtime_plan=runtime_plan,
+                    context=self._build_tool_plan_execution_context(
+                        surface="replan",
+                        learner_goal_id=goal.id,
+                        resource_id=source_task.id,
+                        source_task_id=source_task.id,
+                        topic_focus=source_task.topic_focus,
+                        study_plan_id=active_plan.id,
+                        workflow_run_id=run.id,
+                        scheduled_job_id=job.id,
+                    ),
+                    default_tool_name="partial_replan",
+                    default_payload={"source_task_id": source_task.id},
+                )
+                repair_step = self._tool_plan_step_result(tool_plan_report, step_id="repair")
+                if repair_step is None and tool_plan_report.steps:
+                    repair_step = tool_plan_report.steps[0]
+                repair_result_payload = repair_step.result_payload if repair_step is not None else None
+                created_ids = [str(item) for item in (repair_result_payload or {}).get("created_task_ids", [])]
+                review_step = self._tool_plan_step_result(tool_plan_report, step_id="followup_review")
+                review_created_task_ids = (
+                    [str(item) for item in (review_step.result_payload or {}).get("created_task_ids", [])]
+                    if review_step is not None
+                    else []
+                )
+                if not created_ids:
+                    run = await self._workflow_run_service.complete_run(
+                        run=run,
+                        result_resource_type="daily_task",
+                        result_resource_ids=[],
+                    )
+                    await self._record_replan_skill_usage(
+                        goal=goal,
+                        source_task=source_task,
+                        workflow_run_id=run.id,
+                        outcome_status="skipped",
+                        trigger_source=job.trigger_source,
+                        topic_key=source_topic_key,
+                        input_summary=source_task.topic_focus,
+                        output_summary="0 repair tasks",
+                        resolution=skill_resolution,
+                        metadata=self._with_skill_execution_metadata(
+                            runtime_plan,
+                            metadata={
+                                "autonomy_job_id": job.id,
+                                "mode": mode,
+                                "effective_mode": "partial",
+                                "source_task_id": source_task.id,
+                                "created_repair_task_ids": [],
+                                "tool_plan_step_count": len(tool_plan_report.steps),
+                                "tool_plan_sequence": [step.tool_name for step in tool_plan_report.steps],
+                                "tool_plan_steps": self._tool_plan_step_summaries(tool_plan_report),
+                                "skip_reason": "tool_created_no_tasks",
+                            },
+                        ),
+                    )
+                    await self._schedule_surface_rollout_observation(
+                        learner_goal_id=goal.id,
+                        surface="replan",
+                        trigger_source=job.trigger_source,
+                        source_ref=run.id,
+                    )
+                    return run.id
+                repair_task = await self._require_task(created_ids[0])
+                if source_task.task_type == "milestone":
+                    superseded = source_task.with_status("superseded", result_note=source_task.result_note)
+                    await self._daily_task_repository.update(superseded)
+            else:
+                repair_task = DailyTask.build(
+                    learner_goal_id=goal.id,
+                    study_plan_id=active_plan.id,
+                    plan_stage_id=source_task.plan_stage_id,
+                    task_origin="replan_scheduler",
+                    task_type="repair",
+                    execution_mode=source_task.execution_mode,
+                    title=f"Repair: {source_task.topic_focus}",
+                    instructions=f"Repair the gap around {source_task.topic_focus}.",
+                    topic_focus=source_task.topic_focus,
+                    difficulty=source_task.difficulty or "medium",
+                    question_count=source_task.question_count,
+                    estimated_minutes=max(15, source_task.estimated_minutes),
+                    scheduled_for=scheduled_for,
+                    due_on=scheduled_for,
+                    source_task_id=source_task.id,
+                )
+                await self._daily_task_repository.create_many([repair_task])
+            await self._audit_service.record(
+                event_type="daily_task.created",
+                resource_type="daily_task",
+                resource_id=repair_task.id,
+                actor="system",
+                event_data={
+                    "daily_task_id": repair_task.id,
+                    "learner_goal_id": goal.id,
+                    "study_plan_id": repair_task.study_plan_id,
+                    "task_type": repair_task.task_type,
+                    "scheduled_for": repair_task.scheduled_for.isoformat(),
+                    "source_task_id": source_task.id,
+                },
             )
-            await self._sync_goal_state(goal.id, phase="active", reason="full_replan")
+            for review_task_id in review_created_task_ids:
+                review_task = await self._require_task(review_task_id)
+                await self._audit_service.record(
+                    event_type="daily_task.created",
+                    resource_type="daily_task",
+                    resource_id=review_task.id,
+                    actor="system",
+                    event_data={
+                        "daily_task_id": review_task.id,
+                        "learner_goal_id": goal.id,
+                        "study_plan_id": review_task.study_plan_id,
+                        "task_type": review_task.task_type,
+                        "scheduled_for": review_task.scheduled_for.isoformat(),
+                        "source_task_id": repair_task.id,
+                    },
+                )
+            await self._audit_service.record(
+                event_type="study_plan.replanned.partial",
+                resource_type="study_plan",
+                resource_id=active_plan.id,
+                actor="system",
+                event_data={
+                    "study_plan_id": active_plan.id,
+                    "source_task_id": source_task.id,
+                    "repair_task_id": repair_task.id,
+                    "created_review_task_ids": review_created_task_ids if self._internal_tool_registry is not None else [],
+                },
+            )
+            run = await self._workflow_run_service.complete_run(
+                run=run,
+                result_resource_type="daily_task",
+                result_resource_ids=[repair_task.id],
+            )
+            await self._sync_goal_state(goal.id, phase="active", next_due_at=self._to_datetime(repair_task.scheduled_for), reason="partial_replan")
+            await self._record_replan_skill_usage(
+                goal=goal,
+                source_task=source_task,
+                workflow_run_id=run.id,
+                outcome_status="completed",
+                trigger_source=job.trigger_source,
+                topic_key=source_topic_key,
+                input_summary=source_task.topic_focus,
+                output_summary=f"repair task {repair_task.id}",
+                resolution=skill_resolution,
+                metadata=self._with_skill_execution_metadata(
+                    runtime_plan,
+                    metadata={
+                        "autonomy_job_id": job.id,
+                        "mode": mode,
+                        "effective_mode": "partial",
+                        "source_task_id": source_task.id,
+                        "repair_task_id": repair_task.id,
+                        "created_review_task_ids": review_created_task_ids if self._internal_tool_registry is not None else [],
+                        "tool_plan_step_count": len(tool_plan_report.steps) if self._internal_tool_registry is not None else 1,
+                        "tool_plan_sequence": [step.tool_name for step in tool_plan_report.steps] if self._internal_tool_registry is not None else ["partial_replan"],
+                        "tool_plan_steps": self._tool_plan_step_summaries(tool_plan_report) if self._internal_tool_registry is not None else [],
+                    },
+                ),
+            )
+            await self._schedule_surface_rollout_observation(
+                learner_goal_id=goal.id,
+                surface="replan",
+                trigger_source=job.trigger_source,
+                source_ref=run.id,
+            )
             await self._reflection_service.trigger_reflection(
                 ReflectionTriggerRequest(
                     learner_profile_id=goal.learner_profile_id,
@@ -1140,134 +1560,82 @@ class AutonomousTaskService:
                     target_id=goal.id,
                     trigger_source="plan_replanned",
                     reflection_depth=1,
+                    daily_task_id=repair_task.id,
+                    workflow_run_id=run.id,
+                    study_plan_id=active_plan.id,
                     source_attempt_id=job.id,
                 )
             )
-            return None
-        source_task_id = str(job.payload.get("source_task_id") or "")
-        source_task = None
-        if source_task_id:
-            source_task = await self._require_task(source_task_id)
-        else:
-            recent_tasks = await self._daily_task_repository.list_by_goal(goal.id)
-            if recent_tasks:
-                source_task = recent_tasks[-1]
-        if source_task is None:
-            await self.generate_plan(
-                goal_id=goal.id,
-                trigger_source=job.trigger_source,
-                commit=False,
-                scheduled_job_id=job.id,
-            )
-            await self._sync_goal_state(goal.id, phase="active", reason="fallback_full_replan")
-            return None
-        active_plan = await self._study_plan_repository.get_active_by_goal(goal.id)
-        if active_plan is None:
-            await self.generate_plan(
-                goal_id=goal.id,
-                trigger_source=job.trigger_source,
-                commit=False,
-                scheduled_job_id=job.id,
-            )
-            await self._sync_goal_state(goal.id, phase="active", reason="fallback_full_replan")
-            return None
-        run = await self._workflow_run_service.create_run(
-            workflow_type="plan_extension",
-            trigger_source=job.trigger_source,
-            learner_goal_id=goal.id,
-            study_plan_id=active_plan.id,
-            daily_task_id=source_task.id,
-            scheduled_job_id=job.id,
-        )
-        scheduled_for = max(date.today() + timedelta(days=1), source_task.due_on + timedelta(days=1))
-        if self._internal_tool_registry is not None:
-            result = await self._internal_tool_registry.execute(
-                ToolExecutionRequest(
-                    name="partial_replan",
-                    payload={"source_task_id": source_task.id},
-                    actor="system",
-                    resource_id=source_task.id,
-                )
-            )
-            created_ids = [str(item) for item in (result or {}).get("created_task_ids", [])]
-            if not created_ids:
-                return None
-            repair_task = await self._require_task(created_ids[0])
-            if source_task.task_type == "milestone":
-                superseded = source_task.with_status("superseded", result_note=source_task.result_note)
-                await self._daily_task_repository.update(superseded)
-        else:
-            repair_task = DailyTask.build(
-                learner_goal_id=goal.id,
-                study_plan_id=active_plan.id,
-                plan_stage_id=source_task.plan_stage_id,
-                task_origin="replan_scheduler",
-                task_type="repair",
-                execution_mode=source_task.execution_mode,
-                title=f"Repair: {source_task.topic_focus}",
-                instructions=f"Repair the gap around {source_task.topic_focus}.",
-                topic_focus=source_task.topic_focus,
-                difficulty=source_task.difficulty or "medium",
-                question_count=source_task.question_count,
-                estimated_minutes=max(15, source_task.estimated_minutes),
-                scheduled_for=scheduled_for,
-                due_on=scheduled_for,
-                source_task_id=source_task.id,
-            )
-            await self._daily_task_repository.create_many([repair_task])
-        await self._audit_service.record(
-            event_type="daily_task.created",
-            resource_type="daily_task",
-            resource_id=repair_task.id,
-            actor="system",
-            event_data={
-                "daily_task_id": repair_task.id,
-                "learner_goal_id": goal.id,
-                "study_plan_id": repair_task.study_plan_id,
-                "task_type": repair_task.task_type,
-                "scheduled_for": repair_task.scheduled_for.isoformat(),
-                "source_task_id": source_task.id,
-            },
-        )
-        await self._audit_service.record(
-            event_type="study_plan.replanned.partial",
-            resource_type="study_plan",
-            resource_id=active_plan.id,
-            actor="system",
-            event_data={
-                "study_plan_id": active_plan.id,
-                "source_task_id": source_task.id,
-                "repair_task_id": repair_task.id,
-            },
-        )
-        run = await self._workflow_run_service.complete_run(
-            run=run,
-            result_resource_type="daily_task",
-            result_resource_ids=[repair_task.id],
-        )
-        await self._sync_goal_state(goal.id, phase="active", next_due_at=self._to_datetime(repair_task.scheduled_for), reason="partial_replan")
-        await self._reflection_service.trigger_reflection(
-            ReflectionTriggerRequest(
-                learner_profile_id=goal.learner_profile_id,
-                learner_goal_id=goal.id,
-                scope="goal",
-                target_type="learner_goal",
-                target_id=goal.id,
-                trigger_source="plan_replanned",
-                reflection_depth=1,
-                daily_task_id=repair_task.id,
+            return run.id
+        except Exception as exc:
+            await self._record_replan_skill_usage(
+                goal=goal,
+                source_task=source_task,
                 workflow_run_id=run.id,
-                study_plan_id=active_plan.id,
-                source_attempt_id=job.id,
+                outcome_status="failed",
+                trigger_source=job.trigger_source,
+                topic_key=source_topic_key,
+                input_summary=source_task.topic_focus,
+                error_code=type(exc).__name__,
+                resolution=skill_resolution,
+                metadata=self._with_skill_execution_metadata(
+                    runtime_plan,
+                    metadata={
+                        "autonomy_job_id": job.id,
+                        "mode": mode,
+                        "effective_mode": "partial",
+                        "source_task_id": source_task.id,
+                        "error": str(exc),
+                    },
+                ),
             )
-        )
-        return run.id
+            await self._workflow_run_service.fail_run(run=run, error_code=type(exc).__name__)
+            await self._schedule_runtime_failure_rollout_observation(
+                learner_goal_id=goal.id,
+                surface="replan",
+                trigger_source=job.trigger_source,
+                source_ref=run.id,
+            )
+            raise
 
     async def _process_assessment_generation_job(self, job: ScheduledAutonomyJob) -> str | None:
         goal = await self._require_goal(job.learner_goal_id)
         topic_key = str(job.payload.get("topic_focus") or goal.subject)
+        source_task_id = str(job.payload.get("source_task_id") or "")
+        runtime_plan = await self._resolve_autonomy_execution_plan(
+            learner_goal_id=goal.id,
+            skill_name="create_quiz",
+            surface="assessment_generation",
+            resource_id=source_task_id or job.id,
+            topic_key=topic_key,
+            task_type="assessment",
+            trigger_source=job.trigger_source,
+            include_staged=True,
+        )
+        skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_assessment_skill_for_runtime(
+            goal=goal,
+            resource_id=source_task_id or job.id,
+        )
         active_plan = await self._study_plan_repository.get_active_by_goal(goal.id)
         if active_plan is None:
+            await self._record_assessment_skill_usage(
+                goal=goal,
+                workflow_run_id=None,
+                outcome_status="skipped",
+                trigger_source=job.trigger_source,
+                topic_key=topic_key,
+                input_summary=topic_key,
+                output_summary="active plan missing",
+                resolution=skill_resolution,
+                metadata=self._with_skill_execution_metadata(
+                    runtime_plan,
+                    metadata={
+                        "autonomy_job_id": job.id,
+                        "source_task_id": source_task_id or None,
+                        "skip_reason": "active_plan_missing",
+                    },
+                ),
+            )
             return None
         run = await self._workflow_run_service.create_run(
             workflow_type="assessment_generation",
@@ -1277,58 +1645,142 @@ class AutonomousTaskService:
             daily_task_id=None,
             scheduled_job_id=job.id,
         )
-        scheduled_for = date.today() + timedelta(days=1)
-        if self._internal_tool_registry is not None:
-            result = await self._internal_tool_registry.execute(
-                ToolExecutionRequest(
-                    name="assessment_generation",
-                    payload={"learner_goal_id": goal.id, "topic_focus": topic_key},
-                    actor="system",
-                    resource_id=goal.id,
+        try:
+            scheduled_for = date.today() + timedelta(days=1)
+            if self._internal_tool_registry is not None:
+                tool_plan_report = await self._execute_runtime_tool_plan(
+                    runtime_plan=runtime_plan,
+                    context=self._build_tool_plan_execution_context(
+                        surface="assessment_generation",
+                        learner_goal_id=goal.id,
+                        resource_id=goal.id,
+                        topic_focus=topic_key,
+                        study_plan_id=active_plan.id,
+                        workflow_run_id=run.id,
+                        scheduled_job_id=job.id,
+                    ),
+                    default_tool_name="assessment_generation",
+                    default_payload={"learner_goal_id": goal.id, "topic_focus": topic_key},
                 )
+                result = tool_plan_report.steps[-1].result_payload if tool_plan_report.steps else None
+                created_ids = [str(item) for item in (result or {}).get("created_task_ids", [])]
+                if not created_ids:
+                    run = await self._workflow_run_service.complete_run(
+                        run=run,
+                        result_resource_type="daily_task",
+                        result_resource_ids=[],
+                    )
+                    await self._record_assessment_skill_usage(
+                        goal=goal,
+                        workflow_run_id=run.id,
+                        outcome_status="skipped",
+                        trigger_source=job.trigger_source,
+                        topic_key=topic_key,
+                        input_summary=topic_key,
+                        output_summary="0 assessment tasks",
+                        resolution=skill_resolution,
+                        metadata=self._with_skill_execution_metadata(
+                            runtime_plan,
+                            metadata={
+                                "autonomy_job_id": job.id,
+                                "source_task_id": source_task_id or None,
+                                "created_assessment_task_ids": [],
+                                "skip_reason": "tool_created_no_tasks",
+                            },
+                        ),
+                    )
+                    return run.id
+                assessment_task = await self._require_task(created_ids[0])
+            else:
+                assessment_task = DailyTask.build(
+                    learner_goal_id=goal.id,
+                    study_plan_id=active_plan.id,
+                    plan_stage_id=None,
+                    task_origin="assessment_scheduler",
+                    task_type="assessment",
+                    execution_mode="quiz",
+                    title=f"Assessment: {topic_key}",
+                    instructions=f"Assess mastery of {topic_key}.",
+                    topic_focus=topic_key,
+                    difficulty="medium",
+                    question_count=5,
+                    estimated_minutes=30,
+                    scheduled_for=scheduled_for,
+                    due_on=scheduled_for,
+                )
+                await self._daily_task_repository.create_many([assessment_task])
+            await self._audit_service.record(
+                event_type="assessment.task.created",
+                resource_type="daily_task",
+                resource_id=assessment_task.id,
+                actor="system",
+                event_data={
+                    "daily_task_id": assessment_task.id,
+                    "learner_goal_id": goal.id,
+                    "study_plan_id": assessment_task.study_plan_id,
+                    "topic_focus": topic_key,
+                    "scheduled_for": assessment_task.scheduled_for.isoformat(),
+                },
             )
-            created_ids = [str(item) for item in (result or {}).get("created_task_ids", [])]
-            if not created_ids:
-                return None
-            assessment_task = await self._require_task(created_ids[0])
-        else:
-            assessment_task = DailyTask.build(
+            run = await self._workflow_run_service.complete_run(
+                run=run,
+                result_resource_type="daily_task",
+                result_resource_ids=[assessment_task.id],
+            )
+            await self._sync_goal_state(goal.id, phase="active", next_due_at=self._to_datetime(assessment_task.scheduled_for), reason="assessment_scheduled")
+            await self._record_assessment_skill_usage(
+                goal=goal,
+                workflow_run_id=run.id,
+                outcome_status="completed",
+                trigger_source=job.trigger_source,
+                topic_key=topic_key,
+                input_summary=topic_key,
+                output_summary=f"assessment task {assessment_task.id}",
+                resolution=skill_resolution,
+                metadata=self._with_skill_execution_metadata(
+                    runtime_plan,
+                    metadata={
+                        "autonomy_job_id": job.id,
+                        "source_task_id": source_task_id or None,
+                        "assessment_task_id": assessment_task.id,
+                        "created_assessment_task_ids": [assessment_task.id],
+                    },
+                ),
+            )
+            await self._schedule_surface_rollout_observation(
                 learner_goal_id=goal.id,
-                study_plan_id=active_plan.id,
-                plan_stage_id=None,
-                task_origin="assessment_scheduler",
-                task_type="assessment",
-                execution_mode="quiz",
-                title=f"Assessment: {topic_key}",
-                instructions=f"Assess mastery of {topic_key}.",
-                topic_focus=topic_key,
-                difficulty="medium",
-                question_count=5,
-                estimated_minutes=30,
-                scheduled_for=scheduled_for,
-                due_on=scheduled_for,
+                surface="assessment_generation",
+                trigger_source=job.trigger_source,
+                source_ref=run.id,
             )
-            await self._daily_task_repository.create_many([assessment_task])
-        await self._audit_service.record(
-            event_type="assessment.task.created",
-            resource_type="daily_task",
-            resource_id=assessment_task.id,
-            actor="system",
-            event_data={
-                "daily_task_id": assessment_task.id,
-                "learner_goal_id": goal.id,
-                "study_plan_id": assessment_task.study_plan_id,
-                "topic_focus": topic_key,
-                "scheduled_for": assessment_task.scheduled_for.isoformat(),
-            },
-        )
-        run = await self._workflow_run_service.complete_run(
-            run=run,
-            result_resource_type="daily_task",
-            result_resource_ids=[assessment_task.id],
-        )
-        await self._sync_goal_state(goal.id, phase="active", next_due_at=self._to_datetime(assessment_task.scheduled_for), reason="assessment_scheduled")
-        return run.id
+            return run.id
+        except Exception as exc:
+            await self._record_assessment_skill_usage(
+                goal=goal,
+                workflow_run_id=run.id,
+                outcome_status="failed",
+                trigger_source=job.trigger_source,
+                topic_key=topic_key,
+                input_summary=topic_key,
+                error_code=type(exc).__name__,
+                resolution=skill_resolution,
+                metadata=self._with_skill_execution_metadata(
+                    runtime_plan,
+                    metadata={
+                        "autonomy_job_id": job.id,
+                        "source_task_id": source_task_id or None,
+                        "error": str(exc),
+                    },
+                ),
+            )
+            await self._workflow_run_service.fail_run(run=run, error_code=type(exc).__name__)
+            await self._schedule_runtime_failure_rollout_observation(
+                learner_goal_id=goal.id,
+                surface="assessment_generation",
+                trigger_source=job.trigger_source,
+                source_ref=run.id,
+            )
+            raise
 
     async def _process_daily_task_materialization_job(self, job: ScheduledAutonomyJob) -> str | None:
         goal = await self._require_goal(job.learner_goal_id)
@@ -1605,6 +2057,21 @@ class AutonomousTaskService:
         await self._ensure_daily_materialization_job(goal_id, trigger_source=trigger_source)
         await self._schedule_periodic_goal_reflection_job(goal_id, trigger_source=trigger_source)
 
+    async def _trigger_reflection_callback(self, profile_id: str, goal_id: str) -> None:
+        if self._reflection_service is not None:
+            await self._reflection_service.trigger_reflection(
+                ReflectionTriggerRequest(
+                    learner_profile_id=profile_id,
+                    learner_goal_id=goal_id,
+                    scope="goal",
+                    target_type="learner_goal",
+                    target_id=goal_id,
+                    trigger_source="plan_replanned",
+                    reflection_depth=1,
+                    source_attempt_id=f"{goal_id}:{date.today().isoformat()}",
+                )
+            )
+
     async def _record_task_attempt(self, task: DailyTask) -> TaskAttempt | None:
         if self._task_attempt_repository is None:
             return None
@@ -1874,11 +2341,22 @@ class AutonomousTaskService:
             )
         )
 
-    async def _derive_replan_mode(self, task: DailyTask) -> str:
-        skill_binding = await self._get_skill_binding(task.learner_goal_id, "replan", topic_key=task.topic_focus, task_type=task.task_type)
-        if skill_binding is not None and skill_binding.runtime_directives.get("replan_bias") in {"normal", "aggressive"}:
-            return "full" if str(skill_binding.runtime_directives["replan_bias"]) == "aggressive" else "partial"
-        rollout_overlay = await self._get_rollout_overlay_payload(task.learner_goal_id, "replan")
+    async def _derive_replan_mode(self, task: DailyTask, *, runtime_directives: dict[str, object] | None = None) -> str:
+        effective_runtime_directives = runtime_directives
+        if effective_runtime_directives is None:
+            runtime_plan = await self._resolve_autonomy_execution_plan(
+                learner_goal_id=task.learner_goal_id,
+                skill_name="plan_study_path",
+                surface="replan",
+                resource_id=task.id,
+                topic_key=task.topic_focus,
+                task_type=task.task_type,
+                include_staged=True,
+            )
+            effective_runtime_directives = self._effective_runtime_directives(task.learner_goal_id, "replan", runtime_plan)
+        if effective_runtime_directives.get("replan_bias") in {"normal", "aggressive"}:
+            return "full" if str(effective_runtime_directives["replan_bias"]) == "aggressive" else "partial"
+        rollout_overlay = await self._get_rollout_overlay_payload(task.learner_goal_id, "replan") if runtime_directives is None else None
         if rollout_overlay is not None and rollout_overlay.get("replan_bias") in {"normal", "aggressive"}:
             if str(rollout_overlay["replan_bias"]) == "aggressive":
                 return "full"
@@ -1892,20 +2370,34 @@ class AutonomousTaskService:
                     return "full"
         return "full"
 
-    async def _should_schedule_assessment(self, task: DailyTask) -> bool:
+    async def _should_schedule_assessment(self, task: DailyTask, *, runtime_directives: dict[str, object] | None = None) -> bool:
         if task.task_type == "assessment":
             return False
         mastery = await self._get_topic_mastery(task.learner_goal_id, task.topic_focus)
         if mastery is None:
             return False
-        skill_binding = await self._get_skill_binding(task.learner_goal_id, "assessment_generation", topic_key=task.topic_focus, task_type=task.task_type)
-        if skill_binding is not None:
-            assessment_bias = skill_binding.runtime_directives.get("assessment_bias")
-            if assessment_bias == "early":
-                return mastery.mastery_score < 0.8 or mastery.evidence_count % 3 == 0
-            if assessment_bias == "standard":
-                return mastery.mastery_score < 0.7 or mastery.evidence_count % 4 == 0
-        rollout_overlay = await self._get_rollout_overlay_payload(task.learner_goal_id, "assessment_generation")
+        effective_runtime_directives = runtime_directives
+        if effective_runtime_directives is None:
+            runtime_plan = await self._resolve_autonomy_execution_plan(
+                learner_goal_id=task.learner_goal_id,
+                skill_name="create_quiz",
+                surface="assessment_generation",
+                resource_id=task.id,
+                topic_key=task.topic_focus,
+                task_type=task.task_type,
+                include_staged=True,
+            )
+            effective_runtime_directives = self._effective_runtime_directives(
+                task.learner_goal_id,
+                "assessment_generation",
+                runtime_plan,
+            )
+        assessment_bias = effective_runtime_directives.get("assessment_bias")
+        if assessment_bias == "early":
+            return mastery.mastery_score < 0.8 or mastery.evidence_count % 3 == 0
+        if assessment_bias == "standard":
+            return mastery.mastery_score < 0.7 or mastery.evidence_count % 4 == 0
+        rollout_overlay = await self._get_rollout_overlay_payload(task.learner_goal_id, "assessment_generation") if runtime_directives is None else None
         if rollout_overlay is not None:
             if rollout_overlay.get("assessment_bias") == "early":
                 return mastery.mastery_score < 0.8 or mastery.evidence_count % 3 == 0
@@ -1925,7 +2417,13 @@ class AutonomousTaskService:
             return None
         return await self._learner_topic_mastery_repository.get_by_goal_and_topic(learner_goal_id, topic_key)
 
-    async def _review_intervals(self, learner_goal_id: str, mastery: LearnerTopicMastery | None) -> list[int]:
+    async def _review_intervals(
+        self,
+        learner_goal_id: str,
+        mastery: LearnerTopicMastery | None,
+        *,
+        runtime_directives: dict[str, object] | None = None,
+    ) -> list[int]:
         score = mastery.mastery_score if mastery is not None else 0.5
         confidence = mastery.confidence if mastery is not None else 0.5
         evidence_count = mastery.evidence_count if mastery is not None else 0
@@ -1950,15 +2448,25 @@ class AutonomousTaskService:
             tier = "relaxed"
         elif score >= 0.75 and confidence >= 0.65:
             tier = "stable"
-        skill_binding = await self._get_skill_binding(
-            learner_goal_id,
-            "review_scheduling",
-            topic_key=mastery.topic_key if mastery is not None else None,
-            task_type="review",
-        )
-        if skill_binding is not None and skill_binding.runtime_directives.get("review_bias") == "intensive":
+        effective_runtime_directives = runtime_directives
+        if effective_runtime_directives is None:
+            runtime_plan = await self._resolve_autonomy_execution_plan(
+                learner_goal_id=learner_goal_id,
+                skill_name="schedule_review",
+                surface="review_scheduling",
+                resource_id=mastery.topic_key if mastery is not None else learner_goal_id,
+                topic_key=mastery.topic_key if mastery is not None else None,
+                task_type="review",
+                include_staged=True,
+            )
+            effective_runtime_directives = self._effective_runtime_directives(
+                learner_goal_id,
+                "review_scheduling",
+                runtime_plan,
+            )
+        if effective_runtime_directives.get("review_bias") == "intensive":
             tier = tier_order[max(0, tier_order.index(tier) - 1)]
-        rollout_overlay = await self._get_rollout_overlay_payload(learner_goal_id, "review_scheduling")
+        rollout_overlay = await self._get_rollout_overlay_payload(learner_goal_id, "review_scheduling") if runtime_directives is None else None
         if rollout_overlay is not None:
             if rollout_overlay.get("review_bias") == "intensive":
                 tier = tier_order[max(0, tier_order.index(tier) - 1)]
@@ -2412,17 +2920,19 @@ class AutonomousTaskService:
         if source_task.task_type == "review":
             return
         goal = await self._require_goal(source_task.learner_goal_id)
-        skill_resolution = await self._resolve_review_skill_for_runtime(
-            goal=goal,
-            source_task=source_task,
-        )
-        skill_binding = await self._get_skill_binding(
-            goal.id,
-            "review_scheduling",
+        runtime_plan = await self._resolve_autonomy_execution_plan(
+            learner_goal_id=goal.id,
+            skill_name="schedule_review",
+            surface="review_scheduling",
+            resource_id=source_task.id or goal.id,
             topic_key=source_task.topic_focus,
             task_type="review",
             trigger_source="task_completed",
             include_staged=True,
+        )
+        skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_review_skill_for_runtime(
+            goal=goal,
+            source_task=source_task,
         )
         run = await self._workflow_run_service.create_run(
             workflow_type="review_scheduling",
@@ -2435,7 +2945,12 @@ class AutonomousTaskService:
             existing_reviews = await self._daily_task_repository.list_by_source_task(source_task.id)
             existing_due_dates = {task.scheduled_for for task in existing_reviews}
             review_tasks: list[DailyTask] = []
-            for offset in (1, 3, 7):
+            intervals = await self._review_intervals(
+                goal.id,
+                await self._get_topic_mastery(goal.id, source_task.topic_focus),
+                runtime_directives=self._effective_runtime_directives(goal.id, "review_scheduling", runtime_plan),
+            )
+            for offset in intervals:
                 scheduled_for = source_task.due_on + timedelta(days=offset)
                 if scheduled_for > goal.deadline_date or scheduled_for in existing_due_dates:
                     continue
@@ -2492,13 +3007,9 @@ class AutonomousTaskService:
                 outcome_status="completed",
                 output_summary=f"{len(review_tasks)} review tasks",
                 resolution=skill_resolution,
-                metadata=(
-                    skill_binding.with_usage_metadata(
-                        {"created_review_task_ids": [task.id for task in review_tasks]},
-                        skill_name="schedule_review",
-                    )
-                    if skill_binding is not None
-                    else {"created_review_task_ids": [task.id for task in review_tasks]}
+                metadata=self._with_skill_execution_metadata(
+                    runtime_plan,
+                    metadata={"created_review_task_ids": [task.id for task in review_tasks]},
                 ),
             )
             run = await self._workflow_run_service.complete_run(
@@ -2514,17 +3025,157 @@ class AutonomousTaskService:
                 outcome_status="failed",
                 error_code=type(exc).__name__,
                 resolution=skill_resolution,
-                metadata=(
-                    skill_binding.with_usage_metadata(
-                        {"error": str(exc)},
-                        skill_name="schedule_review",
-                    )
-                    if skill_binding is not None
-                    else {"error": str(exc)}
+                metadata=self._with_skill_execution_metadata(
+                    runtime_plan,
+                    metadata={"error": str(exc)},
                 ),
             )
             await self._workflow_run_service.fail_run(run=run, error_code=type(exc).__name__)
             raise
+
+    def _build_tool_plan_execution_context(
+        self,
+        *,
+        surface: str,
+        learner_goal_id: str,
+        resource_id: str,
+        source_task_id: str | None = None,
+        topic_focus: str | None = None,
+        study_plan_id: str | None = None,
+        workflow_run_id: str | None = None,
+        scheduled_job_id: str | None = None,
+    ) -> ToolPlanExecutionContext:
+        return ToolPlanExecutionContext(
+            surface=surface,
+            learner_goal_id=learner_goal_id,
+            resource_id=resource_id,
+            actor="system",
+            source_task_id=source_task_id,
+            topic_focus=topic_focus,
+            study_plan_id=study_plan_id,
+            workflow_run_id=workflow_run_id,
+            scheduled_job_id=scheduled_job_id,
+        )
+
+    async def _execute_runtime_tool_plan(
+        self,
+        *,
+        runtime_plan: RuntimeSkillExecutionPlan | None,
+        context: ToolPlanExecutionContext,
+        default_tool_name: str,
+        default_payload: dict[str, object],
+    ) -> MultiStepToolPlanExecutionReport:
+        if runtime_plan is None or not runtime_plan.tool_plan:
+            if self._internal_tool_registry is None:
+                raise ValidationError("Runtime tool execution requires an internal tool registry.")
+            result_payload = await self._internal_tool_registry.execute(
+                ToolExecutionRequest(
+                    name=default_tool_name,
+                    payload=default_payload,
+                    actor=context.actor,
+                    resource_id=context.resource_id,
+                )
+            )
+            return MultiStepToolPlanExecutionReport(
+                surface=context.surface,
+                steps=[
+                    ToolPlanStepResult(
+                        step_id="default",
+                        tool_name=default_tool_name,
+                        resolved_payload=dict(default_payload),
+                        result_payload=result_payload,
+                        dry_run=False,
+                    )
+                ],
+                dry_run=False,
+            )
+        if self._tool_plan_runtime_executor is None:
+            raise ValidationError("Runtime tool plan execution is not configured.")
+        return await self._tool_plan_runtime_executor.execute(
+            surface=context.surface,
+            tool_plan=runtime_plan.tool_plan,
+            context=context,
+            dry_run=False,
+        )
+
+    @staticmethod
+    def _tool_plan_step_result(
+        report: MultiStepToolPlanExecutionReport,
+        *,
+        step_id: str,
+    ) -> ToolPlanStepResult | None:
+        for step in report.steps:
+            if step.step_id == step_id:
+                return step
+        return None
+
+    @staticmethod
+    def _tool_plan_step_summaries(report: MultiStepToolPlanExecutionReport) -> list[dict[str, object]]:
+        summaries: list[dict[str, object]] = []
+        for step in report.steps:
+            step_summary: dict[str, object] = {
+                "step_id": step.step_id,
+                "tool_name": step.tool_name,
+            }
+            result_payload = dict(step.result_payload or {})
+            if "created_task_ids" in result_payload and isinstance(result_payload["created_task_ids"], list):
+                step_summary["created_task_ids"] = [str(item) for item in result_payload["created_task_ids"]]
+            summaries.append(step_summary)
+        return summaries
+
+    async def _resolve_autonomy_execution_plan(
+        self,
+        *,
+        learner_goal_id: str,
+        skill_name: str,
+        surface: str,
+        resource_id: str | None,
+        topic_key: str | None,
+        task_type: str | None,
+        trigger_source: str | None = None,
+        include_staged: bool = False,
+    ) -> RuntimeSkillExecutionPlan | None:
+        if self._runtime_registry is not None:
+            runtime_plan = await self._runtime_registry.resolve_runtime_plan(
+                learner_goal_id=learner_goal_id,
+                skill_name=skill_name,
+                surface=surface,
+                resource_id=resource_id or learner_goal_id,
+                topic_key=topic_key,
+                task_type=task_type,
+                trigger_source=trigger_source,
+                include_staged=include_staged,
+            )
+            if runtime_plan is not None:
+                return runtime_plan
+        if self._skill_usage_service is None:
+            return None
+        skill_binding = await self._get_skill_binding(
+            learner_goal_id,
+            surface,
+            topic_key=topic_key,
+            task_type=task_type,
+            trigger_source=trigger_source,
+            include_staged=include_staged,
+        )
+        plan = await self._skill_usage_service.resolve_execution_plan(
+            skill_name=skill_name,
+            surface=surface,
+            resource_id=resource_id,
+            skill_binding=skill_binding,
+        )
+        return DynamicRuntimeRegistryService.build_runtime_plan(
+            plan=plan,
+            binding=skill_binding,
+        )
+
+    def _effective_runtime_directives(
+        self,
+        learner_goal_id: str,
+        surface: str,
+        runtime_plan: RuntimeSkillExecutionPlan | None,
+    ) -> dict[str, object]:
+        return dict(runtime_plan.runtime_directives) if runtime_plan is not None else {}
 
     async def _resolve_review_skill_for_runtime(
         self,
@@ -2540,13 +3191,18 @@ class AutonomousTaskService:
             resource_id=source_task.id or goal.id,
         )
 
-    async def _record_review_skill_usage(
+    async def _record_surface_skill_usage(
         self,
         *,
+        skill_name: str,
+        surface: str,
         goal: LearnerGoal,
-        source_task: DailyTask,
-        workflow_run_id: str,
         outcome_status: str,
+        trigger_source: str,
+        topic_key: str | None,
+        workflow_run_id: str | None = None,
+        daily_task_id: str | None = None,
+        input_summary: str | None = None,
         output_summary: str | None = None,
         error_code: str | None = None,
         resolution: SkillResolution | None = None,
@@ -2555,21 +3211,195 @@ class AutonomousTaskService:
         if self._skill_usage_service is None:
             return
         await self._skill_usage_service.record_usage(
-            skill_name="schedule_review",
-            surface="review_scheduling",
+            skill_name=skill_name,
+            surface=surface,
             outcome_status=outcome_status,
             learner_profile_id=goal.learner_profile_id,
             learner_goal_id=goal.id,
+            daily_task_id=daily_task_id,
+            workflow_run_id=workflow_run_id,
+            topic_key=topic_key,
+            trigger_source=trigger_source,
+            input_summary=input_summary,
+            output_summary=output_summary,
+            error_code=error_code,
+            resolution=resolution,
+            metadata=metadata,
+        )
+
+    async def _schedule_surface_rollout_observation(
+        self,
+        *,
+        learner_goal_id: str,
+        surface: str,
+        trigger_source: str,
+        source_ref: str,
+    ) -> None:
+        if self._rollout_observation_scheduler is None:
+            return
+        await self._rollout_observation_scheduler.schedule_active(
+            learner_goal_id=learner_goal_id,
+            surface=surface,
+            trigger_source=trigger_source,
+            source_ref=source_ref,
+        )
+
+    async def _schedule_runtime_failure_rollout_observation(
+        self,
+        *,
+        learner_goal_id: str,
+        surface: str,
+        trigger_source: str,
+        source_ref: str | None,
+    ) -> None:
+        if not source_ref:
+            return
+        await self._schedule_surface_rollout_observation(
+            learner_goal_id=learner_goal_id,
+            surface=surface,
+            trigger_source=trigger_source,
+            source_ref=source_ref,
+        )
+
+    async def _record_review_skill_usage(
+        self,
+        *,
+        goal: LearnerGoal,
+        source_task: DailyTask,
+        workflow_run_id: str | None,
+        outcome_status: str,
+        trigger_source: str = "task_completed",
+        output_summary: str | None = None,
+        error_code: str | None = None,
+        resolution: SkillResolution | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        await self._record_surface_skill_usage(
+            skill_name="schedule_review",
+            surface="review_scheduling",
+            goal=goal,
+            outcome_status=outcome_status,
+            trigger_source=trigger_source,
             daily_task_id=source_task.id,
             workflow_run_id=workflow_run_id,
             topic_key=source_task.topic_focus,
-            trigger_source="task_completed",
             input_summary=source_task.topic_focus,
             output_summary=output_summary,
             error_code=error_code,
             resolution=resolution,
             metadata=metadata,
         )
+
+    async def _resolve_assessment_skill_for_runtime(
+        self,
+        *,
+        goal: LearnerGoal,
+        resource_id: str | None,
+    ) -> SkillResolution | None:
+        if self._skill_usage_service is None:
+            return None
+        return await self._skill_usage_service.resolve_for_runtime(
+            skill_name="create_quiz",
+            surface="assessment_generation",
+            resource_id=resource_id or goal.id,
+        )
+
+    async def _record_assessment_skill_usage(
+        self,
+        *,
+        goal: LearnerGoal,
+        workflow_run_id: str | None,
+        outcome_status: str,
+        trigger_source: str,
+        topic_key: str | None,
+        input_summary: str | None = None,
+        output_summary: str | None = None,
+        error_code: str | None = None,
+        resolution: SkillResolution | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        await self._record_surface_skill_usage(
+            skill_name="create_quiz",
+            surface="assessment_generation",
+            goal=goal,
+            outcome_status=outcome_status,
+            trigger_source=trigger_source,
+            workflow_run_id=workflow_run_id,
+            topic_key=topic_key,
+            input_summary=input_summary,
+            output_summary=output_summary,
+            error_code=error_code,
+            resolution=resolution,
+            metadata=metadata,
+        )
+
+    async def _resolve_replan_skill_for_runtime(
+        self,
+        *,
+        goal: LearnerGoal,
+        resource_id: str | None,
+    ) -> SkillResolution | None:
+        if self._skill_usage_service is None:
+            return None
+        return await self._skill_usage_service.resolve_for_runtime(
+            skill_name="plan_study_path",
+            surface="replan",
+            resource_id=resource_id or goal.id,
+        )
+
+    async def _record_replan_skill_usage(
+        self,
+        *,
+        goal: LearnerGoal,
+        source_task: DailyTask | None,
+        workflow_run_id: str | None,
+        outcome_status: str,
+        trigger_source: str,
+        topic_key: str | None,
+        input_summary: str | None = None,
+        output_summary: str | None = None,
+        error_code: str | None = None,
+        resolution: SkillResolution | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        await self._record_surface_skill_usage(
+            skill_name="plan_study_path",
+            surface="replan",
+            goal=goal,
+            outcome_status=outcome_status,
+            trigger_source=trigger_source,
+            daily_task_id=source_task.id if source_task is not None else None,
+            workflow_run_id=workflow_run_id,
+            topic_key=topic_key,
+            input_summary=input_summary,
+            output_summary=output_summary,
+            error_code=error_code,
+            resolution=resolution,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _with_skill_execution_metadata(
+        runtime_plan: RuntimeSkillExecutionPlan | None,
+        *,
+        metadata: dict[str, object] | None,
+    ) -> dict[str, object]:
+        return DynamicRuntimeRegistryService.runtime_metadata_for_usage(
+            runtime_plan,
+            base_metadata=metadata,
+        )
+
+    @staticmethod
+    def _with_skill_binding_metadata(
+        binding: ActiveGoalSkillBinding | None,
+        *,
+        skill_name: str,
+        metadata: dict[str, object] | None,
+    ) -> dict[str, object]:
+        if binding is None:
+            return dict(metadata or {})
+        return binding.with_usage_metadata(metadata, skill_name=skill_name)
+
 
     async def _extend_active_plan(self, goal_id: str) -> None:
         goal = await self._require_goal(goal_id)

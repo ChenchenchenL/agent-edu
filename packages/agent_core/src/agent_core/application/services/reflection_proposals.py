@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 from uuid import uuid4
 
 from agent_core.application.services.audit import AuditService
 from agent_core.application.services.autonomy_jobs import AutonomyJobService
 from agent_core.application.services.skills import ALLOWED_SKILL_PACKAGE_TOOLS
+from agent_core.application.services.tool_plan_contracts import validate_tool_plan_contract
 from agent_core.domain.entities.reflection import ReflectionRecord
 from agent_core.domain.entities.reflection_closure import (
     ReflectionProposal,
@@ -19,7 +21,10 @@ from agent_core.infrastructure.db.repositories import (
     ReflectionProposalApprovalDecisionRepository,
     ReflectionProposalEvaluationRepository,
     ReflectionProposalRepository,
+    SkillArtifactRepository,
 )
+
+MERGE_RELATED_ARTIFACT_STATUSES = {"candidate", "staged", "active", "stable", "deprecated"}
 
 
 class ReflectionProposalService:
@@ -29,12 +34,14 @@ class ReflectionProposalService:
         repository: ReflectionProposalRepository,
         approval_decision_repository: ReflectionProposalApprovalDecisionRepository | None = None,
         evaluation_repository: ReflectionProposalEvaluationRepository | None = None,
+        artifact_repository: SkillArtifactRepository | None = None,
         autonomy_job_service: AutonomyJobService | None = None,
         audit_service: AuditService,
     ) -> None:
         self._repository = repository
         self._approval_decision_repository = approval_decision_repository
         self._evaluation_repository = evaluation_repository
+        self._artifact_repository = artifact_repository
         self._autonomy_job_service = autonomy_job_service
         self._audit_service = audit_service
 
@@ -150,6 +157,210 @@ class ReflectionProposalService:
             proposals.append(admitted if admitted is not None else proposal)
         return proposals
 
+    async def create_skill_patch_request_from_recommendation(
+        self,
+        *,
+        recommendation_id: str,
+        artifact_id: str | None,
+        skill_name: str,
+        skill_version: str | None,
+        scope: str,
+        surface: str,
+        recommendation_reason_code: str,
+        evidence_snapshot: dict[str, Any],
+        metrics_snapshot: dict[str, Any],
+        related_artifact_ids: list[str],
+        reflection_record_id: str,
+        learner_goal_id: str,
+        operator_id: str,
+    ) -> ReflectionProposal:
+        if not reflection_record_id.strip() or not learner_goal_id.strip():
+            raise ValidationError("Skill patch request requires reflection_record_id and learner_goal_id.")
+        payload = {
+            "artifact_id": artifact_id,
+            "skill_name": skill_name,
+            "skill_version": skill_version,
+            "scope": scope,
+            "surface": surface,
+            "recommendation_id": recommendation_id,
+            "recommendation_reason_code": recommendation_reason_code,
+            "usage_event_ids": self._skill_patch_usage_event_ids(evidence_snapshot),
+            "related_artifact_ids": list(related_artifact_ids),
+            "evidence_snapshot": dict(evidence_snapshot),
+            "metrics_snapshot": dict(metrics_snapshot),
+        }
+        proposal = ReflectionProposal.build(
+            reflection_record_id=reflection_record_id,
+            learner_goal_id=learner_goal_id,
+            proposal_type="skill_patch_request",
+            target_scope=surface,
+            priority_score=self._skill_patch_priority(metrics_snapshot),
+            hypothesis=f"Curator evidence indicates {skill_name} may need a governed skill patch.",
+            change_summary=f"Create a governed patch request for {skill_name} on {surface}.",
+            structured_patch_payload=payload,
+            expected_improvement="Route negative skill evidence into sandboxed proposal review before artifact changes.",
+            risk_level="medium",
+            evidence_snapshot={
+                "source": "skill_curator_recommendation",
+                "recommendation_id": recommendation_id,
+                "artifact_id": artifact_id,
+                "skill_name": skill_name,
+                "scope": scope,
+                "surface": surface,
+                "recommendation_reason_code": recommendation_reason_code,
+                "evidence_snapshot": dict(evidence_snapshot),
+                "metrics_snapshot": dict(metrics_snapshot),
+            },
+        )
+        self._validate_patch_payload(proposal)
+        existing = await self._find_equivalent_active_proposal(proposal)
+        if existing is not None:
+            await self._audit_service.record(
+                event_type="reflection.proposal.deduplicated",
+                resource_type="reflection_proposal",
+                resource_id=existing.id,
+                actor=operator_id,
+                event_data={
+                    "reflection_record_id": reflection_record_id,
+                    "proposal_type": existing.proposal_type,
+                    "target_scope": existing.target_scope,
+                    "recommendation_id": recommendation_id,
+                },
+            )
+            return existing
+        await self._repository.create(proposal)
+        await self._audit_service.record(
+            event_type="reflection.proposal.created",
+            resource_type="reflection_proposal",
+            resource_id=proposal.id,
+            actor=operator_id,
+            event_data={
+                "reflection_record_id": reflection_record_id,
+                "proposal_type": proposal.proposal_type,
+                "target_scope": proposal.target_scope,
+                "priority_score": proposal.priority_score,
+                "recommendation_id": recommendation_id,
+            },
+        )
+        admitted = await self._auto_admit_to_sandbox(proposal)
+        return admitted if admitted is not None else proposal
+
+    async def create_skill_merge_package_from_recommendation(
+        self,
+        *,
+        recommendation_id: str,
+        artifact_id: str | None,
+        skill_name: str,
+        skill_version: str | None,
+        scope: str,
+        surface: str,
+        recommendation_reason_code: str,
+        evidence_snapshot: dict[str, Any],
+        metrics_snapshot: dict[str, Any],
+        related_artifact_ids: list[str],
+        reflection_record_id: str,
+        learner_goal_id: str,
+        operator_id: str,
+    ) -> ReflectionProposal:
+        if not reflection_record_id.strip() or not learner_goal_id.strip():
+            raise ValidationError("Skill merge proposal requires reflection_record_id and learner_goal_id.")
+        if self._artifact_repository is None:
+            raise ValidationError("Skill merge proposal requires skill artifact access.")
+        if artifact_id is None or not artifact_id.strip():
+            raise ValidationError("Skill merge proposal requires a source artifact_id.")
+
+        source_artifact = await self._artifact_repository.get_by_id(artifact_id)
+        if source_artifact is None:
+            raise ValidationError("Skill merge proposal requires an existing source artifact.")
+        self._validate_merge_source_artifact(
+            artifact=source_artifact,
+            skill_name=skill_name,
+            skill_version=skill_version,
+            scope=scope,
+            surface=surface,
+        )
+        merge_artifacts = await self._merge_source_artifacts(
+            source_artifact=source_artifact,
+            related_artifact_ids=related_artifact_ids,
+        )
+
+        proposal = ReflectionProposal.build(
+            reflection_record_id=reflection_record_id,
+            learner_goal_id=learner_goal_id,
+            proposal_type="skill_package",
+            target_scope=source_artifact.scope,
+            priority_score=self._skill_merge_priority(metrics_snapshot),
+            hypothesis=f"A governed merge for {source_artifact.name} can consolidate overlapping skill package coverage.",
+            change_summary=f"Merge compatible {source_artifact.name} skill package match coverage into a replacement package.",
+            structured_patch_payload=self._merge_skill_package_payload(
+                source_artifact=source_artifact,
+                merge_artifacts=merge_artifacts,
+            ),
+            expected_improvement="Evaluate merged skill package coverage through existing sandbox and lifecycle gates before artifact changes.",
+            risk_level="medium",
+            evidence_snapshot=self._merge_skill_package_evidence(
+                recommendation_id=recommendation_id,
+                recommendation_reason_code=recommendation_reason_code,
+                source_artifact=source_artifact,
+                merge_artifacts=merge_artifacts,
+                evidence_snapshot=evidence_snapshot,
+                metrics_snapshot=metrics_snapshot,
+            ),
+        )
+        self._validate_patch_payload(proposal)
+        existing = await self._find_merge_skill_package_proposal(
+            recommendation_id=recommendation_id,
+            learner_goal_id=learner_goal_id,
+            target_scope=source_artifact.scope,
+        )
+        if existing is not None:
+            await self._audit_service.record(
+                event_type="reflection.proposal.deduplicated",
+                resource_type="reflection_proposal",
+                resource_id=existing.id,
+                actor=operator_id,
+                event_data={
+                    "reflection_record_id": reflection_record_id,
+                    "proposal_type": existing.proposal_type,
+                    "target_scope": existing.target_scope,
+                    "recommendation_id": recommendation_id,
+                    "source": "skill_curator_merge_recommendation",
+                },
+            )
+            return existing
+        await self._repository.create(proposal)
+        await self._audit_service.record(
+            event_type="reflection.proposal.created",
+            resource_type="reflection_proposal",
+            resource_id=proposal.id,
+            actor=operator_id,
+            event_data={
+                "reflection_record_id": reflection_record_id,
+                "proposal_type": proposal.proposal_type,
+                "target_scope": proposal.target_scope,
+                "priority_score": proposal.priority_score,
+                "recommendation_id": recommendation_id,
+                "source": "skill_curator_merge_recommendation",
+            },
+        )
+        await self._audit_service.record(
+            event_type="reflection.proposal.skill_merge_created",
+            resource_type="reflection_proposal",
+            resource_id=proposal.id,
+            actor=operator_id,
+            event_data={
+                "recommendation_id": recommendation_id,
+                "derived_proposal_id": proposal.id,
+                "source_artifact_id": source_artifact.id,
+                "source_artifact_version": source_artifact.version,
+                "source_artifact_status": source_artifact.status,
+                "merge_source_artifact_ids": [artifact.id for artifact in merge_artifacts],
+                "operator_id": operator_id,
+            },
+        )
+        admitted = await self._auto_admit_to_sandbox(proposal)
+        return admitted if admitted is not None else proposal
+
     async def list_by_reflection(self, reflection_record_id: str) -> list[ReflectionProposal]:
         return await self._repository.list_by_reflection(reflection_record_id)
 
@@ -179,8 +390,115 @@ class ReflectionProposalService:
             raise NotFoundError(f"Reflection proposal evaluation for '{proposal_id}' was not found.")
         return evaluation
 
+    async def realize_skill_patch_request(
+        self,
+        *,
+        proposal_id: str,
+        operator_id: str,
+        reason_code: str,
+        reason_note: str | None,
+    ) -> ReflectionProposal:
+        if not operator_id.strip():
+            raise ValidationError("operator_id is required.")
+        if not reason_code.strip():
+            raise ValidationError("reason_code is required.")
+        if self._evaluation_repository is None:
+            raise ValidationError("Skill patch realization requires proposal evaluations.")
+        if self._artifact_repository is None:
+            raise ValidationError("Skill patch realization requires skill artifact access.")
+
+        patch_request = await self.get(proposal_id)
+        if patch_request.proposal_type != "skill_patch_request":
+            raise ValidationError("Only skill_patch_request proposals can be realized.")
+        if patch_request.status != "approved":
+            raise ValidationError("Only approved skill_patch_request proposals can be realized.")
+        if patch_request.evaluation_status != "effective":
+            raise ValidationError("Skill patch realization requires an effective patch request.")
+
+        evaluation = await self._evaluation_repository.get_by_proposal(patch_request.id)
+        if evaluation is None or evaluation.evaluation_status != "effective":
+            raise ValidationError("Skill patch realization requires an effective evaluation.")
+
+        payload = dict(patch_request.structured_patch_payload)
+        artifact_id = payload.get("artifact_id")
+        if not isinstance(artifact_id, str) or not artifact_id.strip():
+            raise ValidationError("Skill patch realization requires a source artifact_id.")
+        artifact = await self._artifact_repository.get_by_id(artifact_id)
+        if artifact is None:
+            raise ValidationError("Skill patch realization requires an existing source artifact.")
+        self._validate_patch_request_artifact_anchor(patch_request=patch_request, artifact=artifact)
+
+        existing = await self._find_realized_skill_patch_proposal(patch_request)
+        if existing is not None:
+            await self._audit_service.record(
+                event_type="reflection.proposal.skill_patch_realize_reused",
+                resource_type="reflection_proposal",
+                resource_id=existing.id,
+                actor=operator_id,
+                event_data={
+                    "source_skill_patch_request_id": patch_request.id,
+                    "derived_proposal_id": existing.id,
+                    "source_artifact_id": artifact.id,
+                    "operator_id": operator_id,
+                    "reason_code": reason_code,
+                    "reason_note": reason_note,
+                },
+            )
+            return existing
+
+        proposal = ReflectionProposal.build(
+            reflection_record_id=patch_request.reflection_record_id,
+            learner_goal_id=patch_request.learner_goal_id,
+            proposal_type="skill_package",
+            target_scope=artifact.scope,
+            priority_score=patch_request.priority_score,
+            hypothesis=f"A governed replacement for {artifact.name} can address curator patch request evidence.",
+            change_summary=f"Realize approved skill patch request into a replacement skill package for {artifact.name}.",
+            structured_patch_payload=self._replacement_skill_package_payload(artifact),
+            expected_improvement="Evaluate a replacement skill package through existing sandbox and lifecycle gates before artifact changes.",
+            risk_level=patch_request.risk_level,
+            evidence_snapshot=self._replacement_skill_package_evidence(
+                patch_request=patch_request,
+                evaluation=evaluation,
+                artifact=artifact,
+            ),
+        )
+        self._validate_patch_payload(proposal)
+        await self._repository.create(proposal)
+        await self._audit_service.record(
+            event_type="reflection.proposal.created",
+            resource_type="reflection_proposal",
+            resource_id=proposal.id,
+            actor=operator_id,
+            event_data={
+                "reflection_record_id": proposal.reflection_record_id,
+                "proposal_type": proposal.proposal_type,
+                "target_scope": proposal.target_scope,
+                "priority_score": proposal.priority_score,
+                "source_skill_patch_request_id": patch_request.id,
+            },
+        )
+        await self._audit_service.record(
+            event_type="reflection.proposal.skill_patch_realized",
+            resource_type="reflection_proposal",
+            resource_id=proposal.id,
+            actor=operator_id,
+            event_data={
+                "source_skill_patch_request_id": patch_request.id,
+                "derived_proposal_id": proposal.id,
+                "source_artifact_id": artifact.id,
+                "source_artifact_version": artifact.version,
+                "source_artifact_status": artifact.status,
+                "operator_id": operator_id,
+                "reason_code": reason_code,
+                "reason_note": reason_note,
+            },
+        )
+        admitted = await self._auto_admit_to_sandbox(proposal)
+        return admitted if admitted is not None else proposal
+
     async def describe(self, proposal: ReflectionProposal) -> dict[str, object]:
-        activation_surface = proposal_rollout_surface(proposal.target_scope)
+        activation_surface = self._activation_surface(proposal)
         return {
             **proposal.__dict__,
             "auto_sandbox_eligible": proposal.risk_level in {"low", "medium"},
@@ -444,6 +762,260 @@ class ReflectionProposalService:
                 tool_name = str(item.get("tool_name") or "")
                 if tool_name not in ALLOWED_SKILL_PACKAGE_TOOLS:
                     raise ValidationError("Unsupported skill package tool.")
+            validate_tool_plan_contract(surface, tool_plan)
+        if proposal.proposal_type == "skill_patch_request":
+            payload = proposal.structured_patch_payload
+            for key in ("skill_name", "scope", "surface", "recommendation_id", "recommendation_reason_code"):
+                if not isinstance(payload.get(key), str) or not str(payload.get(key)).strip():
+                    raise ValidationError("Skill patch request payload is incomplete.")
+            if payload.get("surface") != proposal.target_scope:
+                raise ValidationError("Skill patch request surface must match proposal target scope.")
+            for key in ("usage_event_ids", "related_artifact_ids"):
+                if not isinstance(payload.get(key), list):
+                    raise ValidationError("Skill patch request reference fields must be lists.")
+            for key in ("evidence_snapshot", "metrics_snapshot"):
+                if not isinstance(payload.get(key), dict):
+                    raise ValidationError("Skill patch request snapshots must be objects.")
+
+    @staticmethod
+    def _validate_patch_request_artifact_anchor(
+        *,
+        patch_request: ReflectionProposal,
+        artifact: Any,
+    ) -> None:
+        payload = patch_request.structured_patch_payload
+        if payload.get("skill_name") != artifact.name:
+            raise ValidationError("Skill patch request skill_name does not match source artifact.")
+        if payload.get("scope") != artifact.scope or payload.get("surface") != artifact.scope:
+            raise ValidationError("Skill patch request scope does not match source artifact.")
+        skill_version = payload.get("skill_version")
+        if isinstance(skill_version, str) and skill_version.strip() and skill_version != artifact.version:
+            raise ValidationError("Skill patch request skill_version does not match source artifact.")
+
+    @staticmethod
+    def _replacement_skill_package_payload(artifact: Any) -> dict[str, Any]:
+        match_rules = artifact.definition.get("match_rules")
+        scoring_contract = artifact.definition.get("scoring_contract")
+        if not isinstance(match_rules, dict):
+            raise ValidationError("Source artifact is missing match_rules for replacement proposal.")
+        if not isinstance(scoring_contract, dict):
+            raise ValidationError("Source artifact is missing scoring_contract for replacement proposal.")
+        return {
+            "artifact_kind": "declarative_skill_package",
+            "skill_name": artifact.name,
+            "surface": artifact.scope,
+            "match_rules": dict(match_rules),
+            "runtime_directives": dict(artifact.runtime_directives),
+            "tool_plan": [dict(item) for item in artifact.tool_plan],
+            "scoring_contract": dict(scoring_contract),
+        }
+
+    @staticmethod
+    def _replacement_skill_package_evidence(
+        *,
+        patch_request: ReflectionProposal,
+        evaluation: ReflectionProposalEvaluation,
+        artifact: Any,
+    ) -> dict[str, Any]:
+        payload = dict(patch_request.structured_patch_payload)
+        return {
+            "source": "skill_patch_request_realization",
+            "source_skill_patch_request_id": patch_request.id,
+            "source_artifact_id": artifact.id,
+            "source_artifact_version": artifact.version,
+            "source_artifact_status": artifact.status,
+            "source_artifact_lineage_id": artifact.lineage_id,
+            "source_parent_artifact_id": artifact.parent_artifact_id,
+            "source_supersedes_artifact_id": artifact.supersedes_artifact_id,
+            "recommendation_id": payload.get("recommendation_id"),
+            "recommendation_reason_code": payload.get("recommendation_reason_code"),
+            "usage_event_ids": list(payload.get("usage_event_ids") or []),
+            "related_artifact_ids": list(payload.get("related_artifact_ids") or []),
+            "patch_request_evidence_snapshot": dict(payload.get("evidence_snapshot") or {}),
+            "patch_request_metrics_snapshot": dict(payload.get("metrics_snapshot") or {}),
+            "patch_request_evaluation": {
+                "id": evaluation.id,
+                "evaluation_status": evaluation.evaluation_status,
+                "comparison_window_size": evaluation.comparison_window_size,
+                "score_delta": evaluation.score_delta,
+                "evaluator_type": evaluation.evaluator_type,
+                "sandbox_run_id": evaluation.sandbox_run_id,
+                "proposal_evaluation_summary": patch_request.evaluation_summary,
+                "simulated_outcome_summary": dict(evaluation.simulated_outcome_summary),
+            },
+        }
+
+    def _validate_merge_source_artifact(
+        self,
+        *,
+        artifact: Any,
+        skill_name: str,
+        skill_version: str | None,
+        scope: str,
+        surface: str,
+    ) -> None:
+        if artifact.status not in {"active", "stable"}:
+            raise ValidationError("Skill merge proposal requires an active or stable source artifact.")
+        if artifact.name != skill_name or artifact.scope != scope or artifact.scope != surface:
+            raise ValidationError("Skill merge proposal source artifact does not match recommendation anchor.")
+        if skill_version is not None and skill_version.strip() and artifact.version != skill_version:
+            raise ValidationError("Skill merge proposal source artifact version does not match recommendation anchor.")
+        self._replacement_skill_package_payload(artifact)
+
+    async def _merge_source_artifacts(
+        self,
+        *,
+        source_artifact: Any,
+        related_artifact_ids: list[str],
+    ) -> list[Any]:
+        if self._artifact_repository is None:
+            raise ValidationError("Skill merge proposal requires skill artifact access.")
+        unique_ids: list[str] = []
+        for artifact_id in related_artifact_ids:
+            if not isinstance(artifact_id, str) or not artifact_id.strip():
+                continue
+            artifact_id = artifact_id.strip()
+            if artifact_id == source_artifact.id or artifact_id in unique_ids:
+                continue
+            unique_ids.append(artifact_id)
+        if not unique_ids:
+            raise ValidationError("Skill merge proposal requires related_artifact_ids.")
+
+        artifacts: list[Any] = []
+        for artifact_id in unique_ids:
+            artifact = await self._artifact_repository.get_by_id(artifact_id)
+            if artifact is None:
+                raise ValidationError("Skill merge proposal requires existing related artifacts.")
+            if artifact.status not in MERGE_RELATED_ARTIFACT_STATUSES:
+                raise ValidationError(
+                    "Skill merge proposal related artifacts must be governed candidate, staged, active, stable, "
+                    "or deprecated artifacts."
+                )
+            if not self._merge_artifact_matches_source(source_artifact=source_artifact, artifact=artifact):
+                raise ValidationError(
+                    "Skill merge proposal related artifacts must match source skill/scope or implementation binding."
+                )
+            self._replacement_skill_package_payload(artifact)
+            artifacts.append(artifact)
+        return artifacts
+
+    @staticmethod
+    def _merge_artifact_matches_source(
+        *,
+        source_artifact: Any,
+        artifact: Any,
+    ) -> bool:
+        if artifact.scope != source_artifact.scope:
+            return False
+        if artifact.name == source_artifact.name:
+            return True
+        source_binding = ReflectionProposalService._implementation_binding(source_artifact)
+        artifact_binding = ReflectionProposalService._implementation_binding(artifact)
+        return source_binding is not None and artifact_binding == source_binding
+
+    @staticmethod
+    def _implementation_binding(artifact: Any) -> str | None:
+        value = artifact.compatibility_contract.get("implementation_binding")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return None
+
+    @staticmethod
+    def _merge_skill_package_payload(
+        *,
+        source_artifact: Any,
+        merge_artifacts: list[Any],
+    ) -> dict[str, Any]:
+        payload = ReflectionProposalService._replacement_skill_package_payload(source_artifact)
+        match_rules = dict(payload["match_rules"])
+        for artifact in merge_artifacts:
+            merge_match_rules = artifact.definition.get("match_rules")
+            if not isinstance(merge_match_rules, dict):
+                raise ValidationError("Related artifact is missing match_rules for merge proposal.")
+            for key, value in merge_match_rules.items():
+                if not isinstance(value, list):
+                    continue
+                existing = match_rules.get(key)
+                if not isinstance(existing, list):
+                    existing = []
+                merged = list(existing)
+                for item in value:
+                    if item not in merged:
+                        merged.append(item)
+                match_rules[key] = merged
+        payload["match_rules"] = match_rules
+        return payload
+
+    @staticmethod
+    def _merge_skill_package_evidence(
+        *,
+        recommendation_id: str,
+        recommendation_reason_code: str,
+        source_artifact: Any,
+        merge_artifacts: list[Any],
+        evidence_snapshot: dict[str, Any],
+        metrics_snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "source": "skill_curator_merge_recommendation",
+            "recommendation_id": recommendation_id,
+            "recommendation_reason_code": recommendation_reason_code,
+            "source_artifact_id": source_artifact.id,
+            "source_artifact_version": source_artifact.version,
+            "source_artifact_status": source_artifact.status,
+            "source_artifact_lineage_id": source_artifact.lineage_id,
+            "source_parent_artifact_id": source_artifact.parent_artifact_id,
+            "source_supersedes_artifact_id": source_artifact.supersedes_artifact_id,
+            "merge_source_artifact_ids": [artifact.id for artifact in merge_artifacts],
+            "merge_source_artifact_versions": {
+                artifact.id: artifact.version for artifact in merge_artifacts
+            },
+            "merge_source_artifact_statuses": {
+                artifact.id: artifact.status for artifact in merge_artifacts
+            },
+            "recommendation_evidence_snapshot": dict(evidence_snapshot),
+            "recommendation_metrics_snapshot": dict(metrics_snapshot),
+        }
+
+    async def _find_realized_skill_patch_proposal(
+        self,
+        patch_request: ReflectionProposal,
+    ) -> ReflectionProposal | None:
+        candidates = await self._repository.list_queue(
+            statuses={"proposed", "sandbox_queued", "sandbox_running", "sandbox_completed", "approved"},
+            learner_goal_id=patch_request.learner_goal_id,
+            proposal_type="skill_package",
+            target_scope=patch_request.target_scope,
+            limit=200,
+            offset=0,
+        )
+        for item in candidates:
+            if item.evidence_snapshot.get("source_skill_patch_request_id") == patch_request.id:
+                return item
+        return None
+
+    async def _find_merge_skill_package_proposal(
+        self,
+        *,
+        recommendation_id: str,
+        learner_goal_id: str,
+        target_scope: str,
+    ) -> ReflectionProposal | None:
+        candidates = await self._repository.list_queue(
+            statuses={"proposed", "sandbox_queued", "sandbox_running", "sandbox_completed", "approved"},
+            learner_goal_id=learner_goal_id,
+            proposal_type="skill_package",
+            target_scope=target_scope,
+            limit=200,
+            offset=0,
+        )
+        for item in candidates:
+            if (
+                item.evidence_snapshot.get("source") == "skill_curator_merge_recommendation"
+                and item.evidence_snapshot.get("recommendation_id") == recommendation_id
+            ):
+                return item
+        return None
 
     async def _find_equivalent_active_proposal(
         self,
@@ -493,6 +1065,61 @@ class ReflectionProposalService:
             )
             return None
         return await self.auto_enqueue_sandbox(proposal_id=proposal.id)
+
+    @staticmethod
+    def _activation_surface(proposal: ReflectionProposal) -> str | None:
+        if proposal.proposal_type == "skill_patch_request":
+            return None
+        return proposal_rollout_surface(proposal.target_scope)
+
+    @staticmethod
+    def _skill_patch_usage_event_ids(evidence_snapshot: dict[str, Any]) -> list[str]:
+        usage_ids: list[str] = []
+        for key in (
+            "usage_event_ids",
+            "matched_usage_event_ids",
+            "successful_usage_event_ids",
+            "negative_usage_event_ids",
+            "resolver_failure_event_ids",
+        ):
+            for value in evidence_snapshot.get(key) or []:
+                if isinstance(value, str) and value and value not in usage_ids:
+                    usage_ids.append(value)
+        coverage_evidence = evidence_snapshot.get("coverage_regression")
+        if not isinstance(coverage_evidence, dict):
+            return usage_ids
+        for key in (
+            "attributed_usage_event_ids_by_topic",
+            "binding_gap_event_ids_by_topic",
+            "unresolved_usage_event_ids_by_topic",
+        ):
+            value = coverage_evidence.get(key)
+            if not isinstance(value, dict):
+                continue
+            for event_ids in value.values():
+                if not isinstance(event_ids, list):
+                    continue
+                for event_id in event_ids:
+                    if isinstance(event_id, str) and event_id and event_id not in usage_ids:
+                        usage_ids.append(event_id)
+        return usage_ids
+
+    @staticmethod
+    def _skill_patch_priority(metrics_snapshot: dict[str, Any]) -> float:
+        negative_rate = metrics_snapshot.get("negative_usage_rate")
+        if isinstance(negative_rate, (int, float)):
+            return min(1.0, max(0.55, 0.6 + float(negative_rate) * 0.3))
+        return 0.65
+
+    @staticmethod
+    def _skill_merge_priority(metrics_snapshot: dict[str, Any]) -> float:
+        overlap_score = metrics_snapshot.get("overlap_score")
+        if isinstance(overlap_score, (int, float)):
+            return min(1.0, max(0.6, 0.65 + float(overlap_score) * 0.25))
+        duplicate_count = metrics_snapshot.get("duplicate_artifact_count")
+        if isinstance(duplicate_count, int):
+            return min(1.0, max(0.6, 0.65 + duplicate_count * 0.05))
+        return 0.7
 
     @staticmethod
     def _skill_package_drafts(

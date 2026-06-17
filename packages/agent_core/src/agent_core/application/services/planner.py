@@ -6,6 +6,10 @@ from math import ceil
 from time import perf_counter
 
 from agent_core.application.services.audit import AuditService
+from agent_core.application.services.dynamic_runtime_registry import (
+    DynamicRuntimeRegistryService,
+    RuntimeSkillExecutionPlan,
+)
 from agent_core.application.services.goal_skill_binding_resolver import ActiveGoalSkillBinding, GoalSkillBindingResolver
 from agent_core.application.services.memory import MemoryInterpretationResult
 from agent_core.application.services.reflection_proposal_rollout_resolver import ReflectionProposalRolloutResolver
@@ -13,7 +17,7 @@ from agent_core.application.services.skills import SkillUsageService
 from agent_core.application.services.strategy_cards import StrategyCardService
 from agent_core.domain.entities.goal import LearnerGoal
 from agent_core.domain.entities.planning import DailyTask, PlanStage, StudyPlan
-from agent_core.domain.entities.skill import SkillResolution
+from agent_core.domain.entities.skill import SkillExecutionPlan, SkillResolution
 from agent_core.domain.errors import ValidationError
 from agent_core.infrastructure.llm.types import LLMProvider, StudyPlanDraft, StudyPlanStageDraft, StudyPlanTaskDraft
 from agent_core.infrastructure.observability.metrics import observe_llm_operation, observe_plan_generation_fallback
@@ -37,6 +41,7 @@ class PlannerService:
         rollout_resolver: ReflectionProposalRolloutResolver | None = None,
         goal_skill_binding_resolver: GoalSkillBindingResolver | None = None,
         skill_usage_service: SkillUsageService | None = None,
+        runtime_registry: DynamicRuntimeRegistryService | None = None,
         planning_window_days: int = 14,
     ) -> None:
         self._llm_provider = llm_provider
@@ -45,6 +50,7 @@ class PlannerService:
         self._rollout_resolver = rollout_resolver
         self._goal_skill_binding_resolver = goal_skill_binding_resolver
         self._skill_usage_service = skill_usage_service
+        self._runtime_registry = runtime_registry
         self._planning_window_days = planning_window_days
 
     async def build_plan(
@@ -58,7 +64,9 @@ class PlannerService:
         rollout_context: dict[str, object] | None = None,
         memory_interpretation: MemoryInterpretationResult | None = None,
     ) -> MaterializedPlan:
-        skill_resolution = await self._resolve_plan_skill_for_runtime(goal)
+        runtime_plan = await self._resolve_runtime_plan(goal)
+        execution_plan = runtime_plan.plan if runtime_plan is not None else await self._resolve_plan_execution_plan(goal)
+        skill_resolution = execution_plan.resolution if execution_plan is not None else await self._resolve_plan_skill_for_runtime(goal)
         strategy_card = (
             await self._strategy_card_service.get_active(goal.id)
             if self._strategy_card_service is not None
@@ -79,17 +87,7 @@ class PlannerService:
                     "surface": active_overlay.surface,
                     "status": active_overlay.status,
                 }
-        skill_directives: list[str] | None = None
-        active_skill: ActiveGoalSkillBinding | None = None
-        if self._goal_skill_binding_resolver is not None:
-            active_skill = await self._goal_skill_binding_resolver.get_active_binding(
-                learner_goal_id=goal.id,
-                surface="plan_generation",
-                topic_key=goal.subject,
-                include_staged=False,
-            )
-            if active_skill is not None:
-                skill_directives = list(active_skill.runtime_directives.get("skill_directives") or [])
+        skill_directives = self._skill_directives_from_execution_plan(execution_plan)
         strategy_summary = self._merge_rollout_overlay(
             strategy_summary=strategy_summary,
             rollout_overlay=rollout_overlay,
@@ -234,7 +232,8 @@ class PlannerService:
             error_code=provider_error_code,
             trigger_source=trigger_source,
             resolution=skill_resolution,
-            skill_binding=active_skill,
+            execution_plan=execution_plan,
+            runtime_plan=runtime_plan,
         )
         return MaterializedPlan(
             study_plan=study_plan,
@@ -252,6 +251,43 @@ class PlannerService:
             resource_id=goal.id,
         )
 
+    async def _resolve_plan_execution_plan(self, goal: LearnerGoal) -> SkillExecutionPlan | None:
+        if self._skill_usage_service is None:
+            return None
+        skill_binding: ActiveGoalSkillBinding | None = None
+        if self._goal_skill_binding_resolver is not None:
+            skill_binding = await self._goal_skill_binding_resolver.get_active_binding(
+                learner_goal_id=goal.id,
+                surface="plan_generation",
+                topic_key=goal.subject,
+                include_staged=False,
+            )
+        return await self._skill_usage_service.resolve_execution_plan(
+            skill_name="plan_study_path",
+            surface="plan_generation",
+            resource_id=goal.id,
+            skill_binding=skill_binding,
+        )
+
+    async def _resolve_runtime_plan(self, goal: LearnerGoal) -> RuntimeSkillExecutionPlan | None:
+        if self._runtime_registry is None:
+            return None
+        return await self._runtime_registry.resolve_runtime_plan(
+            learner_goal_id=goal.id,
+            skill_name="plan_study_path",
+            surface="plan_generation",
+            resource_id=goal.id,
+            topic_key=goal.subject,
+            include_staged=False,
+        )
+
+    @staticmethod
+    def _skill_directives_from_execution_plan(execution_plan: SkillExecutionPlan | None) -> list[str] | None:
+        if execution_plan is None:
+            return None
+        directives = execution_plan.runtime_directives.get("skill_directives") or []
+        return list(directives) or None
+
     async def _record_plan_skill_usage(
         self,
         *,
@@ -260,7 +296,8 @@ class PlannerService:
         error_code: str | None,
         trigger_source: str,
         resolution: SkillResolution | None,
-        skill_binding: ActiveGoalSkillBinding | None,
+        execution_plan: SkillExecutionPlan | None,
+        runtime_plan: RuntimeSkillExecutionPlan | None,
     ) -> None:
         if self._skill_usage_service is None:
             return
@@ -277,25 +314,16 @@ class PlannerService:
             output_summary=llm_draft.plan_summary,
             error_code=error_code,
             resolution=resolution,
-            metadata=(
-                skill_binding.with_usage_metadata(
-                    {
-                        "fallback_used": llm_draft.fallback_used,
-                        "response_shape_valid": llm_draft.response_shape_valid,
-                        "retry_count": llm_draft.retry_count,
-                        "provider": llm_draft.provider,
-                        "model": llm_draft.model,
-                    },
-                    skill_name="plan_study_path",
-                )
-                if skill_binding is not None
-                else {
+            metadata=DynamicRuntimeRegistryService.usage_metadata_for_plan(
+                execution_plan=execution_plan,
+                runtime_plan=runtime_plan,
+                base_metadata={
                     "fallback_used": llm_draft.fallback_used,
                     "response_shape_valid": llm_draft.response_shape_valid,
                     "retry_count": llm_draft.retry_count,
                     "provider": llm_draft.provider,
                     "model": llm_draft.model,
-                }
+                },
             ),
         )
 

@@ -11,6 +11,13 @@ class SkillDescriptor:
     description: str
 
 
+@dataclass(frozen=True)
+class RuntimeSkillHandlerDescriptor:
+    key: str
+    execution_kind: str
+    surfaces: tuple[str, ...]
+
+
 class SkillRegistry:
     _mode_to_skill = {
         "chat": "explain_concept",
@@ -41,6 +48,48 @@ class SkillRegistry:
             description="Create spaced review tasks from completed learning work.",
         ),
     }
+    _runtime_handlers = {
+        "explain_concept": RuntimeSkillHandlerDescriptor(
+            key="explain_concept",
+            execution_kind="tutor_reply",
+            surfaces=("chat",),
+        ),
+        "adaptive_hint": RuntimeSkillHandlerDescriptor(
+            key="adaptive_hint",
+            execution_kind="tutor_reply",
+            surfaces=("hint",),
+        ),
+        "create_quiz": RuntimeSkillHandlerDescriptor(
+            key="create_quiz",
+            execution_kind="quiz_draft",
+            surfaces=("quiz", "assessment_generation"),
+        ),
+        "plan_study_path": RuntimeSkillHandlerDescriptor(
+            key="plan_study_path",
+            execution_kind="study_plan",
+            surfaces=("plan_generation", "replan"),
+        ),
+        "schedule_review": RuntimeSkillHandlerDescriptor(
+            key="schedule_review",
+            execution_kind="review_schedule",
+            surfaces=("review_scheduling",),
+        ),
+        "llm_explain_concept_v1": RuntimeSkillHandlerDescriptor(
+            key="llm_explain_concept_v1",
+            execution_kind="tutor_reply",
+            surfaces=("chat",),
+        ),
+        "llm_adaptive_hint_v1": RuntimeSkillHandlerDescriptor(
+            key="llm_adaptive_hint_v1",
+            execution_kind="tutor_reply",
+            surfaces=("hint",),
+        ),
+        "llm_create_quiz_v1": RuntimeSkillHandlerDescriptor(
+            key="llm_create_quiz_v1",
+            execution_kind="quiz_draft",
+            surfaces=("quiz", "assessment_generation"),
+        ),
+    }
 
     def __init__(self, skills: list[SkillDescriptor]) -> None:
         self._skills = skills
@@ -56,6 +105,24 @@ class SkillRegistry:
 
     def has_skill(self, name: str) -> bool:
         return name in self._skills_by_name
+
+    def default_handler_for_skill(self, name: str) -> str:
+        if not self.has_skill(name):
+            raise ValidationError(f"Skill '{name}' is not enabled.")
+        return name
+
+    def has_runtime_handler(self, key: str) -> bool:
+        return key in self._runtime_handlers
+
+    def supports_runtime_handler(self, key: str, *, surface: str) -> bool:
+        handler = self._runtime_handlers.get(key)
+        return handler is not None and surface in handler.surfaces
+
+    def runtime_handler_execution_kind(self, key: str) -> str:
+        handler = self._runtime_handlers.get(key)
+        if handler is None:
+            raise ValidationError(f"Runtime skill handler '{key}' is not registered.")
+        return handler.execution_kind
 
     def trace_for_mode(self, mode: str | None) -> list[str]:
         skill_name = self._mode_to_skill.get(mode or "")

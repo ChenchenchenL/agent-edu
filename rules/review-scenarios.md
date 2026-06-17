@@ -40,11 +40,11 @@
    - Check for over-engineering
 
 2. Run `/qa` (gstack)
-   - Long functions (>50 lines)
-   - Deep nesting (>3 levels)
+   - Long functions (>80 effective lines)
+   - Deep nesting (>4 levels)
    - High complexity
    - Unused imports/variables
-   - Test coverage
+   - Risk-based test adequacy
 
 3. Run `/review` (gstack) for code details
 
@@ -102,6 +102,9 @@
    - Prompt injection risks
    - Secrets exposure
    - Audit logging
+   - Fail-closed behavior
+   - Hardcoded actor/operator fallback
+   - Governed gate bypass
 4. Report findings with severity levels
 
 **Skill used:** `/cso`
@@ -134,8 +137,8 @@
 5. Synthesize all findings
 6. Provide:
    - Overall risk level
-   - Must-fix issues (Critical/Important)
-   - Optional improvements (Minor)
+   - Blocked / must-fix issues
+   - Recommended improvements
    - Merge recommendation
 
 **Skills used:** `/design-review` + `/qa` + `/cso` + `requesting-code-review`
@@ -203,7 +206,7 @@
 4. Report:
    - Code quality issues
    - Design problems
-   - Test coverage
+   - Test adequacy gaps
    - Security concerns (if applicable)
 
 **Skills used:** `/design-review` + `/qa`
@@ -236,7 +239,8 @@
 - SQL/prompt 注入
 - 认证授权
 - 敏感数据泄露
-- 审计日志
+- 审计日志 / provenance
+- fail-closed / gate bypass
 ```
 
 ### ✅ Pre-Merge
@@ -268,7 +272,7 @@
 - 函数复杂度
 - 嵌套深度
 - 未使用的代码
-- 测试覆盖率
+- 风险驱动测试充分性
 
 输出质量评分和改进建议。
 ```

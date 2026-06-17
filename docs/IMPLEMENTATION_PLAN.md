@@ -39,7 +39,7 @@
 - 默认验证环境为 Docker compose，后续 smoke test 也应以它为基线
 - 工程组织方式参考 Hermes 的 unified core / skills / session / curator 思路，但 learner model、mastery、curriculum、reflection、pedagogical safety 由本项目自研
 - 详细映射见 [docs/hermes-to-edu-mapping.md](./hermes-to-edu-mapping.md)
-- 当前交互表面优先走 CLI / TUI，设计说明见 [docs/CLI_TUI_DESIGN.md](./CLI_TUI_DESIGN.md)
+- 当前交互表面已调整为 Web-first；历史 CLI / TUI 设计资料仅保留作参考，不再代表当前产品表面方向
 
 ---
 
@@ -465,7 +465,7 @@
 这一阶段的核心变化是：
 
 - 系统从“响应式教学”转向“带有主动组织能力的教学”
-- 同时开始从“纯 API 后端”转向“CLI-first 的学习工作台”
+- 同时开始从“纯 API 后端”扩展过历史 CLI / TUI 工作台实现；当前产品表面方向已调整为 Web-first
 
 但前提仍然成立：
 
@@ -509,7 +509,7 @@
 补充：
 
 - 当前已新增 workspace summary / filtered task list / memory browse API
-- 当前已新增 `agent-edu` CLI 与 learner-first TUI baseline
+- 当前已保留历史 `agent-edu` CLI 与 learner-first TUI baseline 作为参考实现资产
 - terminal surface 仍严格复用 API contract，而不是复制业务逻辑
 
 这一阶段的目标不是简单“存更多数据”，而是：
@@ -525,8 +525,8 @@
 - Reflection system 增强版
 - Teaching strategy optimization
 - Workflow optimization
-- Skill proposal
-- Skill sandbox evaluation
+- Skill proposal / sandbox evaluation 的长期治理增强
+- Skill artifact / curator / archive / replacement staging / dynamic runtime 的后续闭环
 - Multi-agent collaboration
 
 其中当前已完成的最小反思能力包括：
@@ -552,11 +552,46 @@
   - low / medium risk proposal auto-admission to sandbox
 - proposal rollout / rollback v1
   - goal-scoped staged activation
-  - chat / hint / plan_generation / review_scheduling / assessment_generation / replan rollout surfaces
+  - chat / hint / quiz / plan_generation / review_scheduling / assessment_generation / replan rollout surfaces
   - rollout overlay consumption in chat / planner / task runtime
   - rollout observation records and recommendations
   - manual promote / rollback
+  - rollout auto-governance V1 已补独立 decision job；当前 observation 仍只产信号，decision job 再消费 latest observation 并调用既有 promote / rollback service
+  - rollout auto-governance V1 当前默认只覆盖 `review_scheduling / assessment_generation / replan`；`chat / hint / quiz / plan_generation` 仍保持手工 promote / rollback
   - planner rollback baseline replan
+- skill evolution 最小治理闭环
+  - `skill_package` proposal 可进入 sandbox / evaluation / approval / rollout / binding
+  - `SkillArtifact`、`SkillUsageEvent`、`SkillCuratorRecommendation` 已提供版本化资产、usage 记账和 operator review 承载
+  - artifact lifecycle 已覆盖 candidate / staged / active / stable / deprecated / suppressed / archived，以及 suppress / restore / rollback deprecate / archive
+  - `SkillCuratorJob` MVP 可由 worker tick 调用，基于 usage、rollout observation 和 rollout decision 保守生成 stabilize / review / rollback-review / archive-candidate recommendation
+  - `patch_needed` recommendation accept 已能创建 reference-only `skill_patch_request` proposal，并继续走 sandbox / evaluation / approval，不直接修改 artifact
+  - approved / effective `skill_patch_request` 已能 realization 为新的 replacement `skill_package` proposal，复制 source artifact 可执行定义并保留 provenance，且不直接修改 artifact / 创建 candidate
+  - `merge_candidate` recommendation accept 已能创建 merge-sourced replacement `skill_package` proposal；payload 复用 source artifact 可执行基线，只合并 list-valued `match_rules`
+  - `SkillCuratorJob` 已能扫描同 name/scope 或同 implementation binding 的 governed artifacts，基于 `match_rules.task_types/topic_keys` 交集生成 `merge_candidate / none` recommendation；related artifact 允许 candidate / staged / active / stable / deprecated，拒绝 suppressed / archived / rejected
+  - `SkillCuratorJob` 已能接入 memory conflict summary、reflection outcome evaluation 和 resolver health trend 作为 `governance_evidence`，生成或增强 `flag_for_review / none` recommendation；该步骤只产 recommendation，不直接修改 artifact
+  - `SkillCuratorJob` 已能接入 surface / topic coverage regression 输入，基于声明外 topic drift 与 governed binding gap 生成 `patch_needed / none` recommendation；该步骤只产 recommendation，不直接修改 artifact
+  - Prometheus / Grafana / alert 已补 skill health 基线，覆盖 skill usage、resolver failure、artifact status、curator pending backlog、recommendation rate 与 curator job p95
+  - approved / effective replacement `skill_package` proposal 已能通过 operator-protected staging API 复用 candidate / stage lifecycle，生成带 lineage / parent / supersedes provenance 的 `staged` replacement artifact；该步骤不自动 activate / replace source artifact
+  - staged governed replacement 已补 shared readiness evaluation、operator read API、strict source-anchor gate 和 `activate_candidate / replace_candidate` curator recommendation；`replacement-readiness` read API 现会直接返回 `recommended_action`
+  - staged governed replacement 的 `activate / replace` 已收敛到同一条 lifecycle-first 人工执行链：operator accept recommendation 或 direct lifecycle 调用都会先重新做 readiness / source-anchor 校验，再执行 artifact lifecycle，不会跳过 evidence gate
+  - staged replacement lifecycle 执行失败时会写 `skill.curator.recommendation.accept_failed` durable audit，且 recommendation 保持 `pending`
+  - dynamic runtime registry V1 已把 execution-plan consumption 扩到 `chat / hint / quiz / plan_generation / review_scheduling / assessment_generation / replan`
+  - autonomy surfaces 已统一消费 `implementation_binding / execution_kind / runtime_directives / binding metadata`
+  - runtime registry V1 已把 registry/source 摘要统一写入 usage metadata；当前会输出 `dynamic_registry_version`、`binding_id / rollout_id`、`tool_plan_enabled` 和 artifact / directive / tool-plan 来源摘要
+  - `chat / quiz / plan_generation` 现已与 task/autonomy 一样复用同一套 runtime usage metadata helper，不再各自维持分散的 execution-plan metadata 拼装逻辑
+  - task/autonomy fallback path 也已统一复用 runtime registry contract builder，不再在 task service 本地拼 runtime/source 摘要
+  - `review_scheduling / assessment_generation / replan` 现已在 task/autonomy 端端到端保留 `RuntimeSkillExecutionPlan`，而不是先降级回裸 `SkillExecutionPlan`
+  - `tool_plan` 已升级为 internal-only 的 runtime executor，并在 sandbox preview 与 autonomy runtime 上复用同一套模板变量校验、payload 解析与 fail-closed 约束
+  - `review_scheduling / assessment_generation / replan(partial)` 已不再只校验 tool name，而是可真正按 governed `tool_plan` 执行 internal tool
+  - 当前已支持最多 2 步的 linear chain、显式 `step_id`、以及 prior-step output 引用
+  - 已开放的 multi-step 序列仍是保守白名单，当前主要覆盖 `partial_replan -> review_scheduling`
+  - `replan` 主 surface 已补 sequence 级 usage metadata、step 级 audit 与 sandbox summary，可把 `tool_plan_sequence / tool_plan_step_count / tool_plan_steps / created_review_task_ids` 写回治理证据
+  - prior-step output 引用已收紧到工具输出白名单，当前主要开放 `partial_replan.created_task_ids[0]`
+  - `chat / hint / quiz / plan_generation` 的 rollout observation 现已在成功路径接通：`chat / hint` 使用 assistant message id，`quiz` 使用 quiz id，`plan_generation` 使用成功完成的 workflow run id；`plan_generation` 的 observation 调度点在 plan/task 持久化成功之后，而不是 planner draft 构建阶段
+  - task/autonomy usage attribution 已在 service 内统一收口；`review_scheduling / assessment_generation / replan` 不再各自维护分散的 usage payload 拼装逻辑
+  - allowlisted autonomy workflow surface 的 rollout observation 已对 `review_scheduling / assessment_generation / replan` 接通成功路径，并对有真实 workflow run anchor 的 runtime failure 接通失败路径；当前统一以 workflow run 作为 `source_ref`，而 `skipped` 与 validation / precondition failure 仍保持 usage-only
+  - rollout auto-governance 已支持环境变量配置开关与 promote / rollback surface allowlist，并已补 Prometheus / Grafana / alert 基线
+  - branching / looping / DAG / 通用 interpreter 仍未实现
 
 仍未完成的反思增强项包括：
 
@@ -565,7 +600,7 @@
 - bundle / global rollout 治理
 - auto promote / auto rollback
 - 更重的周期化 goal reflection 调度形态
-- 与 skill proposal / sandbox 的闭环
+- 与 skill 的长期治理闭环：dynamic runtime registry V2 / richer multi-step tool-plan orchestration
 
 这些增强能力仍然不应在当前阶段一次性铺开。
 
