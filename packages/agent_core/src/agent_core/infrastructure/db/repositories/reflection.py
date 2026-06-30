@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import Integer, and_, cast, desc, distinct, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from agent_core.domain.entities.audit import AuditEvent
 from agent_core.domain.entities.autonomy import (
@@ -53,6 +54,7 @@ from agent_core.domain.entities.reflection_v2 import (
 from agent_core.domain.entities.session import LearningSession
 from agent_core.domain.entities.skill import SkillArtifact, SkillCuratorRecommendation, SkillUsageEvent
 from agent_core.domain.errors import NotFoundError, ValidationError
+from agent_core.domain.value_objects.pagination import bounded_limit
 from agent_core.domain.schemas.quiz import QuizQuestion
 from agent_core.infrastructure.db.models import (
     AuditEventModel,
@@ -700,6 +702,15 @@ class ReflectionProposalRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    _AUTO_STAGE_COMPLETED_ARTIFACT_STATUSES = (
+        "staged",
+        "active",
+        "stable",
+        "deprecated",
+        "archived",
+        "suppressed",
+    )
+
     async def create(self, entity: ReflectionProposal) -> None:
         self._session.add(ReflectionProposalModel(**entity.__dict__))
         await self._session.flush()
@@ -744,6 +755,99 @@ class ReflectionProposalRepository:
             desc(ReflectionProposalModel.created_at),
             desc(ReflectionProposalModel.id),
         ).limit(limit).offset(offset)
+        result = await self._session.execute(query)
+        return [self._to_entity(model) for model in result.scalars().all()]
+
+    async def list_pending_skill_patch_realizations(self, *, limit: int = 20) -> list[ReflectionProposal]:
+        """List approved patch requests that have not produced a governed package yet.
+
+        Args:
+            limit: Maximum number of proposals to return.
+
+        Returns:
+            A bounded list of patch-request proposals ready for realization.
+        """
+        source = ReflectionProposalModel
+        derived = aliased(ReflectionProposalModel)
+        query = (
+            select(source)
+            .where(
+                source.proposal_type == "skill_patch_request",
+                source.status == "approved",
+                source.evaluation_status == "effective",
+                ~select(derived.id)
+                .where(
+                    derived.proposal_type == "skill_package",
+                    derived.evidence_snapshot["source_skill_patch_request_id"].as_string() == source.id,
+                )
+                .exists(),
+            )
+            .order_by(
+                desc(source.priority_score),
+                desc(source.created_at),
+                desc(source.id),
+            )
+            .limit(bounded_limit(limit))
+        )
+        result = await self._session.execute(query)
+        return [self._to_entity(model) for model in result.scalars().all()]
+
+    async def list_pending_skill_package_sandbox(self, *, limit: int = 20) -> list[ReflectionProposal]:
+        """List proposed skill-package proposals awaiting sandbox admission review.
+
+        Args:
+            limit: Maximum number of proposals to return.
+
+        Returns:
+            A bounded list of proposed skill-package proposals.
+        """
+        query = (
+            select(ReflectionProposalModel)
+            .where(
+                ReflectionProposalModel.proposal_type == "skill_package",
+                ReflectionProposalModel.status == "proposed",
+            )
+            .order_by(
+                desc(ReflectionProposalModel.priority_score),
+                desc(ReflectionProposalModel.created_at),
+                desc(ReflectionProposalModel.id),
+            )
+            .limit(bounded_limit(limit))
+        )
+        result = await self._session.execute(query)
+        return [self._to_entity(model) for model in result.scalars().all()]
+
+    async def list_pending_skill_package_auto_stage(self, *, limit: int = 20) -> list[ReflectionProposal]:
+        """List skill-package proposals awaiting bounded auto-staging review.
+
+        Args:
+            limit: Maximum number of proposals to return.
+
+        Returns:
+            A bounded list of sandbox-completed or approved proposals that do not
+            already own a staged-or-beyond artifact.
+        """
+        proposal = ReflectionProposalModel
+        artifact = aliased(SkillArtifactModel)
+        query = (
+            select(proposal)
+            .where(
+                proposal.proposal_type == "skill_package",
+                proposal.status.in_(("sandbox_completed", "approved")),
+                ~select(artifact.id)
+                .where(
+                    artifact.source_proposal_id == proposal.id,
+                    artifact.status.in_(self._AUTO_STAGE_COMPLETED_ARTIFACT_STATUSES),
+                )
+                .exists(),
+            )
+            .order_by(
+                desc(proposal.priority_score),
+                desc(proposal.updated_at),
+                desc(proposal.id),
+            )
+            .limit(bounded_limit(limit))
+        )
         result = await self._session.execute(query)
         return [self._to_entity(model) for model in result.scalars().all()]
 

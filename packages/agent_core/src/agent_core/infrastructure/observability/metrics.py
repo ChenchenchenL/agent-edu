@@ -132,6 +132,11 @@ MEMORY_QUALITY_TIER_TOTAL = Counter(
     "Total number of long-term memory quality assessments by tier.",
     ["memory_type", "quality_tier", "promotion_readiness"],
 )
+MEMORY_PROMOTION_ELIGIBILITY_TOTAL = Counter(
+    "agent_edu_memory_promotion_eligibility_total",
+    "Total number of long-term memory promotion eligibility evaluations.",
+    ["status", "memory_type"],
+)
 REFLECTION_VERDICTS_TOTAL = Counter(
     "agent_edu_reflection_verdict_total",
     "Total number of reflection verdicts generated.",
@@ -177,6 +182,16 @@ SKILL_ROLLOUT_AUTO_DECISIONS_TOTAL = Counter(
     "agent_edu_skill_rollout_auto_decisions_total",
     "Total number of skill rollout auto-governance lifecycle events.",
     ["event", "decision", "surface", "reason_code"],
+)
+SKILL_REPLACEMENT_AUTO_EXECUTION_TOTAL = Counter(
+    "agent_edu_skill_replacement_auto_execution_total",
+    "Total number of skill replacement auto-execution lifecycle events.",
+    ["event", "action", "surface", "reason_code"],
+)
+REFLECTION_SKILL_EVOLUTION_TOTAL = Counter(
+    "agent_edu_reflection_skill_evolution_total",
+    "Total number of reflection skill evolution curator lifecycle events.",
+    ["event", "reason_code"],
 )
 SKILL_ARTIFACTS_GAUGE = Gauge(
     "agent_edu_skill_artifacts",
@@ -318,11 +333,19 @@ def observe_memory_reflection_bridge(*, memory_type: str, evaluation_status: str
     ).inc()
 
 
-def observe_memory_retrieval(*, memory_type: str, result_count: int, candidate_count: int) -> None:
+def observe_memory_retrieval(
+    *,
+    memory_type: str,
+    result_count: int,
+    candidate_count: int,
+    eligible_candidate_count: int = 0,
+) -> None:
     if result_count > 0:
         MEMORY_RETRIEVAL_RESULTS_TOTAL.labels(memory_type=memory_type).inc(result_count)
     if candidate_count > 0:
         MEMORY_RETRIEVAL_CANDIDATES_TOTAL.labels(memory_type=memory_type).inc(candidate_count)
+    if eligible_candidate_count > 0:
+        MEMORY_RETRIEVAL_CANDIDATES_TOTAL.labels(memory_type=f"{memory_type}_eligible").inc(eligible_candidate_count)
 
 
 def observe_memory_quality_assessment(*, memory_type: str, quality_tier: str, promotion_readiness: str) -> None:
@@ -330,6 +353,13 @@ def observe_memory_quality_assessment(*, memory_type: str, quality_tier: str, pr
         memory_type=memory_type,
         quality_tier=quality_tier,
         promotion_readiness=promotion_readiness,
+    ).inc()
+
+
+def observe_memory_promotion_eligibility(*, memory_type: str, status: str) -> None:
+    MEMORY_PROMOTION_ELIGIBILITY_TOTAL.labels(
+        status=status,
+        memory_type=memory_type,
     ).inc()
 
 
@@ -388,6 +418,28 @@ def observe_skill_rollout_auto_decision(
         event=event,
         decision=decision,
         surface=surface,
+        reason_code=reason_code,
+    ).inc()
+
+
+def observe_skill_replacement_auto_execution(
+    *,
+    event: str,
+    action: str,
+    surface: str,
+    reason_code: str,
+) -> None:
+    SKILL_REPLACEMENT_AUTO_EXECUTION_TOTAL.labels(
+        event=event,
+        action=action,
+        surface=surface,
+        reason_code=reason_code,
+    ).inc()
+
+
+def observe_reflection_skill_evolution(*, event: str, reason_code: str) -> None:
+    REFLECTION_SKILL_EVOLUTION_TOTAL.labels(
+        event=event,
         reason_code=reason_code,
     ).inc()
 

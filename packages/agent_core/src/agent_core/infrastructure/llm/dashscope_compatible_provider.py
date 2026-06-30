@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from time import perf_counter
+
+from agent_core.infrastructure.llm.circuit_breaker import CircuitBreaker
 from typing import Any
 
 import httpx
@@ -113,6 +115,8 @@ class DashScopeCompatibleLLMProvider:
         max_retries: int,
         temperature: float,
         max_output_tokens: int,
+        llm_call_guard: object | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
@@ -124,6 +128,8 @@ class DashScopeCompatibleLLMProvider:
         self._max_retries = max_retries
         self._temperature = temperature
         self._max_output_tokens = max_output_tokens
+        self._llm_call_guard = llm_call_guard
+        self._circuit_breaker = circuit_breaker
         self.model_name = tutor_model
 
     async def generate_tutor_reply(
@@ -448,6 +454,10 @@ class DashScopeCompatibleLLMProvider:
         max_output_tokens: int,
         response_format: dict[str, Any] | None = None,
     ) -> tuple[str, int, int]:
+        if self._llm_call_guard is not None:
+            self._llm_call_guard.check()
+        if self._circuit_breaker is not None:
+            self._circuit_breaker.allow_call()
         payload: dict[str, Any] = {
             "model": model or self._default_model,
             "messages": [message.model_dump() for message in messages],
@@ -484,6 +494,8 @@ class DashScopeCompatibleLLMProvider:
                 if content is None or not content.strip():
                     raise ProviderError("LLM provider returned an empty response.")
                 latency_ms = int((perf_counter() - started_at) * 1000)
+                if self._circuit_breaker is not None:
+                    self._circuit_breaker.record_success()
                 return content.strip(), latency_ms, attempt
             except httpx.HTTPStatusError as exc:
                 last_error = ProviderError(
@@ -496,6 +508,8 @@ class DashScopeCompatibleLLMProvider:
                 if attempt >= self._max_retries:
                     break
 
+        if self._circuit_breaker is not None:
+            self._circuit_breaker.record_failure()
         if isinstance(last_error, ProviderError):
             raise last_error
         raise ProviderError("LLM provider request failed.") from last_error

@@ -35,6 +35,7 @@
 - `LearnerGoal -> StudyPlan -> DailyTask -> WorkflowRun` 的最小闭环已经落地
 - Phase 2.1 的最小自治层和 worker baseline 已落地
 - Reflection System v1 已落地，v2 增强版已部分落地
+- `knowledge_governance` 已可基于 `promotion_eligibility` 对 `knowledge` candidate 执行物理晋升 / 压制，并同步审计、embedding 和治理决策记录
 - 架构重构已完成 `repositories.py` 拆分 (Task #7) 与领域实体文件拆分 (Task #9)。
 - TaskRuntimeSkillService 已完成拆解与清理 (Task #15 完成)：runtime-plan resolution、tool-plan execution、execution context 构建、runtime skill resolution、rollout observation 调度、overlay 查询、skill binding 查询与 review interval 解析均已独立实现；未使用的 `core` 注入已移除、容器接线已清理，且注释和文件头描述已同步更新。
 - 这轮已进一步补齐：
@@ -55,6 +56,7 @@
 - `patch_needed` recommendation accept 已接入 `skill_patch_request` proposal 创建路径
 - approved / effective `skill_patch_request` 已可 realization 为新的 replacement `skill_package` proposal
 - `merge_candidate` recommendation accept 已可创建 merge-sourced replacement `skill_package` proposal
+- `reflection_skill_evolution_curator` 已落地后台 worker 治理链路：可自动变现 approved / effective `skill_patch_request`、自动将低/中风险 `skill_package` proposal 入沙箱、自动拒绝失败/负分/证据不足候选，并在受信 replacement 来源、阈值达标且未超 24h 限额时自动 staging
 - artifact overlap / duplicate detection 已接入 `SkillCuratorJob`，可生成 `merge_candidate / none` recommendation，且不直接修改 artifact
 - curator governance evidence v1 已接入 memory conflict summary、reflection outcome evaluation 和 resolver health trend，可生成或增强 `flag_for_review / none` recommendation，且不直接修改 artifact
 - surface / topic coverage regression 已接入 `SkillCuratorJob`，可基于声明外 topic demand 与 governed binding gap 生成 `patch_needed / none` recommendation，且不直接修改 artifact
@@ -72,7 +74,7 @@
 - rollout auto-governance V1 已落地独立 decision job，并对 allowlisted workflow surfaces 自动执行 rollout `promote / rollback`
 - 历史 CLI/TUI 资产（dual-mode client、workspace summary API、TUI baseline）已落地并保留为参考实现
 - 真实 LLM / embedding 的接入已经不是“配置层预留”，而是“代码层可执行”
-- 但长期记忆治理仍属于“最小完整落地”，第二阶段定时调度与更强自治仍未完成；skill evolution 也仍是“最小治理闭环部分落地”，`SkillCuratorRecommendation` 与周期性 `SkillCuratorJob` MVP 已落地，`archive_candidate` accept 已接入 archive lifecycle，`patch_needed` accept 已能创建 reference-only `skill_patch_request` proposal，approved / effective `skill_patch_request` 已能 realization 为新的 replacement `skill_package` proposal，artifact overlap / duplicate detection 已能生成 `merge_candidate` 输入，`merge_candidate` accept 已能创建 merge-sourced replacement `skill_package` proposal，curator governance evidence v1 已能消费 memory conflict summary / reflection outcome evaluation / resolver health trend，surface / topic coverage regression 已能基于声明外 topic demand 与 governed binding gap 生成 `patch_needed` 输入，skill observability 已有 Prometheus / Grafana / alert 基线，approved / effective replacement proposal 已能 operator staging 为 `staged` replacement artifact，且 staged governed replacement 已补齐 readiness API、strict source-anchor gate、curator ready recommendation 与 activate / replace 证据硬化；dynamic runtime registry V1 已扩到 `chat / hint / quiz / plan_generation / review_scheduling / assessment_generation / replan` 的 execution-plan consumption，tool-plan orchestration V2/V3 已补 internal-only、sandbox/runtime 同构的受控执行器，并支持最多 2 步的 linear chain 与 prior-step output 引用；rollout auto-governance V1 已补独立 decision job、配置化开关与 surface allowlist、Prometheus / Grafana / alert 基线，并默认只对 `review_scheduling / assessment_generation / replan` 自动执行 promote / rollback；但更高阶 orchestration、更多跨 surface 组合、更广覆盖的 auto-governance 和 staged replacement 自动执行仍未完成；长期记忆告警规则基线已落地，动态阈值、告警通知和生产回归还在继续增强
+- 但长期记忆治理仍属于“最小完整落地”，第二阶段定时调度与更强自治仍未完成；skill evolution 也仍是“最小治理闭环部分落地”，`SkillCuratorRecommendation` 与周期性 `SkillCuratorJob` MVP 已落地，`archive_candidate` accept 已接入 archive lifecycle，`patch_needed` accept 已能创建 reference-only `skill_patch_request` proposal，approved / effective `skill_patch_request` 已能 realization 为新的 replacement `skill_package` proposal，`reflection_skill_evolution_curator` 已能自动变现 patch request、自动入沙箱、自动 reject 无效候选，并在配置开启时对受信 replacement proposal 执行条件化 auto staging，artifact overlap / duplicate detection 已能生成 `merge_candidate` 输入，`merge_candidate` accept 已能创建 merge-sourced replacement `skill_package` proposal，curator governance evidence v1 已能消费 memory conflict summary / reflection outcome evaluation / resolver health trend，surface / topic coverage regression 已能基于声明外 topic demand 与 governed binding gap 生成 `patch_needed` 输入，skill observability 已有 Prometheus / Grafana / alert 基线，replacement proposal 已能通过 operator staging 或 curator guarded auto staging 生成 `staged` replacement artifact，且 staged governed replacement 已补齐 readiness API、strict source-anchor gate、curator ready recommendation 与 activate / replace 证据硬化；dynamic runtime registry V1 已扩到 `chat / hint / quiz / plan_generation / review_scheduling / assessment_generation / replan` 的 execution-plan consumption，tool-plan orchestration V2/V3 已补 internal-only、sandbox/runtime 同构的受控执行器，并支持最多 2 步的 linear chain 与 prior-step output 引用；rollout auto-governance V1 已补独立 decision job、配置化开关与 surface allowlist、Prometheus / Grafana / alert 基线，并默认只对 `review_scheduling / assessment_generation / replan` 自动执行 promote / rollback；但更高阶 orchestration、更多跨 surface 组合、更广覆盖的 auto-governance，以及 staged replacement 的 auto activate / replace 仍未完成；长期记忆告警规则基线已落地，动态阈值、告警通知和生产回归还在继续增强
 
 当前代码状态更接近：
 
@@ -326,6 +328,11 @@
   - knowledge 按 `profile_id + goal_id/null + knowledge_key + semantic_category`
   - behavior 按 `profile_id + goal_id/null + behavior_key + behavior_category`
   - `candidate / active / stable` 会刷新证据与评分，`suppressed` 不会被自动恢复
+- 已补 `knowledge_governance` 物理流转：
+  - `eligible -> active`
+  - `conflict_blocked -> suppressed`
+  - `insufficient_evidence / below_score -> candidate`
+  - 状态变更会同步写入 `promotion_state_changed_at` / `promotion_rationale`，并更新 embedding 与治理审计
 - provenance 已明确区分：
   - `SessionMessage.id -> MemoryEvent.source_message_id`
   - `MemoryEvent.id -> long-term memory source_event_ids / provenance_source_id`
@@ -366,7 +373,7 @@
 
 当前限制：
 
-- 自动沉淀只创建或刷新 `candidate`，不会直接晋升为 `active / stable`
+- 自动沉淀只创建或刷新 `candidate`；`knowledge_governance` 会在独立治理作业中物理应用已评估的知识记忆资格结果
 - 证据提取仍以 memory event / task attempt / topic mastery / reflection outcome 的最小规则为主
 - 动态阈值、精细化 topic 对齐、长期数据回归集仍需继续增强
 - 当前测试覆盖的是“治理主链路最小正确性”，还不是长期生产回归级别
@@ -596,7 +603,7 @@
 
 - 更细粒度的重要度与遗忘策略
 - 更系统化的人工审核与修正治理
-- 反思记忆与长期记忆的晋升闭环仍需继续增强，但 reflection outcome 已能桥接长期记忆 evidence / candidate
+- knowledge candidate 的 eligibility 驱动物理晋升 / 压制闭环已落地；后续仍需增强 stable 固化、衰减降级、behavior 记忆治理和 reflection outcome replay/eval
 - 更完整的 reflection outcome replay/eval 体系
 - 更完整的长期数据回归集：多轮学习、多 goal、多 topic、迁移升级
 - proposal rollout 的更细粒度观测与运营面板
@@ -729,7 +736,7 @@
   - payload 只引用 artifact、usage evidence、recommendation reason / metrics，不直接生成最终 artifact payload
   - 可以进入 sandbox / replay / evaluation / approval
   - 明确不可 rollout，也不能用于创建 skill candidate，避免绕过 `skill_package -> sandbox -> evaluation -> approval -> artifact lifecycle`
-- approved / effective `skill_patch_request` 已可通过 operator-protected realization API 生成新的 replacement `skill_package` proposal：
+- approved / effective `skill_patch_request` 已可通过 operator API 或 `reflection_skill_evolution_curator` 自动变现为新的 replacement `skill_package` proposal：
   - realization 要求 source artifact 存在且 name / scope / version anchor 匹配
   - 新 proposal 复制 source artifact 的 match_rules / runtime_directives / tool_plan / scoring_contract
   - evidence_snapshot 记录 source patch request、source artifact、recommendation、usage 和 evaluation provenance
@@ -781,7 +788,7 @@
 - operator-protected API 已覆盖 curator recommendation 查询与 accept / dismiss
 - `archive_candidate / archive_deprecated` 被 operator accept 后，会通过 lifecycle service 执行 `deprecated -> archived`，失败时 recommendation 保持 pending
 - `patch_needed / none` 被 operator accept 后，会通过 reflection proposal service 创建 `skill_patch_request` proposal；缺少 `learner_goal_id` / `reflection_record_id` anchor 或 proposal 创建失败时，recommendation 保持 pending
-- approved / effective `skill_patch_request` 被 operator realization 后，会创建 replacement `skill_package` proposal；该 proposal 仍需自己通过 sandbox / evaluation / approval，之后可由 operator-protected staging API 复用既有 candidate / stage lifecycle 生成 `staged` replacement artifact
+- approved / effective `skill_patch_request` 可被 operator realization 或 `reflection_skill_evolution_curator` 自动变现为 replacement `skill_package` proposal；该 proposal 仍需自己通过 sandbox / evaluation / approval，之后可由 operator-protected staging API 或 curator guarded auto staging 复用既有 candidate / stage lifecycle 生成 `staged` replacement artifact
 - `SkillCuratorJob` 已可扫描同 name/scope 或同 implementation binding 的 governed artifacts，比较 `match_rules.task_types/topic_keys` 交集，生成带 overlap evidence 的 `merge_candidate / none` recommendation；related artifact 允许 candidate / staged / active / stable / deprecated，拒绝 suppressed / archived / rejected
 - `SkillCuratorJob` 已可按 artifact topic / rollout goal 聚合 memory conflict summary、reflection outcome evaluation 和 resolver health trend，写入 `governance_evidence`，并在高严重冲突或反思 outcome 退化时生成 `governance_evidence_regression` review recommendation
 - `SkillCuratorJob` 已可按 artifact 声明 `topic_keys` 与实际 usage 的偏移检测 surface / topic coverage regression，并在声明外 topic demand 或 governed binding gap 持续出现时生成带 coverage evidence 的 `patch_needed / none` recommendation
@@ -797,7 +804,7 @@
 - runtime 已能在 `chat / hint / quiz / plan_generation / review_scheduling / assessment_generation / replan` 上消费 governed `SkillExecutionPlan`，并把 `implementation_binding / execution_kind / binding metadata` 写入 usage；但 active artifact 还没有成为完整动态技能注册源
 - `tool_plan` 已从最小 runtime compatibility gate 升级为 internal-only 的受控 runtime executor，并在 sandbox preview 与 autonomy runtime 上复用同一套 payload-template 解析与 fail-closed 约束；当前支持最多 2 步的 linear chain、显式 `step_id` 和 prior-step output 引用（如 `$steps.repair.created_task_ids[0]`），且已把 `partial_replan -> review_scheduling` 作为保守白名单序列落到 `replan` 主 surface；其 usage metadata、step 级 audit 和 sandbox summary 已能反映 sequence / step count / step summary，但通用多步 tool-plan orchestration interpreter 仍未实现
 - `SkillCuratorJob` 仍是 MVP：已消费 usage / rollout observation / rollout decision、artifact overlap / duplicate detection、memory conflict summary、reflection outcome evaluation、resolver health trend、surface / topic coverage regression 和 staged replacement readiness；生产级 dashboard / alert 基线已落地，但自动执行和更重的运维编排仍未完成
-- patch / merge 的长期治理闭环仍是保守人工执行形态；当前已完成 `patch_needed -> skill_patch_request -> replacement skill_package proposal -> staged replacement -> readiness -> operator activate/replace` 和 `artifact overlap -> merge_candidate -> merge-sourced replacement skill_package proposal -> staged replacement -> readiness -> operator activate/replace`，但没有自动 activate / replace
+- patch / merge 的长期治理闭环已进入“自动提案编排 + 人工激活替换”的保守形态；当前已完成 `patch_needed -> skill_patch_request -> replacement skill_package proposal -> sandbox/evaluation -> 条件化 auto-stage 或 operator stage -> readiness -> operator activate/replace` 和 `artifact overlap -> merge_candidate -> merge-sourced replacement skill_package proposal -> sandbox/evaluation -> 条件化 auto-stage 或 operator stage -> readiness -> operator activate/replace`，但没有自动 activate / replace
 - bundle / global rollout 治理尚未实现
 - auto promote / auto rollback 尚未实现
 - skill artifact 与 runtime behavior 的绑定仍偏保守，当前主要通过静态 implementation binding、runtime directives、goal binding 和 resolver gate 生效

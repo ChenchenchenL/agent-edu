@@ -103,6 +103,8 @@ class RetrievedKnowledgeMemory:
     stability_score: float = 0.0
     goal_relevance_score: float = 0.0
     status: str = "active"
+    governance_state: str = "active"
+    eligibility_score: float | None = None
     score: float = 0.0
     created_at: datetime = field(default_factory=_utcnow)
 
@@ -277,6 +279,85 @@ class MemoryAnnotation:
             annotation_code=annotation_code.strip(),
             note=note.strip(),
             created_by=created_by.strip(),
+            created_at=_utcnow(),
+        )
+
+
+
+
+MEMORY_PROMOTION_ELIGIBILITY_STATUSES = {
+    "eligible",
+    "insufficient_evidence",
+    "below_score",
+    "conflict_blocked",
+    "suppressed_blocked",
+    "stale_blocked",
+}
+
+
+@dataclass(frozen=True)
+class MemoryPromotionEligibilityRecord:
+    id: str
+    memory_id: str
+    learner_profile_id: str
+    learner_goal_id: str | None
+    status: str
+    score: float
+    independent_source_count: int
+    high_signal_source_count: int
+    evidence_span_hours: float
+    conflict_blocked: bool
+    blocked_conflict_set_id: str | None
+    blocked_memory_id: str | None
+    reason_codes: list[str]
+    metrics_snapshot: dict[str, float | int | str | bool | None]
+    evaluated_at: datetime
+    superseded_at: datetime | None
+    created_at: datetime
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        memory_id: str,
+        learner_profile_id: str,
+        learner_goal_id: str | None,
+        status: str,
+        score: float,
+        independent_source_count: int,
+        high_signal_source_count: int,
+        evidence_span_hours: float,
+        conflict_blocked: bool,
+        blocked_conflict_set_id: str | None,
+        blocked_memory_id: str | None,
+        reason_codes: list[str],
+        metrics_snapshot: dict[str, float | int | str | bool | None],
+        evaluated_at: datetime,
+    ) -> "MemoryPromotionEligibilityRecord":
+        if status not in MEMORY_PROMOTION_ELIGIBILITY_STATUSES:
+            raise ValidationError("Unsupported promotion eligibility status.")
+        _validate_score("score", score)
+        if independent_source_count < 0 or high_signal_source_count < 0:
+            raise ValidationError("Evidence counts must be non-negative.")
+        if evidence_span_hours < 0:
+            raise ValidationError("evidence_span_hours must be non-negative.")
+        return cls(
+            id=str(uuid4()),
+            memory_id=memory_id,
+            learner_profile_id=learner_profile_id,
+            learner_goal_id=learner_goal_id,
+            status=status,
+            score=score,
+            independent_source_count=independent_source_count,
+            high_signal_source_count=high_signal_source_count,
+            evidence_span_hours=evidence_span_hours,
+            conflict_blocked=conflict_blocked,
+            blocked_conflict_set_id=blocked_conflict_set_id,
+            blocked_memory_id=blocked_memory_id,
+            reason_codes=list(reason_codes),
+            metrics_snapshot=dict(metrics_snapshot),
+            evaluated_at=evaluated_at,
+            superseded_at=None,
             created_at=_utcnow(),
         )
 

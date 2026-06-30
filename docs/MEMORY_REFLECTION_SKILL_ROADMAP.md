@@ -51,6 +51,7 @@ runtime behavior
 - `archive_candidate / archive_deprecated` accept 已接入 lifecycle service，可完成 `deprecated -> archived`。
 - `patch_needed / none` accept 已接入 reflection proposal service，可创建 reference-only `skill_patch_request` proposal，并继续走 sandbox / evaluation / approval；它不会直接修改 artifact，也不能 rollout 或创建 skill candidate。
 - approved / effective `skill_patch_request` 已可通过 realization service / API 生成新的 replacement `skill_package` proposal；它复制 source artifact 可执行定义并保留 provenance，仍需继续走自己的 sandbox / evaluation / approval。
+- `reflection_skill_evolution_curator` v1 已落地：它可自动变现 approved / effective `skill_patch_request`、自动把低/中风险 replacement `skill_package` proposal 入 sandbox、自动 reject failed / ineffective / inconclusive / negative-score 候选，并在配置开启、来源受信、阈值达标且未超 24h 限流时执行 guarded auto staging。
 - artifact overlap / duplicate detection 已接入 `SkillCuratorJob`，可扫描同 name/scope 或同 implementation binding 的 governed artifacts，比较 `match_rules.task_types/topic_keys` 交集，并生成 `merge_candidate / none` recommendation；该步骤只产 recommendation，不修改 artifact。
 - `merge_candidate / none` accept 已接入 reflection proposal service，可创建 merge-sourced replacement `skill_package` proposal；它复用 source artifact 的可执行基线，只合并 list-valued `match_rules`，仍需继续走 sandbox / evaluation / approval。
 - approved / effective replacement `skill_package` proposal 已可通过 operator-protected staging API 复用 existing candidate / stage lifecycle，生成带 lineage / parent / supersedes 链接的 `staged` replacement artifact；该步骤不 activate，也不 replace source artifact。
@@ -64,7 +65,7 @@ runtime behavior
 仍缺的是“长期治理闭环”：
 
 - `SkillCuratorJob` 仍是保守 MVP，已接入 artifact overlap / duplicate detection、memory conflict summary、reflection outcome evaluation、resolver health trend、surface / topic coverage regression 和 staged replacement readiness；生产级 dashboard / alert 基线已落地，但自动执行与更重的运维编排仍未完成。
-- `patch_needed` 和 `merge_candidate` 已完成到 replacement `skill_package` proposal / operator staging 到 `staged` replacement artifact / readiness / curator ready recommendation 的保守 MVP；activate / replace 仍需人工执行，不会自动触发。
+- `patch_needed` 和 `merge_candidate` 已完成到 replacement `skill_package` proposal / operator staging 或 guarded auto staging 到 `staged` replacement artifact / readiness / curator ready recommendation 的保守 MVP；activate / replace 仍需人工执行，不会自动触发。
 - staged replacement readiness API 现会直接返回 `recommended_action`，并把 source anchor / rollout / usage / threshold 摘要作为统一 replacement readiness contract 暴露给 operator 与 curator recommendation。
 - staged replacement recommendation accept 现是 lifecycle-first：若 `activate / replace` 执行失败，会写 `skill.curator.recommendation.accept_failed` durable audit，且 recommendation 维持 `pending`。
 - dynamic runtime registry V1 已覆盖 `chat / hint / quiz / plan_generation / review_scheduling / assessment_generation / replan` 的 execution-plan consumption，tool-plan orchestration V2/V3 已补 internal executor 与保守 multi-step chain，但 active artifact 还不是完整动态 runtime registry。

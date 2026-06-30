@@ -4,8 +4,9 @@ import logging
 
 from fastapi import FastAPI
 
-from agent_core.api.dependencies import get_session_factory
+from agent_core.api.dependencies import get_alert_dispatcher, get_session_factory
 from agent_core.api.error_handlers import register_error_handlers
+from agent_core.api.rate_limit import RateLimitMiddleware
 from agent_core.api.routes.goals import router as goals_router
 from agent_core.api.routes.autonomy import router as autonomy_router
 from agent_core.api.routes.health import router as health_router
@@ -54,6 +55,13 @@ def create_app() -> FastAPI:
                 logger.exception("Failed to refresh skill observability metrics at startup.")
 
         app.router.add_event_handler("startup", _refresh_skill_metrics_on_startup)
+
+    if settings.rate_limit_enabled:
+        app.add_middleware(
+            RateLimitMiddleware,
+            per_minute=settings.rate_limit_per_minute,
+            alert_dispatcher=get_alert_dispatcher(),
+        )
 
     register_error_handlers(app)
     app.include_router(health_router)

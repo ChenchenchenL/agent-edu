@@ -180,6 +180,8 @@ class KnowledgeMemoryRetrievalItemResponse(BaseModel):
     stability_score: float
     goal_relevance_score: float
     status: str
+    governance_state: str
+    eligibility_score: float | None
     score: float
     created_at: datetime
 
@@ -212,6 +214,7 @@ class KnowledgeMemoryRetrievalResponse(BaseModel):
     model: str | None
     latency_ms: int
     candidate_count: int
+    eligible_candidate_count: int
 
     model_config = {"from_attributes": True}
 

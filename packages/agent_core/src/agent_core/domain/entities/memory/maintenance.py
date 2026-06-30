@@ -9,6 +9,7 @@ from agent_core.domain.errors import ValidationError
 
 MEMORY_MAINTENANCE_JOB_TYPES = {
     "knowledge_governance",
+    "knowledge_promotion_eligibility",
     "behavior_governance",
     "knowledge_compression",
     "behavior_compression",

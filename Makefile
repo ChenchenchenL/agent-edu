@@ -1,11 +1,11 @@
-VMWARE_NAT_PROXY ?= http://192.168.127.1:10808
+VMWARE_NAT_PROXY ?= http://192.168.29.1:10808
 DEFAULT_NO_PROXY ?= localhost,127.0.0.1,postgres,redis,api,prometheus,grafana
 
 export HTTP_PROXY ?= $(VMWARE_NAT_PROXY)
 export HTTPS_PROXY ?= $(VMWARE_NAT_PROXY)
 export NO_PROXY ?= $(DEFAULT_NO_PROXY)
 
-.PHONY: dev-up dev-down logs migrate test lint test-api docker-api-test real-provider-regression observability-up observability-down install-local
+.PHONY: dev-up dev-down logs migrate test lint test-api docker-api-test mvp-check real-provider-regression observability-up observability-down install-local
 
 dev-up:
 	docker compose up --build
@@ -24,6 +24,10 @@ test:
 
 test-api:
 	docker compose run --rm api pytest tests/test_api_integration.py
+
+mvp-check:
+	docker compose build api
+	docker compose run --rm api pytest tests/test_mvp_acceptance.py -v
 
 docker-api-test:
 	docker compose up -d --build postgres redis api

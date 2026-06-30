@@ -213,6 +213,7 @@
 - 结构化抽取结果必须先经过 schema 验证和归一化，且只允许落为 `candidate`
 - `memory_conflict_sets` / `memory_conflict_members` 已提供可解释冲突输出，成员详情通过 `memory_id` 实时关联，不再存快照
 - `memory_maintenance_jobs` 已拆分为独立维护队列，支持 bounded batch、lease 恢复、retry/backoff 与 durable audit
+- `knowledge_governance` 已可基于 `promotion_eligibility` 将知识候选物理晋升为 `active`，或在 `conflict_blocked` 时压制为 `suppressed`
 - 长期记忆观测已补 candidate backlog、promotion rate、conflict rate、materialization failure rate、maintenance duration，并提供 Prometheus/Grafana/alert 基线
 
 用户价值：
@@ -497,6 +498,7 @@
 - 异步压缩与聚类
 - session memory 仍作为事件输入层
 - chat / task outcome / reflection outcome 到长期记忆 candidate 的自动沉淀
+- knowledge candidate 的 `promotion_eligibility -> knowledge_governance` 物理晋升 / 压制闭环
 - stable identity upsert / dedupe，避免重复长期记忆候选
 - provenance 链路区分 message、memory event、task attempt、reflection outcome 来源
 - topic 对齐增强与更细粒度 evidence extraction
@@ -566,12 +568,13 @@
   - `SkillCuratorJob` MVP 可由 worker tick 调用，基于 usage、rollout observation 和 rollout decision 保守生成 stabilize / review / rollback-review / archive-candidate recommendation
   - `patch_needed` recommendation accept 已能创建 reference-only `skill_patch_request` proposal，并继续走 sandbox / evaluation / approval，不直接修改 artifact
   - approved / effective `skill_patch_request` 已能 realization 为新的 replacement `skill_package` proposal，复制 source artifact 可执行定义并保留 provenance，且不直接修改 artifact / 创建 candidate
+  - `reflection_skill_evolution_curator` 已能作为独立 worker 治理服务运行：自动变现 approved / effective patch request、自动把低/中风险 replacement `skill_package` proposal 入 sandbox、自动拒绝 failed / ineffective / inconclusive / negative-score 候选，并在受信来源、阈值达标且未超 24h 限流时执行 guarded auto staging
   - `merge_candidate` recommendation accept 已能创建 merge-sourced replacement `skill_package` proposal；payload 复用 source artifact 可执行基线，只合并 list-valued `match_rules`
   - `SkillCuratorJob` 已能扫描同 name/scope 或同 implementation binding 的 governed artifacts，基于 `match_rules.task_types/topic_keys` 交集生成 `merge_candidate / none` recommendation；related artifact 允许 candidate / staged / active / stable / deprecated，拒绝 suppressed / archived / rejected
   - `SkillCuratorJob` 已能接入 memory conflict summary、reflection outcome evaluation 和 resolver health trend 作为 `governance_evidence`，生成或增强 `flag_for_review / none` recommendation；该步骤只产 recommendation，不直接修改 artifact
   - `SkillCuratorJob` 已能接入 surface / topic coverage regression 输入，基于声明外 topic drift 与 governed binding gap 生成 `patch_needed / none` recommendation；该步骤只产 recommendation，不直接修改 artifact
   - Prometheus / Grafana / alert 已补 skill health 基线，覆盖 skill usage、resolver failure、artifact status、curator pending backlog、recommendation rate 与 curator job p95
-  - approved / effective replacement `skill_package` proposal 已能通过 operator-protected staging API 复用 candidate / stage lifecycle，生成带 lineage / parent / supersedes provenance 的 `staged` replacement artifact；该步骤不自动 activate / replace source artifact
+  - approved / effective replacement `skill_package` proposal 已能通过 operator-protected staging API 或 curator guarded auto staging 复用 candidate / stage lifecycle，生成带 lineage / parent / supersedes provenance 的 `staged` replacement artifact；该步骤不自动 activate / replace source artifact
   - staged governed replacement 已补 shared readiness evaluation、operator read API、strict source-anchor gate 和 `activate_candidate / replace_candidate` curator recommendation；`replacement-readiness` read API 现会直接返回 `recommended_action`
   - staged governed replacement 的 `activate / replace` 已收敛到同一条 lifecycle-first 人工执行链：operator accept recommendation 或 direct lifecycle 调用都会先重新做 readiness / source-anchor 校验，再执行 artifact lifecycle，不会跳过 evidence gate
   - staged replacement lifecycle 执行失败时会写 `skill.curator.recommendation.accept_failed` durable audit，且 recommendation 保持 `pending`
@@ -631,12 +634,13 @@
 3. 在已有 Prometheus/Grafana/alert 基线基础上补告警通知、成本治理、限流与熔断
 4. 给第二阶段 Planner / task execution / review scheduling 增加更完整的 API 与回归测试
 5. 补齐定时调度与每日任务自动推进策略，并评估是否需要引入更重的外部编排引擎
-6. 在保持当前结构稳定的前提下，继续增强长期记忆治理与晋升策略
+6. 在保持当前结构稳定的前提下，继续增强长期记忆治理、稳定化与衰减策略
 
 当前长期记忆组织的前提已经变化：
 
 - 双通道长期记忆 v1 已落地
-- 目前重点转向更细粒度的重要度、衰减、晋升与治理策略，以及长期回归数据集、运营观测和告警通知
+- `knowledge_governance` 已可根据 `promotion_eligibility` 对知识候选执行物理晋升 / 压制
+- 目前重点转向更细粒度的重要度、稳定化、衰减策略，以及长期回归数据集、运营观测和告警通知
 
 ---
 

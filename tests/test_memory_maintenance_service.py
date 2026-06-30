@@ -106,6 +106,15 @@ class StubMemoryService:
     ) -> MemoryMaintenanceBatchResult:
         return await self._run("knowledge_governance", cursor, batch_size)
 
+    async def run_knowledge_promotion_eligibility_batch(
+        self,
+        *,
+        learner_profile_id: str,
+        cursor: str | None,
+        batch_size: int,
+    ) -> MemoryMaintenanceBatchResult:
+        return await self._run("knowledge_promotion_eligibility", cursor, batch_size)
+
     async def run_behavior_governance_batch(
         self,
         *,
@@ -205,14 +214,14 @@ async def test_memory_maintenance_seeding_is_idempotent_per_profile_type_and_win
     first = await service.seed_due_jobs(due_at=due_at)
     second = await service.seed_due_jobs(due_at=due_at)
 
-    assert first.created_count == 5
+    assert first.created_count == 6
     assert first.existing_count == 0
     assert second.created_count == 0
-    assert second.existing_count == 5
-    assert repository.create_calls == 5
-    assert len(repository.jobs) == 5
+    assert second.existing_count == 6
+    assert repository.create_calls == 6
+    assert len(repository.jobs) == 6
     assert [job.job_type for job in repository.jobs.values()] == list(MEMORY_MAINTENANCE_JOB_ORDER)
-    assert len([event for event in audit_repository.events if event.event_type == "memory_maintenance.job.created"]) == 5
+    assert len([event for event in audit_repository.events if event.event_type == "memory_maintenance.job.created"]) == 6
 
 
 @pytest.mark.asyncio
@@ -221,18 +230,18 @@ async def test_memory_maintenance_runner_dispatches_each_job_type_and_completes(
 
     processed = await service.run_due_jobs(lease_owner="test-worker")
 
-    assert processed == 5
+    assert processed == 6
     assert [call[0] for call in memory_service.calls] == list(MEMORY_MAINTENANCE_JOB_ORDER)
     assert all(call[2] == 7 for call in memory_service.calls)
     assert {job.status for job in repository.jobs.values()} == {"completed"}
-    assert len([event for event in audit_repository.events if event.event_type == "memory_maintenance.job.completed"]) == 5
+    assert len([event for event in audit_repository.events if event.event_type == "memory_maintenance.job.completed"]) == 6
     assert db_session.commit_count >= 5
 
 
 @pytest.mark.asyncio
 async def test_memory_maintenance_runner_preserves_cursor_for_incomplete_batch():
     memory_service = StubMemoryService()
-    memory_service.progress_job_types = {"knowledge_governance"}
+    memory_service.progress_job_types = {"knowledge_promotion_eligibility"}
     service, repository, _, audit_repository, _ = _service(
         memory_service=memory_service,
         jobs_per_tick=1,
@@ -242,9 +251,9 @@ async def test_memory_maintenance_runner_preserves_cursor_for_incomplete_batch()
     processed = await service.run_due_jobs(lease_owner="test-worker")
 
     assert processed == 1
-    progressed = next(job for job in repository.jobs.values() if job.job_type == "knowledge_governance")
+    progressed = next(job for job in repository.jobs.values() if job.job_type == "knowledge_promotion_eligibility")
     assert progressed.status == "scheduled"
-    assert progressed.cursor == "knowledge_governance-cursor"
+    assert progressed.cursor == "knowledge_promotion_eligibility-cursor"
     assert progressed.attempt_count == 0
     assert any(event.event_type == "memory_maintenance.job.progressed" for event in audit_repository.events)
 
@@ -252,7 +261,7 @@ async def test_memory_maintenance_runner_preserves_cursor_for_incomplete_batch()
 @pytest.mark.asyncio
 async def test_memory_maintenance_runner_retries_then_fails_after_max_attempts():
     memory_service = StubMemoryService()
-    memory_service.fail_job_types = {"knowledge_governance"}
+    memory_service.fail_job_types = {"knowledge_promotion_eligibility"}
     service, repository, _, audit_repository, _ = _service(
         memory_service=memory_service,
         jobs_per_tick=1,
@@ -260,7 +269,7 @@ async def test_memory_maintenance_runner_retries_then_fails_after_max_attempts()
     )
 
     first_processed = await service.run_due_jobs(lease_owner="test-worker")
-    retried = next(job for job in repository.jobs.values() if job.job_type == "knowledge_governance")
+    retried = next(job for job in repository.jobs.values() if job.job_type == "knowledge_promotion_eligibility")
     for job_id, job in list(repository.jobs.items()):
         repository.jobs[job_id] = replace(
             job,
@@ -280,7 +289,7 @@ async def test_memory_maintenance_runner_retries_then_fails_after_max_attempts()
     )
     failed_event = next(event for event in audit_repository.events if event.event_type == "memory_maintenance.job.failed")
     assert retry_event.event_data["error_code"] == "RuntimeError"
-    assert "knowledge_governance failed" in retry_event.event_data["error_message"]
+    assert "knowledge_promotion_eligibility failed" in retry_event.event_data["error_message"]
     assert "RuntimeError" in retry_event.event_data["traceback"]
     assert failed_event.event_data["retryable"] is True
 
@@ -288,7 +297,7 @@ async def test_memory_maintenance_runner_retries_then_fails_after_max_attempts()
 @pytest.mark.asyncio
 async def test_memory_maintenance_runner_does_not_retry_validation_failures():
     memory_service = StubMemoryService()
-    memory_service.validation_fail_job_types = {"knowledge_governance"}
+    memory_service.validation_fail_job_types = {"knowledge_promotion_eligibility"}
     service, repository, _, audit_repository, _ = _service(
         memory_service=memory_service,
         jobs_per_tick=1,
@@ -296,7 +305,7 @@ async def test_memory_maintenance_runner_does_not_retry_validation_failures():
     )
 
     processed = await service.run_due_jobs(lease_owner="test-worker")
-    failed = next(job for job in repository.jobs.values() if job.job_type == "knowledge_governance")
+    failed = next(job for job in repository.jobs.values() if job.job_type == "knowledge_promotion_eligibility")
     failed_event = next(event for event in audit_repository.events if event.event_type == "memory_maintenance.job.failed")
 
     assert processed == 1
@@ -311,12 +320,12 @@ async def test_memory_maintenance_runner_does_not_retry_validation_failures():
 async def test_memory_maintenance_runner_skips_jobs_claimed_by_another_worker():
     service, repository, memory_service, _, db_session = _service(jobs_per_tick=1)
     seed = await service.seed_due_jobs(due_at=datetime.now(timezone.utc) - timedelta(seconds=1))
-    first_job = next(job for job in repository.jobs.values() if job.job_type == "knowledge_governance")
+    first_job = next(job for job in repository.jobs.values() if job.job_type == "knowledge_promotion_eligibility")
     repository.claim_failure_ids.add(first_job.id)
 
     processed = await service.run_due_jobs(lease_owner="test-worker", limit=1)
 
-    assert seed.created_count == 5
+    assert seed.created_count == 6
     assert processed == 0
     assert memory_service.calls == []
     assert db_session.rollback_count == 1

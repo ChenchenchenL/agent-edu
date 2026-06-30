@@ -15,6 +15,7 @@ from agent_core.infrastructure.db.repositories import MemoryMaintenanceJobReposi
 from agent_core.infrastructure.observability.metrics import observe_memory_maintenance_job
 
 MEMORY_MAINTENANCE_JOB_ORDER = (
+    "knowledge_promotion_eligibility",
     "knowledge_governance",
     "behavior_governance",
     "knowledge_compression",
@@ -278,6 +279,12 @@ class MemoryMaintenanceService:
     async def _process_job(self, job: MemoryMaintenanceJob) -> MemoryMaintenanceBatchResult:
         if job.job_type == "knowledge_governance":
             return await self._memory_service.run_knowledge_governance_batch(
+                learner_profile_id=job.learner_profile_id,
+                cursor=job.cursor,
+                batch_size=self._batch_size,
+            )
+        if job.job_type == "knowledge_promotion_eligibility":
+            return await self._memory_service.run_knowledge_promotion_eligibility_batch(
                 learner_profile_id=job.learner_profile_id,
                 cursor=job.cursor,
                 batch_size=self._batch_size,

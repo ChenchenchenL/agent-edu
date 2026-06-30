@@ -19,6 +19,13 @@ SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES: tuple[str, ...] = (
 )
 SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES_RAW = ",".join(SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES)
 SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES_ALLOWED = frozenset(SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES)
+SKILL_REPLACEMENT_AUTO_EXECUTION_SURFACES: tuple[str, ...] = (
+    "review_scheduling",
+    "assessment_generation",
+    "replan",
+)
+SKILL_REPLACEMENT_AUTO_EXECUTION_SURFACES_RAW = ",".join(SKILL_REPLACEMENT_AUTO_EXECUTION_SURFACES)
+SKILL_REPLACEMENT_AUTO_EXECUTION_SURFACES_ALLOWED = SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES_ALLOWED
 
 
 def _parse_csv_items(raw_value: str) -> list[str]:
@@ -186,6 +193,36 @@ class Settings(BaseSettings):
         ge=2,
         le=20,
     )
+    memory_promotion_eligibility_score_min: float = Field(
+        alias="AGENT_EDU_MEMORY_PROMOTION_ELIGIBILITY_SCORE_MIN",
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+    )
+    memory_promotion_eligibility_independent_source_min: int = Field(
+        alias="AGENT_EDU_MEMORY_PROMOTION_ELIGIBILITY_INDEPENDENT_SOURCE_MIN",
+        default=3,
+        ge=1,
+        le=20,
+    )
+    memory_promotion_eligibility_high_signal_min: int = Field(
+        alias="AGENT_EDU_MEMORY_PROMOTION_ELIGIBILITY_HIGH_SIGNAL_MIN",
+        default=1,
+        ge=1,
+        le=20,
+    )
+    memory_promotion_eligibility_span_hours_min: float = Field(
+        alias="AGENT_EDU_MEMORY_PROMOTION_ELIGIBILITY_SPAN_HOURS_MIN",
+        default=24.0,
+        ge=0.0,
+        le=168.0,
+    )
+    memory_promotion_eligibility_retrieval_weight: float = Field(
+        alias="AGENT_EDU_MEMORY_PROMOTION_ELIGIBILITY_RETRIEVAL_WEIGHT",
+        default=0.65,
+        ge=0.0,
+        le=1.0,
+    )
     memory_maintenance_jobs_per_tick: int = Field(
         alias="AGENT_EDU_MEMORY_MAINTENANCE_JOBS_PER_TICK",
         default=5,
@@ -333,6 +370,46 @@ class Settings(BaseSettings):
         ge=0.0,
         le=1.0,
     )
+    reflection_skill_evolution_curator_enabled: bool = Field(
+        alias="AGENT_EDU_REFLECTION_SKILL_EVOLUTION_CURATOR_ENABLED",
+        default=True,
+    )
+    reflection_skill_auto_staging_enabled: bool = Field(
+        alias="AGENT_EDU_REFLECTION_SKILL_AUTO_STAGING_ENABLED",
+        default=False,
+    )
+    reflection_skill_auto_stage_score_delta_min: float = Field(
+        alias="AGENT_EDU_REFLECTION_SKILL_AUTO_STAGE_SCORE_DELTA_MIN",
+        default=0.10,
+        ge=0.0,
+        le=1.0,
+    )
+    reflection_skill_auto_stage_24h_limit: int = Field(
+        alias="AGENT_EDU_REFLECTION_SKILL_AUTO_STAGE_24H_LIMIT",
+        default=3,
+        ge=1,
+        le=100,
+    )
+    skill_replacement_auto_execution_enabled: bool = Field(
+        alias="AGENT_EDU_SKILL_REPLACEMENT_AUTO_EXECUTION_ENABLED",
+        default=False,
+    )
+    skill_replacement_auto_execution_scan_limit: int = Field(
+        alias="AGENT_EDU_SKILL_REPLACEMENT_AUTO_EXECUTION_SCAN_LIMIT",
+        default=20,
+        ge=1,
+        le=1000,
+    )
+    skill_replacement_auto_execution_surfaces_raw: str = Field(
+        alias="AGENT_EDU_SKILL_REPLACEMENT_AUTO_EXECUTION_SURFACES",
+        default=SKILL_REPLACEMENT_AUTO_EXECUTION_SURFACES_RAW,
+    )
+    skill_replacement_auto_execution_24h_limit: int = Field(
+        alias="AGENT_EDU_SKILL_REPLACEMENT_AUTO_EXECUTION_24H_LIMIT",
+        default=3,
+        ge=1,
+        le=100,
+    )
     skill_rollout_auto_governance_enabled: bool = Field(
         alias="AGENT_EDU_SKILL_ROLLOUT_AUTO_GOVERNANCE_ENABLED",
         default=True,
@@ -353,12 +430,26 @@ class Settings(BaseSettings):
         alias="AGENT_EDU_SKILL_ROLLOUT_AUTO_ROLLBACK_SURFACES",
         default=SKILL_ROLLOUT_AUTO_GOVERNANCE_SURFACES_RAW,
     )
+    rate_limit_enabled: bool = Field(alias="AGENT_EDU_RATE_LIMIT_ENABLED", default=False)
+    rate_limit_per_minute: int = Field(alias="AGENT_EDU_RATE_LIMIT_PER_MINUTE", default=60, ge=1, le=10000)
+    llm_call_limit_enabled: bool = Field(alias="AGENT_EDU_LLM_CALL_LIMIT_ENABLED", default=False)
+    llm_call_limit_per_hour: int = Field(alias="AGENT_EDU_LLM_CALL_LIMIT_PER_HOUR", default=500, ge=1, le=100000)
+    llm_circuit_breaker_enabled: bool = Field(alias="AGENT_EDU_LLM_CIRCUIT_BREAKER_ENABLED", default=False)
+    llm_circuit_breaker_failure_threshold: int = Field(
+        alias="AGENT_EDU_LLM_CIRCUIT_BREAKER_FAILURE_THRESHOLD", default=5, ge=1, le=100,
+    )
+    llm_circuit_breaker_cooldown_seconds: float = Field(
+        alias="AGENT_EDU_LLM_CIRCUIT_BREAKER_COOLDOWN_SECONDS", default=60.0, gt=0, le=3600,
+    )
+    alert_log_path: str | None = Field(alias="AGENT_EDU_ALERT_LOG_PATH", default=None)
+    alert_webhook_url: str | None = Field(alias="AGENT_EDU_ALERT_WEBHOOK_URL", default=None)
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", env_ignore_empty=True)
 
     @field_validator(
         "skill_rollout_auto_promote_surfaces_raw",
         "skill_rollout_auto_rollback_surfaces_raw",
+        "skill_replacement_auto_execution_surfaces_raw",
     )
     @classmethod
     def validate_skill_rollout_auto_governance_surfaces(
@@ -408,6 +499,10 @@ class Settings(BaseSettings):
     @property
     def skill_rollout_auto_rollback_surfaces(self) -> list[str]:
         return _parse_csv_items(self.skill_rollout_auto_rollback_surfaces_raw)
+
+    @property
+    def skill_replacement_auto_execution_surfaces(self) -> list[str]:
+        return _parse_csv_items(self.skill_replacement_auto_execution_surfaces_raw)
 
     @property
     def embedding_api_key_value(self) -> str | None:

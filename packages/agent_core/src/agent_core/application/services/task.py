@@ -37,6 +37,8 @@ from agent_core.application.services.reflection_proposal_rollout_auto_governance
 )
 from agent_core.application.services.reflection_proposal_rollout_resolver import ReflectionProposalRolloutResolver
 from agent_core.application.services.reflection_proposal_rollouts import ReflectionProposalRolloutService
+from agent_core.application.services.reflection_skill_evolution_curator import ReflectionSkillEvolutionCuratorService
+from agent_core.application.services.skill_replacement_auto_execution import SkillReplacementAutoExecutionService
 from agent_core.application.services.reflection_proposal_sandbox import ReflectionProposalSandboxService
 from agent_core.application.services.session import SessionService
 from agent_core.application.services.skills import SkillUsageService
@@ -127,6 +129,8 @@ class AutonomousTaskService:
         reflection_proposal_sandbox_service: ReflectionProposalSandboxService | None = None,
         reflection_proposal_rollout_service: ReflectionProposalRolloutService | None = None,
         reflection_proposal_rollout_decision_orchestrator: ReflectionProposalRolloutDecisionOrchestrator | None = None,
+        reflection_skill_evolution_curator_service: ReflectionSkillEvolutionCuratorService | None = None,
+        skill_replacement_auto_execution_service: SkillReplacementAutoExecutionService | None = None,
         rollout_resolver: ReflectionProposalRolloutResolver | None = None,
         rollout_observation_scheduler: ReflectionProposalRolloutObservationScheduler | None = None,
         goal_skill_binding_resolver: GoalSkillBindingResolver | None = None,
@@ -164,6 +168,8 @@ class AutonomousTaskService:
         self._reflection_proposal_sandbox_service = reflection_proposal_sandbox_service
         self._reflection_proposal_rollout_service = reflection_proposal_rollout_service
         self._reflection_proposal_rollout_decision_orchestrator = reflection_proposal_rollout_decision_orchestrator
+        self._reflection_skill_evolution_curator_service = reflection_skill_evolution_curator_service
+        self._skill_replacement_auto_execution_service = skill_replacement_auto_execution_service
         self._rollout_resolver = rollout_resolver
         self._rollout_observation_scheduler = rollout_observation_scheduler
         self._goal_skill_binding_resolver = goal_skill_binding_resolver
@@ -206,12 +212,22 @@ class AutonomousTaskService:
             ReviewSchedulingJobHandler,
             AssessmentGenerationJobHandler,
             DailyTaskMaterializationJobHandler,
+            ReflectionSkillEvolutionCuratorJobHandler,
+            SkillReplacementAutoExecutionJobHandler,
         )
         autonomy_job_dispatcher = AutonomyJobDispatcherService()
         autonomy_job_dispatcher.register_handler("replan", ReplanJobHandler(db_session=db_session, core=self))
         autonomy_job_dispatcher.register_handler("review_scheduling", ReviewSchedulingJobHandler(db_session=db_session, core=self))
         autonomy_job_dispatcher.register_handler("assessment_generation", AssessmentGenerationJobHandler(db_session=db_session, core=self))
         autonomy_job_dispatcher.register_handler("daily_task_materialization", DailyTaskMaterializationJobHandler(db_session=db_session, core=self))
+        autonomy_job_dispatcher.register_handler(
+            "reflection_skill_evolution_curator",
+            ReflectionSkillEvolutionCuratorJobHandler(db_session=db_session, core=self),
+        )
+        autonomy_job_dispatcher.register_handler(
+            "skill_replacement_auto_execution",
+            SkillReplacementAutoExecutionJobHandler(db_session=db_session, core=self),
+        )
 
         self._autonomy_scheduling = TaskAutonomySchedulingService(
             db_session=db_session,
@@ -807,6 +823,10 @@ class AutonomousTaskService:
             workflow_run_id = await self._process_reflection_outcome_evaluation_job(job)
         elif job.job_type == "reflection_proposal_evaluation":
             workflow_run_id = await self._process_reflection_proposal_evaluation_job(job)
+        elif job.job_type == "reflection_skill_evolution_curator":
+            workflow_run_id = await self._process_reflection_skill_evolution_curator_job(job)
+        elif job.job_type == "skill_replacement_auto_execution":
+            workflow_run_id = await self._process_skill_replacement_auto_execution_job(job)
         elif job.job_type == "reflection_proposal_rollout_observation":
             workflow_run_id = await self._process_reflection_proposal_rollout_observation_job(job)
         elif job.job_type == "reflection_proposal_rollout_decision":
@@ -1022,6 +1042,45 @@ class AutonomousTaskService:
             raise ValidationError("Missing proposal_id for reflection proposal evaluation job.")
         sandbox_run = await self._reflection_proposal_sandbox_service.execute(proposal_id=proposal_id)
         return sandbox_run.id
+
+    async def _process_reflection_skill_evolution_curator_job(self, job: ScheduledAutonomyJob) -> str | None:
+        if self._reflection_skill_evolution_curator_service is None:
+            raise ValidationError("Reflection skill evolution curator service is not configured.")
+        raw_limit = job.payload.get("limit", 20)
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("Reflection skill evolution curator job limit must be an integer.") from exc
+        if limit < 1:
+            raise ValidationError("Reflection skill evolution curator job limit must be positive.")
+        await self._reflection_skill_evolution_curator_service.run_once(limit=limit, now=datetime.now(timezone.utc))
+        return None
+
+    async def _process_skill_replacement_auto_execution_job(self, job: ScheduledAutonomyJob) -> str | None:
+        if self._skill_replacement_auto_execution_service is None:
+            raise ValidationError("Skill replacement auto execution service is not configured.")
+        recommendation_id = str(job.payload.get("recommendation_id") or "").strip()
+        current_time = datetime.now(timezone.utc)
+        if recommendation_id:
+            await self._skill_replacement_auto_execution_service.execute_recommendation(
+                recommendation_id=recommendation_id,
+                now=current_time,
+                autonomy_job_id=job.id,
+                source_job_id=str(job.payload.get("source_job_id") or "").strip() or None,
+            )
+            return None
+        raw_limit = job.payload.get("limit")
+        if raw_limit is None:
+            limit = self._skill_replacement_auto_execution_service.default_scan_limit
+        else:
+            try:
+                limit = int(raw_limit)
+            except (TypeError, ValueError) as exc:
+                raise ValidationError("Skill replacement auto execution job limit must be an integer.") from exc
+        if limit < 1:
+            raise ValidationError("Skill replacement auto execution job limit must be positive.")
+        await self._skill_replacement_auto_execution_service.run_once(limit=limit, now=current_time)
+        return None
 
     async def _process_reflection_proposal_rollout_observation_job(self, job: ScheduledAutonomyJob) -> str | None:
         if self._reflection_proposal_rollout_service is None:

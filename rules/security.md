@@ -128,7 +128,10 @@ governance evidence is missing or invalid, do not continue into the risky path.
 - Do not persist unverified model inferences into long-term semantic or
   procedural memory as selectable truth.
 - Automatic materialization may create or refresh governed candidates, but it
-  must not auto-promote data into higher-trust governed states.
+  must not itself write higher-trust governed states.
+- Dedicated governed maintenance jobs may apply audited eligibility outcomes
+  to candidate knowledge memories and move them to `active` or `suppressed`
+  when policy checks pass.
 - Suppressed memories and suppressed artifacts must not be automatically
   restored.
 - Reflection must remain bounded and traceable.

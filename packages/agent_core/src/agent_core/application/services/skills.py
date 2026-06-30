@@ -2886,6 +2886,7 @@ class SkillCuratorJobService:
         goal_skill_binding_repository: GoalSkillBindingRepository,
         recommendation_repository: SkillCuratorRecommendationRepository,
         recommendation_service: SkillCuratorRecommendationService,
+        replacement_auto_execution_scheduler: SkillReplacementAutoExecutionScheduler | None = None,
         audit_service: AuditService,
         memory_conflict_repository: MemoryConflictRepository | None = None,
         reflection_outcome_evaluation_repository: ReflectionOutcomeEvaluationRepository | None = None,
@@ -2900,6 +2901,7 @@ class SkillCuratorJobService:
         self._goal_skill_binding_repository = goal_skill_binding_repository
         self._recommendation_repository = recommendation_repository
         self._recommendation_service = recommendation_service
+        self._replacement_auto_execution_scheduler = replacement_auto_execution_scheduler
         self._audit_service = audit_service
         self._memory_conflict_repository = memory_conflict_repository
         self._reflection_outcome_evaluation_repository = reflection_outcome_evaluation_repository
@@ -3067,6 +3069,7 @@ class SkillCuratorJobService:
         window_key: str,
     ) -> str | None:
         readiness = await self._replacement_readiness_service.evaluate_artifact(artifact)
+        learner_goal_id = await self._learner_goal_id_for_readiness(readiness)
         if readiness.replace_readiness.status == "ready":
             return await self._create_recommendation_once(
                 artifact=artifact,
@@ -3075,7 +3078,11 @@ class SkillCuratorJobService:
                 recommended_action="replace_selectable",
                 reason_code="replacement_evidence_ready",
                 reason_note="Governed staged replacement has enough rollout evidence to replace the anchored selectable.",
-                evidence_snapshot=self._replacement_readiness_evidence_snapshot(readiness, ready_action="replace_selectable"),
+                evidence_snapshot=self._replacement_readiness_evidence_snapshot(
+                    readiness,
+                    ready_action="replace_selectable",
+                    learner_goal_id=learner_goal_id,
+                ),
                 metrics_snapshot=self._replacement_readiness_metrics_snapshot(readiness),
                 source_discriminator=f"replacement:{artifact.id}:replace",
             )
@@ -3087,7 +3094,11 @@ class SkillCuratorJobService:
                 recommended_action="activate_staged",
                 reason_code="activation_evidence_ready",
                 reason_note="Governed staged replacement has enough rollout evidence to activate without a current selectable.",
-                evidence_snapshot=self._replacement_readiness_evidence_snapshot(readiness, ready_action="activate_staged"),
+                evidence_snapshot=self._replacement_readiness_evidence_snapshot(
+                    readiness,
+                    ready_action="activate_staged",
+                    learner_goal_id=learner_goal_id,
+                ),
                 metrics_snapshot=self._replacement_readiness_metrics_snapshot(readiness),
                 source_discriminator=f"replacement:{artifact.id}:activate",
             )
@@ -3586,11 +3597,24 @@ class SkillCuratorJobService:
             ],
         )
 
+    async def _learner_goal_id_for_readiness(self, readiness: SkillReplacementReadiness) -> str | None:
+        rollout_id = readiness.rollout_evidence.get("rollout_id")
+        if not isinstance(rollout_id, str) or not rollout_id.strip():
+            return None
+        get_rollout = getattr(self._rollout_repository, "get_by_id", None)
+        if get_rollout is None:
+            return None
+        rollout = await get_rollout(rollout_id)
+        if rollout is None:
+            return None
+        return rollout.learner_goal_id
+
     @staticmethod
     def _replacement_readiness_evidence_snapshot(
         readiness: SkillReplacementReadiness,
         *,
         ready_action: str,
+        learner_goal_id: str | None = None,
     ) -> dict[str, Any]:
         replacement_readiness = {
             "proposal_source": readiness.proposal_source,
@@ -3618,6 +3642,7 @@ class SkillCuratorJobService:
             "artifact_status": SkillArtifactStatus.STAGED.value,
             "source_proposal_id": readiness.proposal_id,
             "proposal_source": readiness.proposal_source,
+            "learner_goal_id": learner_goal_id,
             "ready_action": ready_action,
             "source_anchor": dict(readiness.source_anchor),
             "rollout_evidence": dict(readiness.rollout_evidence),
@@ -3982,7 +4007,27 @@ class SkillCuratorJobService:
             source_job_id=source_job_id,
             created_by="skill_curator_job",
         )
+        await self._maybe_queue_replacement_auto_execution(recommendation=recommendation, source_job_id=source_job_id)
         return "created" if recommendation.source_job_id == source_job_id else "existing"
+
+    async def _maybe_queue_replacement_auto_execution(
+        self,
+        *,
+        recommendation: SkillCuratorRecommendation,
+        source_job_id: str,
+    ) -> None:
+        if self._replacement_auto_execution_scheduler is None:
+            return
+        if recommendation.status != "pending":
+            return
+        if recommendation.recommendation_type not in {"activate_candidate", "replace_candidate"}:
+            return
+        if recommendation.recommended_action not in {"activate_staged", "replace_selectable"}:
+            return
+        await self._replacement_auto_execution_scheduler.queue_recommendation(
+            recommendation,
+            source_job_id=source_job_id,
+        )
 
     async def _merge_related_artifacts(self, source_artifact: SkillArtifact) -> list[SkillArtifact]:
         limit = max(self._config.merge_related_scan_limit, 1)

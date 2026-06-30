@@ -743,6 +743,17 @@ class FailingLongTermMemoryReplayExecutor:
         raise RuntimeError("replay failed")
 
 
+class StubReflectionSkillEvolutionCuratorService:
+    def __init__(self):
+        self.limits: list[int] = []
+        self.now_values: list[datetime | None] = []
+
+    async def run_once(self, *, limit: int = 20, now=None):
+        self.limits.append(limit)
+        self.now_values.append(now)
+        return None
+
+
 def _build_task_service(
     *,
     goal: LearnerGoal,
@@ -2366,6 +2377,47 @@ async def test_long_term_memory_replay_job_failure_exhausts_after_max_attempts()
         for item in audit_repository.events
     )
     assert any(item.event_type == "autonomy.job.failed" for item in audit_repository.events)
+
+
+async def test_run_due_autonomy_jobs_dispatches_reflection_skill_evolution_curator_job():
+    profile = LearnerProfile.build()
+    goal = LearnerGoal.build(
+        learner_profile_id=profile.id,
+        title="Master matrices",
+        subject="Linear Algebra",
+        target_outcome="Solve core matrix exercises independently",
+        baseline_note=None,
+        deadline_date=date.today() + timedelta(days=21),
+        weekly_study_minutes=180,
+    )
+    fake_session = FakeSession()
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(audit_repository)
+    task_service, _, _, _ = _build_task_service(
+        goal=goal,
+        profile=profile,
+        fake_session=fake_session,
+        audit_service=audit_service,
+        workflow_run_repository=StubWorkflowRunRepository(),
+    )
+    curator_service = StubReflectionSkillEvolutionCuratorService()
+    task_service._reflection_skill_evolution_curator_service = curator_service
+    job = ScheduledAutonomyJob.build(
+        learner_goal_id=goal.id,
+        job_type="reflection_skill_evolution_curator",
+        trigger_source="test",
+        due_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        idempotency_key="reflection-skill-curator:test",
+        payload={"limit": 7},
+    )
+    task_service._autonomy_job_repository.jobs[job.id] = job
+
+    processed = await task_service.run_due_autonomy_jobs(raise_on_error=True, lease_owner="test-worker")
+
+    assert processed == 1
+    assert curator_service.limits == [7]
+    assert curator_service.now_values[0] is not None
+    assert task_service._autonomy_job_repository.jobs[job.id].status == "completed"
 
 
 async def test_failed_task_creates_reflection_record_and_action():

@@ -17,6 +17,7 @@ from agent_core.domain.entities.memory import (
     MemoryEmbeddingRecord,
     MemoryEvidenceLink,
     MemoryGovernanceDecision,
+    MemoryPromotionEligibilityRecord,
 )
 from agent_core.domain.entities.planning import DailyTask
 from agent_core.domain.entities.reflection import ReflectionRecord
@@ -195,6 +196,25 @@ class StubKnowledgeMemoryRepository:
     async def list_profile_ids_with_active_memories(self):
         return await self.list_profile_ids_with_statuses({"active", "stable"})
 
+    async def get_active_or_stable_conflict(
+        self,
+        *,
+        learner_profile_id: str,
+        learner_goal_id: str | None,
+        knowledge_key: str,
+        exclude_memory_id: str,
+    ):
+        for item in self.memories:
+            if (
+                item.id != exclude_memory_id
+                and item.learner_profile_id == learner_profile_id
+                and item.learner_goal_id == learner_goal_id
+                and item.knowledge_key == knowledge_key
+                and item.status in {"active", "stable"}
+            ):
+                return item
+        return None
+
 
 class StubBehaviorMemoryRepository:
     def __init__(self):
@@ -323,6 +343,8 @@ class RacingBehaviorMemoryRepository(StubBehaviorMemoryRepository):
 class StubKnowledgeMemoryEmbeddingRepository:
     def __init__(self):
         self.records = []
+        self.list_by_profile_calls = 0
+        self.list_by_memory_ids_calls = []
 
     async def create(self, entity: KnowledgeMemoryEmbeddingRecord):
         self.records.append(entity)
@@ -344,12 +366,26 @@ class StubKnowledgeMemoryEmbeddingRepository:
         return [item for item in self.records if item.learner_profile_id == learner_profile_id and item.status in allowed][-limit:]
 
     async def list_by_profile(self, *, learner_profile_id):
+        self.list_by_profile_calls += 1
         return [item for item in self.records if item.learner_profile_id == learner_profile_id]
+
+    async def list_by_memory_ids(self, *, learner_profile_id, memory_ids: list[str], statuses: set[str] | None = None):
+        self.list_by_memory_ids_calls.append((learner_profile_id, list(memory_ids), statuses))
+        allowed = statuses or {"active", "stable"}
+        return [
+            item
+            for item in self.records
+            if item.learner_profile_id == learner_profile_id
+            and item.memory_id in memory_ids
+            and item.status in allowed
+        ]
 
 
 class StubBehaviorMemoryEmbeddingRepository:
     def __init__(self):
         self.records = []
+        self.list_by_profile_calls = 0
+        self.list_by_memory_ids_calls = []
 
     async def create(self, entity: BehaviorMemoryEmbeddingRecord):
         self.records.append(entity)
@@ -371,7 +407,19 @@ class StubBehaviorMemoryEmbeddingRepository:
         return [item for item in self.records if item.learner_profile_id == learner_profile_id and item.status in allowed][-limit:]
 
     async def list_by_profile(self, *, learner_profile_id):
+        self.list_by_profile_calls += 1
         return [item for item in self.records if item.learner_profile_id == learner_profile_id]
+
+    async def list_by_memory_ids(self, *, learner_profile_id, memory_ids: list[str], statuses: set[str] | None = None):
+        self.list_by_memory_ids_calls.append((learner_profile_id, list(memory_ids), statuses))
+        allowed = statuses or {"active", "stable"}
+        return [
+            item
+            for item in self.records
+            if item.learner_profile_id == learner_profile_id
+            and item.memory_id in memory_ids
+            and item.status in allowed
+        ]
 
 
 class StubMemoryEvidenceLinkRepository:
@@ -421,6 +469,34 @@ class StubMemoryGovernanceDecisionRepository:
 
     async def list_by_profile(self, *, learner_profile_id: str, learner_goal_id: str | None = None, limit: int = 100):
         return self.records[-limit:]
+
+
+class StubMemoryPromotionEligibilityRepository:
+    def __init__(self):
+        self.records: dict[str, MemoryPromotionEligibilityRecord] = {}
+
+    async def upsert_current(self, entity: MemoryPromotionEligibilityRecord):
+        self.records[entity.memory_id] = entity
+        return entity
+
+    async def get_current(self, *, memory_id: str):
+        return self.records.get(memory_id)
+
+    async def list_current_eligible_by_profile(self, *, learner_profile_id: str, learner_goal_id: str | None = None, limit: int = 100):
+        items = [
+            item for item in self.records.values()
+            if item.learner_profile_id == learner_profile_id
+            and item.status == "eligible"
+            and (learner_goal_id is None or item.learner_goal_id == learner_goal_id)
+        ]
+        return items[:limit]
+
+    async def list_current_by_memory_ids(self, *, memory_ids: list[str]):
+        return {
+            memory_id: record
+            for memory_id, record in self.records.items()
+            if memory_id in memory_ids
+        }
 
 
 class StubMemoryAnnotationRepository:
@@ -2008,6 +2084,12 @@ async def test_compression_moves_sources_out_of_current_identity_before_activati
     compressed_knowledge = await service.compress_knowledge_memories(batch_size=5)
 
     assert compressed_knowledge == 1
+    assert knowledge_embedding_repository.list_by_profile_calls == 0
+    assert len(knowledge_embedding_repository.list_by_memory_ids_calls) == 1
+    knowledge_profile_id, knowledge_memory_ids, knowledge_statuses = knowledge_embedding_repository.list_by_memory_ids_calls[0]
+    assert knowledge_profile_id == "profile-1"
+    assert set(knowledge_memory_ids) == {knowledge_one.id, knowledge_two.id}
+    assert knowledge_statuses == {"active", "stable"}
     assert "compressed" in knowledge_repository.created_statuses
     assert sum(item.status in {"active", "stable"} for item in knowledge_repository.memories) == 1
     assert sum(item.status == "compressed" for item in knowledge_repository.memories) == 2
@@ -2062,6 +2144,12 @@ async def test_compression_moves_sources_out_of_current_identity_before_activati
     compressed_behavior = await service.compress_behavior_memories(batch_size=5)
 
     assert compressed_behavior == 1
+    assert behavior_embedding_repository.list_by_profile_calls == 0
+    assert len(behavior_embedding_repository.list_by_memory_ids_calls) == 1
+    behavior_profile_id, behavior_memory_ids, behavior_statuses = behavior_embedding_repository.list_by_memory_ids_calls[0]
+    assert behavior_profile_id == "profile-1"
+    assert set(behavior_memory_ids) == {behavior_one.id, behavior_two.id}
+    assert behavior_statuses == {"active", "stable"}
     assert "compressed" in behavior_repository.created_statuses
     assert sum(item.status in {"active", "stable"} for item in behavior_repository.memories) == 1
     assert sum(item.status == "compressed" for item in behavior_repository.memories) == 2
@@ -2200,6 +2288,12 @@ async def test_profile_compression_batch_advances_cursor_by_processed_group_id()
 
     assert result.processed_count == 1
     assert result.changed_count == 1
+    assert knowledge_embedding_repository.list_by_profile_calls == 0
+    assert len(knowledge_embedding_repository.list_by_memory_ids_calls) == 1
+    profile_id, memory_ids, statuses = knowledge_embedding_repository.list_by_memory_ids_calls[0]
+    assert profile_id == "profile-1"
+    assert set(memory_ids) == {"k-001", "k-002"}
+    assert statuses == {"active", "stable"}
     assert result.next_cursor == "k-001"
     assert result.completed is True
     assert {item.id for item in knowledge_repository.memories if item.status == "compressed"} == {"k-001", "k-002"}
@@ -2308,7 +2402,7 @@ async def test_memory_governance_uses_configured_thresholds():
         confidence_score=0.8,
         contradiction_score=0.0,
     )
-    assert service._govern_knowledge_status(governed) == "candidate"  # noqa: SLF001
+    assert await service._govern_knowledge_status(governed) == "candidate"  # noqa: SLF001
 
 
 async def test_bridge_reflection_outcome_writes_memory_evidence_links():
@@ -2788,3 +2882,467 @@ async def test_reflection_corpus_exposes_semantics_and_contested_state():
     assert corpus.items[0].semantic_category in {"concept", "prerequisite"}
     assert corpus.items[0].validation_status == "contested"
     assert corpus.items[0].contested is True
+
+
+async def test_retrieve_relevant_knowledge_memories_includes_eligible_candidates_with_lower_weight():
+    memory_repository = StubMemoryRepository()
+    knowledge_repository = StubKnowledgeMemoryRepository()
+    embedding_repository = StubKnowledgeMemoryEmbeddingRepository()
+    eligibility_repository = StubMemoryPromotionEligibilityRepository()
+    service = MemoryService(
+        memory_repository,
+        embedding_provider=StubEmbeddingProvider(),
+        knowledge_memory_repository=knowledge_repository,
+        knowledge_memory_embedding_repository=embedding_repository,
+        promotion_eligibility_repository=eligibility_repository,
+    )
+
+    active = service._build_knowledge_memory(  # noqa: SLF001
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+        learner_message="I am confused about matrix multiplication.",
+        assistant_message="Matrix multiplication combines rows and columns.",
+        source_message_id="message-1",
+        mode="chat",
+        subject="Matrices",
+        session_title="Linear Algebra",
+        source_event_ids=["event-1"],
+        provenance_type="session_event",
+        provenance_source_id="event-1",
+    )
+    assert active is not None
+    active = active.with_status("active")
+    candidate = service._build_knowledge_memory(  # noqa: SLF001
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+        learner_message="I am confused about matrix multiplication again.",
+        assistant_message="Matrix multiplication combines rows and columns again.",
+        source_message_id="message-2",
+        mode="chat",
+        subject="Matrices",
+        session_title="Linear Algebra",
+        source_event_ids=["event-2"],
+        provenance_type="session_event",
+        provenance_source_id="event-2",
+    )
+    assert candidate is not None
+    knowledge_repository.memories = [active, candidate]
+    embedding_repository.records = [
+        KnowledgeMemoryEmbeddingRecord(
+            id="emb-active",
+            memory_id=active.id,
+            learner_profile_id=active.learner_profile_id,
+            learner_goal_id=active.learner_goal_id,
+            knowledge_key=active.knowledge_key,
+            title=active.title,
+            summary=active.summary,
+            knowledge_level=active.knowledge_level,
+            time_horizon=active.time_horizon,
+            importance_score=active.importance_score,
+            confidence_score=active.confidence_score,
+            freshness_score=active.freshness_score,
+            stability_score=active.stability_score,
+            goal_relevance_score=active.goal_relevance_score,
+            scope_type=active.scope_type,
+            provider="stub",
+            model="stub-embedding-v1",
+            dimensions=2,
+            vector=[1.0, 0.0],
+            status="active",
+            created_at=active.created_at,
+        ),
+        KnowledgeMemoryEmbeddingRecord(
+            id="emb-candidate",
+            memory_id=candidate.id,
+            learner_profile_id=candidate.learner_profile_id,
+            learner_goal_id=candidate.learner_goal_id,
+            knowledge_key=candidate.knowledge_key,
+            title=candidate.title,
+            summary=candidate.summary,
+            knowledge_level=candidate.knowledge_level,
+            time_horizon=candidate.time_horizon,
+            importance_score=candidate.importance_score,
+            confidence_score=candidate.confidence_score,
+            freshness_score=candidate.freshness_score,
+            stability_score=candidate.stability_score,
+            goal_relevance_score=candidate.goal_relevance_score,
+            scope_type=candidate.scope_type,
+            provider="stub",
+            model="stub-embedding-v1",
+            dimensions=2,
+            vector=[1.0, 0.0],
+            status="candidate",
+            created_at=candidate.created_at,
+        ),
+    ]
+    eligibility_repository.records[candidate.id] = MemoryPromotionEligibilityRecord.build(
+        memory_id=candidate.id,
+        learner_profile_id=candidate.learner_profile_id,
+        learner_goal_id=candidate.learner_goal_id,
+        status="eligible",
+        score=0.82,
+        independent_source_count=3,
+        high_signal_source_count=1,
+        evidence_span_hours=30.0,
+        conflict_blocked=False,
+        blocked_conflict_set_id=None,
+        blocked_memory_id=None,
+        reason_codes=["eligible"],
+        metrics_snapshot={},
+        evaluated_at=datetime.now(timezone.utc),
+    )
+
+    result = await service.retrieve_relevant_knowledge_memories(
+        learner_profile_id="profile-1",
+        query_text="how do I multiply two matrices?",
+        limit=3,
+        candidate_limit=10,
+        min_score=0.0,
+    )
+
+    assert result.eligible_candidate_count == 1
+    assert any(item.governance_state == "candidate_eligible" for item in result.memories)
+
+
+async def test_run_knowledge_promotion_eligibility_batch_writes_current_record():
+    knowledge_repository = StubKnowledgeMemoryRepository()
+    evidence_repository = StubMemoryEvidenceLinkRepository()
+    eligibility_repository = StubMemoryPromotionEligibilityRepository()
+    service = MemoryService(
+        StubMemoryRepository(),
+        knowledge_memory_repository=knowledge_repository,
+        evidence_link_repository=evidence_repository,
+        promotion_eligibility_repository=eligibility_repository,
+    )
+    memory = service._build_knowledge_memory(  # noqa: SLF001
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+        learner_message="I am confused about matrix multiplication.",
+        assistant_message="Matrix multiplication combines rows and columns.",
+        source_message_id="message-1",
+        mode="chat",
+        subject="Matrices",
+        session_title="Linear Algebra",
+        source_event_ids=["event-1"],
+        provenance_type="session_event",
+        provenance_source_id="event-1",
+    )
+    assert memory is not None
+    knowledge_repository.memories = [memory]
+    observed = datetime.now(timezone.utc)
+    for idx in range(3):
+        await evidence_repository.upsert(
+            MemoryEvidenceLink.build(
+                memory_type="knowledge",
+                memory_id=memory.id,
+                learner_profile_id=memory.learner_profile_id,
+                learner_goal_id=memory.learner_goal_id,
+                evidence_source_type="task_attempt" if idx == 0 else "session_memory_event",
+                evidence_source_id=f"src-{idx}",
+                evidence_role="supporting",
+                signal_type="assessment:completed" if idx == 0 else "session.note",
+                weight=0.2,
+                payload={"task_type": "assessment"} if idx == 0 else {},
+                observed_at=observed.replace(hour=observed.hour - min(idx, 1)) if idx < 2 else observed.replace(day=max(observed.day - 1, 1)),
+            )
+        )
+    result = await service.run_knowledge_promotion_eligibility_batch(
+        learner_profile_id="profile-1",
+        cursor=None,
+        batch_size=10,
+    )
+
+    assert result.processed_count == 1
+    assert memory.id in eligibility_repository.records
+
+
+async def test_run_knowledge_governance_batch_physically_promotes_eligible_candidate():
+    knowledge_repository = StubKnowledgeMemoryRepository()
+    knowledge_embedding_repository = StubKnowledgeMemoryEmbeddingRepository()
+    governance_repository = StubMemoryGovernanceDecisionRepository()
+    eligibility_repository = StubMemoryPromotionEligibilityRepository()
+    audit_repository = StubAuditRepository()
+    service = MemoryService(
+        StubMemoryRepository(),
+        embedding_provider=StubEmbeddingProvider(),
+        audit_service=AuditService(audit_repository),
+        knowledge_memory_repository=knowledge_repository,
+        knowledge_memory_embedding_repository=knowledge_embedding_repository,
+        governance_decision_repository=governance_repository,
+        promotion_eligibility_repository=eligibility_repository,
+    )
+    memory = service._build_knowledge_memory(  # noqa: SLF001
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+        learner_message="I am confused about matrix multiplication.",
+        assistant_message="Matrix multiplication combines rows and columns.",
+        source_message_id="message-1",
+        mode="chat",
+        subject="Matrices",
+        session_title="Linear Algebra",
+    )
+    assert memory is not None
+    candidate = _with_id(
+        memory.with_status(
+            "candidate",
+            evidence_count=3,
+            support_score=0.7,
+            confidence_score=0.82,
+            stability_score=0.8,
+            freshness_score=0.9,
+            assessment_evidence_count=1,
+            task_evidence_count=3,
+        ),
+        "k-promote-001",
+    )
+    knowledge_repository.memories = [candidate]
+    eligibility_repository.records[candidate.id] = MemoryPromotionEligibilityRecord.build(
+        memory_id=candidate.id,
+        learner_profile_id=candidate.learner_profile_id,
+        learner_goal_id=candidate.learner_goal_id,
+        status="eligible",
+        score=0.88,
+        independent_source_count=3,
+        high_signal_source_count=1,
+        evidence_span_hours=26.0,
+        conflict_blocked=False,
+        blocked_conflict_set_id=None,
+        blocked_memory_id=None,
+        reason_codes=["eligible"],
+        metrics_snapshot={},
+        evaluated_at=datetime.now(timezone.utc),
+    )
+
+    result = await service.run_knowledge_governance_batch(
+        learner_profile_id="profile-1",
+        cursor=None,
+        batch_size=10,
+    )
+
+    updated = knowledge_repository.memories[0]
+    assert result.processed_count == 1
+    assert result.changed_count == 1
+    assert result.metadata["promoted"] == 1
+    assert result.metadata["suppressed"] == 0
+    assert updated.status == "active"
+    assert updated.promotion_rationale == "Promoted from candidate after governed eligibility evaluation."
+    assert updated.promotion_state_changed_at is not None
+    embedding = await knowledge_embedding_repository.get_by_memory_id(candidate.id)
+    assert embedding is not None
+    assert embedding.status == "active"
+    decision = governance_repository.records[-1]
+    assert decision.decision_type == "promote"
+    assert decision.reason_code == "promotion_eligibility_approved"
+    assert decision.reason_note == "eligibility_status=eligible; reason_codes=eligible; eligibility_score=0.88"
+    assert decision.metrics_snapshot["eligibility_status"] == "eligible"
+    assert any(event.event_type == "knowledge_memory.promoted" for event in audit_repository.events)
+
+
+async def test_run_knowledge_governance_batch_physically_suppresses_conflict_blocked_candidate():
+    knowledge_repository = StubKnowledgeMemoryRepository()
+    knowledge_embedding_repository = StubKnowledgeMemoryEmbeddingRepository()
+    governance_repository = StubMemoryGovernanceDecisionRepository()
+    eligibility_repository = StubMemoryPromotionEligibilityRepository()
+    audit_repository = StubAuditRepository()
+    service = MemoryService(
+        StubMemoryRepository(),
+        embedding_provider=StubEmbeddingProvider(),
+        audit_service=AuditService(audit_repository),
+        knowledge_memory_repository=knowledge_repository,
+        knowledge_memory_embedding_repository=knowledge_embedding_repository,
+        governance_decision_repository=governance_repository,
+        promotion_eligibility_repository=eligibility_repository,
+    )
+    memory = service._build_knowledge_memory(  # noqa: SLF001
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+        learner_message="I am confused about matrix multiplication.",
+        assistant_message="Matrix multiplication combines rows and columns.",
+        source_message_id="message-1",
+        mode="chat",
+        subject="Matrices",
+        session_title="Linear Algebra",
+    )
+    assert memory is not None
+    candidate = _with_id(
+        memory.with_status(
+            "candidate",
+            evidence_count=3,
+            support_score=0.68,
+            confidence_score=0.8,
+            stability_score=0.76,
+            freshness_score=0.88,
+            assessment_evidence_count=1,
+            task_evidence_count=3,
+        ),
+        "k-suppress-001",
+    )
+    knowledge_repository.memories = [candidate]
+    knowledge_embedding_repository.records = [
+        KnowledgeMemoryEmbeddingRecord(
+            id="emb-suppress-candidate",
+            memory_id=candidate.id,
+            learner_profile_id=candidate.learner_profile_id,
+            learner_goal_id=candidate.learner_goal_id,
+            knowledge_key=candidate.knowledge_key,
+            title=candidate.title,
+            summary=candidate.summary,
+            knowledge_level=candidate.knowledge_level,
+            time_horizon=candidate.time_horizon,
+            importance_score=candidate.importance_score,
+            confidence_score=candidate.confidence_score,
+            freshness_score=candidate.freshness_score,
+            stability_score=candidate.stability_score,
+            goal_relevance_score=candidate.goal_relevance_score,
+            scope_type=candidate.scope_type,
+            provider="stub",
+            model="stub-embedding-v1",
+            dimensions=2,
+            vector=[1.0, 0.0],
+            status="candidate",
+            created_at=candidate.created_at,
+        )
+    ]
+    eligibility_repository.records[candidate.id] = MemoryPromotionEligibilityRecord.build(
+        memory_id=candidate.id,
+        learner_profile_id=candidate.learner_profile_id,
+        learner_goal_id=candidate.learner_goal_id,
+        status="conflict_blocked",
+        score=0.81,
+        independent_source_count=3,
+        high_signal_source_count=1,
+        evidence_span_hours=30.0,
+        conflict_blocked=True,
+        blocked_conflict_set_id=None,
+        blocked_memory_id="k-active-999",
+        reason_codes=["active_or_stable_conflict_exists"],
+        metrics_snapshot={},
+        evaluated_at=datetime.now(timezone.utc),
+    )
+
+    result = await service.run_knowledge_governance_batch(
+        learner_profile_id="profile-1",
+        cursor=None,
+        batch_size=10,
+    )
+
+    updated = knowledge_repository.memories[0]
+    assert result.processed_count == 1
+    assert result.changed_count == 1
+    assert result.metadata["promoted"] == 0
+    assert result.metadata["suppressed"] == 1
+    assert updated.status == "suppressed"
+    assert updated.suppressed_reason_code == "promotion_conflict_blocked"
+    assert updated.suppressed_reason_note == (
+        "eligibility_status=conflict_blocked; blocked_memory_id=k-active-999; "
+        "reason_codes=active_or_stable_conflict_exists"
+    )
+    assert updated.suppressed_by == "worker"
+    assert updated.suppressed_at is not None
+    embedding = await knowledge_embedding_repository.get_by_memory_id(candidate.id)
+    assert embedding is not None
+    assert embedding.status == "suppressed"
+    decision = governance_repository.records[-1]
+    assert decision.decision_type == "suppress"
+    assert decision.reason_code == "promotion_conflict_blocked"
+    assert decision.reason_note == updated.suppressed_reason_note
+    assert decision.metrics_snapshot["eligibility_status"] == "conflict_blocked"
+    assert any(event.event_type == "knowledge_memory.suppressed" for event in audit_repository.events)
+
+
+async def test_run_knowledge_governance_batch_keeps_below_score_candidate_candidate():
+    knowledge_repository = StubKnowledgeMemoryRepository()
+    knowledge_embedding_repository = StubKnowledgeMemoryEmbeddingRepository()
+    governance_repository = StubMemoryGovernanceDecisionRepository()
+    eligibility_repository = StubMemoryPromotionEligibilityRepository()
+    service = MemoryService(
+        StubMemoryRepository(),
+        embedding_provider=StubEmbeddingProvider(),
+        knowledge_memory_repository=knowledge_repository,
+        knowledge_memory_embedding_repository=knowledge_embedding_repository,
+        governance_decision_repository=governance_repository,
+        promotion_eligibility_repository=eligibility_repository,
+    )
+    memory = service._build_knowledge_memory(  # noqa: SLF001
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+        learner_message="I am confused about matrix multiplication.",
+        assistant_message="Matrix multiplication combines rows and columns.",
+        source_message_id="message-1",
+        mode="chat",
+        subject="Matrices",
+        session_title="Linear Algebra",
+    )
+    assert memory is not None
+    candidate = _with_id(memory.with_status("candidate"), "k-below-score-001")
+    knowledge_repository.memories = [candidate]
+    eligibility_repository.records[candidate.id] = MemoryPromotionEligibilityRecord.build(
+        memory_id=candidate.id,
+        learner_profile_id=candidate.learner_profile_id,
+        learner_goal_id=candidate.learner_goal_id,
+        status="below_score",
+        score=0.62,
+        independent_source_count=3,
+        high_signal_source_count=1,
+        evidence_span_hours=30.0,
+        conflict_blocked=False,
+        blocked_conflict_set_id=None,
+        blocked_memory_id=None,
+        reason_codes=["score_below_min"],
+        metrics_snapshot={},
+        evaluated_at=datetime.now(timezone.utc),
+    )
+
+    result = await service.run_knowledge_governance_batch(
+        learner_profile_id="profile-1",
+        cursor=None,
+        batch_size=10,
+    )
+
+    assert result.processed_count == 1
+    assert result.metadata["promoted"] == 0
+    assert result.metadata["suppressed"] == 0
+    assert knowledge_repository.memories[0].status == "candidate"
+    assert await knowledge_embedding_repository.get_by_memory_id(candidate.id) is None
+    assert not any(d.decision_type in {"promote", "suppress"} for d in governance_repository.records)
+
+
+async def test_run_knowledge_governance_batch_keeps_candidate_without_current_eligibility_candidate():
+    knowledge_repository = StubKnowledgeMemoryRepository()
+    knowledge_embedding_repository = StubKnowledgeMemoryEmbeddingRepository()
+    governance_repository = StubMemoryGovernanceDecisionRepository()
+    eligibility_repository = StubMemoryPromotionEligibilityRepository()
+    service = MemoryService(
+        StubMemoryRepository(),
+        embedding_provider=StubEmbeddingProvider(),
+        knowledge_memory_repository=knowledge_repository,
+        knowledge_memory_embedding_repository=knowledge_embedding_repository,
+        governance_decision_repository=governance_repository,
+        promotion_eligibility_repository=eligibility_repository,
+    )
+    memory = service._build_knowledge_memory(  # noqa: SLF001
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+        learner_message="I am confused about matrix multiplication.",
+        assistant_message="Matrix multiplication combines rows and columns.",
+        source_message_id="message-1",
+        mode="chat",
+        subject="Matrices",
+        session_title="Linear Algebra",
+    )
+    assert memory is not None
+    candidate = _with_id(memory.with_status("candidate"), "k-missing-eligibility-001")
+    knowledge_repository.memories = [candidate]
+
+    result = await service.run_knowledge_governance_batch(
+        learner_profile_id="profile-1",
+        cursor=None,
+        batch_size=10,
+    )
+
+    assert result.processed_count == 1
+    assert result.metadata["promoted"] == 0
+    assert result.metadata["suppressed"] == 0
+    assert knowledge_repository.memories[0].status == "candidate"
+    assert await knowledge_embedding_repository.get_by_memory_id(candidate.id) is None
+    assert not any(d.decision_type in {"promote", "suppress"} for d in governance_repository.records)

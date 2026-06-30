@@ -21,6 +21,56 @@ def test_settings_default_rollout_auto_governance_surfaces(monkeypatch):
     assert settings.skill_rollout_auto_rollback_surfaces == expected
 
 
+def test_settings_default_reflection_skill_evolution_curator_configuration(monkeypatch):
+    monkeypatch.setenv("AGENT_EDU_DATABASE_URL", "sqlite+aiosqlite:///./test.db")
+    monkeypatch.setenv("AGENT_EDU_REDIS_URL", "redis://redis:6379/0")
+    monkeypatch.delenv("AGENT_EDU_REFLECTION_SKILL_EVOLUTION_CURATOR_ENABLED", raising=False)
+    monkeypatch.delenv("AGENT_EDU_REFLECTION_SKILL_AUTO_STAGING_ENABLED", raising=False)
+    monkeypatch.delenv("AGENT_EDU_REFLECTION_SKILL_AUTO_STAGE_SCORE_DELTA_MIN", raising=False)
+    monkeypatch.delenv("AGENT_EDU_REFLECTION_SKILL_AUTO_STAGE_24H_LIMIT", raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.reflection_skill_evolution_curator_enabled is True
+    assert settings.reflection_skill_auto_staging_enabled is False
+    assert settings.reflection_skill_auto_stage_score_delta_min == pytest.approx(0.10)
+    assert settings.reflection_skill_auto_stage_24h_limit == 3
+
+
+def test_settings_load_reflection_skill_evolution_curator_configuration_from_env(monkeypatch):
+    monkeypatch.setenv("AGENT_EDU_DATABASE_URL", "sqlite+aiosqlite:///./test.db")
+    monkeypatch.setenv("AGENT_EDU_REDIS_URL", "redis://redis:6379/0")
+    monkeypatch.setenv("AGENT_EDU_REFLECTION_SKILL_EVOLUTION_CURATOR_ENABLED", "false")
+    monkeypatch.setenv("AGENT_EDU_REFLECTION_SKILL_AUTO_STAGING_ENABLED", "true")
+    monkeypatch.setenv("AGENT_EDU_REFLECTION_SKILL_AUTO_STAGE_SCORE_DELTA_MIN", "0.25")
+    monkeypatch.setenv("AGENT_EDU_REFLECTION_SKILL_AUTO_STAGE_24H_LIMIT", "5")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.reflection_skill_evolution_curator_enabled is False
+    assert settings.reflection_skill_auto_staging_enabled is True
+    assert settings.reflection_skill_auto_stage_score_delta_min == pytest.approx(0.25)
+    assert settings.reflection_skill_auto_stage_24h_limit == 5
+
+
+@pytest.mark.parametrize(
+    ("env_key", "env_value"),
+    [
+        ("AGENT_EDU_REFLECTION_SKILL_AUTO_STAGE_SCORE_DELTA_MIN", "-0.01"),
+        ("AGENT_EDU_REFLECTION_SKILL_AUTO_STAGE_SCORE_DELTA_MIN", "1.01"),
+        ("AGENT_EDU_REFLECTION_SKILL_AUTO_STAGE_24H_LIMIT", "0"),
+        ("AGENT_EDU_REFLECTION_SKILL_AUTO_STAGE_24H_LIMIT", "101"),
+    ],
+)
+def test_settings_reject_invalid_reflection_skill_evolution_curator_bounds(monkeypatch, env_key, env_value):
+    monkeypatch.setenv("AGENT_EDU_DATABASE_URL", "sqlite+aiosqlite:///./test.db")
+    monkeypatch.setenv("AGENT_EDU_REDIS_URL", "redis://redis:6379/0")
+    monkeypatch.setenv(env_key, env_value)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
 def test_settings_rollout_auto_governance_surfaces_trim_empty_items(monkeypatch):
     monkeypatch.setenv("AGENT_EDU_DATABASE_URL", "sqlite+aiosqlite:///./test.db")
     monkeypatch.setenv("AGENT_EDU_REDIS_URL", "redis://redis:6379/0")

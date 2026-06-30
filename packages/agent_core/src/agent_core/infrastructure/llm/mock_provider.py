@@ -18,9 +18,14 @@ from agent_core.infrastructure.llm.types import (
 class MockLLMProvider:
     provider_name = "mock"
 
-    def __init__(self, model_name: str) -> None:
+    def __init__(self, model_name: str, llm_call_guard: object | None = None) -> None:
         self._model_name = model_name
+        self._llm_call_guard = llm_call_guard
         self.model_name = model_name
+
+    def _check_guard(self) -> None:
+        if self._llm_call_guard is not None:
+            self._llm_call_guard.check()
 
     async def generate_tutor_reply(
         self,
@@ -34,6 +39,7 @@ class MockLLMProvider:
         learner_profile: SessionLearnerProfile,
         hint_context: HintContext | None = None,
     ) -> TutorReply:
+        self._check_guard()
         mode_label = mode or "chat"
         subject_label = subject or session_title or "your current topic"
         history_label = "with prior context" if history else "without prior context"
@@ -100,6 +106,7 @@ class MockLLMProvider:
         skill_directives: list[str] | None = None,
         feedback_style: str | None = None,
     ) -> QuizDraft:
+        self._check_guard()
         questions = [
             QuizQuestion(
                 prompt=f"Question {index + 1} about {topic} ({difficulty})",
@@ -130,6 +137,7 @@ class MockLLMProvider:
         strategy_summary: dict[str, object] | None = None,
         skill_directives: list[str] | None = None,
     ) -> StudyPlanDraft:
+        self._check_guard()
         stages = [
             StudyPlanStageDraft(
                 title=str(item["title"]),
@@ -189,6 +197,7 @@ class MockLLMProvider:
         evidence_payload: dict[str, object],
         proposed_actions: list[dict[str, object]],
     ) -> ReflectionSummaryDraft:
+        self._check_guard()
         topic = str(evidence_payload.get("task", {}).get("topic_focus") or evidence_payload.get("topic_key") or "current topic")
         action_labels = ", ".join(str(item.get("action_type")) for item in proposed_actions) or "observe_only"
         verdict_code = str(verdict_payload.get("primary_verdict") or primary_root_cause)

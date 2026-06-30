@@ -39,6 +39,9 @@ def clear_cached_application_state() -> None:
     api_dependencies.get_redis_client.cache_clear()
     api_dependencies.get_skill_registry.cache_clear()
     api_dependencies.get_llm_provider.cache_clear()
+    api_dependencies.get_llm_call_guard.cache_clear()
+    api_dependencies.get_circuit_breaker.cache_clear()
+    api_dependencies.get_alert_dispatcher.cache_clear()
     api_dependencies.get_embedding_provider.cache_clear()
 
 

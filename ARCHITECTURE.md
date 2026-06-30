@@ -200,7 +200,8 @@ Long-term memory materialization is governed and provenance-preserving:
 - memory conflict sets keep policy-derived reason / handling / impact fields, while member titles and status are resolved by memory-id lookup instead of stored snapshots
 - long-term maintenance uses a dedicated `memory_maintenance_jobs` queue with lease, retry/backoff, and bounded batch processing
 - observability for long-term memory includes candidate backlog, promotion/conflict rates, materialization failure rate, and maintenance duration
-- automatic materialization only creates or refreshes `candidate` memories; promotion to `active` or `stable`, suppression restore, compression, and archival remain governance operations
+- automatic materialization only creates or refreshes `candidate` memories
+- the dedicated `knowledge_governance` maintenance job can apply the latest eligibility result to candidate knowledge memories and physically move them to `active` or `suppressed` with audited rationale; `stable`, suppression restore, compression, and archival remain separate governance operations
 - provenance must not mix identifiers: `session_event` provenance points to `MemoryEvent.id`, while raw `SessionMessage.id` stays on the memory event or evidence payload
 
 ## Safety And Governance
@@ -351,12 +352,14 @@ The following architectural constraints are mandatory:
       - `SkillCuratorRecommendation` review carrier and `SkillCuratorJob` MVP
       - `patch_needed -> skill_patch_request -> replacement skill_package proposal -> staged replacement` governed path
       - `merge_candidate -> merge-sourced replacement skill_package proposal -> staged replacement` governed path
+      - `reflection_skill_evolution_curator` worker path that can auto-realize approved/effective patch requests, auto-enqueue low/medium-risk replacement packages into sandbox, auto-reject failed/ineffective/inconclusive candidates, and conditionally auto-stage trusted replacement proposals
       - artifact overlap / duplicate detection input that emits `merge_candidate / none` recommendations without mutating artifacts
       - curator governance evidence input from memory conflict summaries, reflection outcome evaluations, and resolver health trends that emits or enriches `flag_for_review / none` recommendations without mutating artifacts
       - surface / topic coverage regression input that emits `patch_needed / none` recommendations from declared-topic drift and governed binding gaps without mutating artifacts
       - Prometheus / Grafana / alert baseline for skill usage, resolver failures, artifact status, curator backlog, recommendation rates, and curator job latency
+      - reflection skill evolution observability for auto realization / auto staging / auto rejection / auto staging suspension events
       - rollout auto-governance observability for auto decision queued / executed / skipped and alerting on elevated auto rollback / skip rates
-      - operator-protected replacement staging that preserves lineage / parent / supersedes provenance without automatic activate / replace
+      - replacement staging preserves lineage / parent / supersedes provenance and can be triggered either by operator-protected API or by the curator's guarded auto-staging path; neither path automatically activates or replaces the source artifact
       - shared staged-replacement readiness evaluation, strict source-anchor gate, and curator ready recommendation before manual activate / replace
       - readiness read API returns `recommended_action` plus the unified replacement-readiness evidence summary used by operator review and curator recommendation
 - Still pending:
@@ -371,13 +374,14 @@ The following architectural constraints are mandatory:
 
 - Generate controlled proposals for new or improved skills.
 - Evaluate proposals in sandboxed conditions before promotion.
-- Current MVP can carry `patch_needed` and `merge_candidate` recommendations through governed replacement `skill_package` proposals and operator-staged replacement artifacts.
+- Current MVP can carry `patch_needed` and `merge_candidate` recommendations through governed replacement `skill_package` proposals and into staged replacement artifacts through either operator staging or the guarded `reflection_skill_evolution_curator` path.
 - Curator evidence v1 can incorporate memory conflict summaries, reflection outcome evaluations, and resolver health trends into review recommendations.
-- Replacement staging stops at `staged`; activation or replacement remains governed by later evidence gates.
+- The curator path can auto-realize approved/effective `skill_patch_request` proposals, auto-enqueue low/medium-risk `skill_package` proposals into sandbox, auto-reject failed or ineffective candidates, and conditionally auto-stage trusted replacement packages when score and rate-limit gates pass.
+- Replacement staging still stops at `staged`; activation or replacement remains governed by later evidence gates.
 - Dynamic runtime registry V1 remains governed configuration sourcing, not dynamic code loading: handler registration and internal tool registration stay code-controlled, while artifacts and bindings provide directives, tool-plan, and rollout metadata.
 - Chat, planner, and task/autonomy paths now share the same runtime-plan contract and usage attribution shape; chat / hint / quiz / plan_generation can emit rollout observation signals on success, while allowlisted task/autonomy workflow surfaces can emit observation on success and on runtime failure when a real workflow-run anchor exists, without inlining rollout state transitions.
 - Rollout auto-governance V1 is intentionally narrower than replacement governance: it can auto-promote or auto-rollback allowlisted rollouts, but it does not auto-activate or auto-replace staged replacement artifacts.
-- Replacement governance remains manual execution after evidence gates, and both direct `activate_staged` and `replace_selectable` now re-check readiness under locked artifact/selectable reads before state transition; recommendation accept failure emits durable `accept_failed` audit and leaves the recommendation pending.
+- Replacement activation governance remains manual execution after evidence gates, and both direct `activate_staged` and `replace_selectable` now re-check readiness under locked artifact/selectable reads before state transition; recommendation accept failure emits durable `accept_failed` audit and leaves the recommendation pending.
 
 ### Phase 6: Multi-Agent Society
 

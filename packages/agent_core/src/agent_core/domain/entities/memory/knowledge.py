@@ -478,5 +478,6 @@ class KnowledgeMemoryRetrievalResult:
     model: str | None
     latency_ms: int
     candidate_count: int
+    eligible_candidate_count: int = 0
 
 

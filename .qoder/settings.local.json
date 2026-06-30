@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /home/cl/agent-edu/apps/ -maxdepth 2 -type f -o -type d | sort; echo \"---OPS---\"; find /home/cl/agent-edu/ops/ -maxdepth 2 -type f -o -type d | sort; echo \"---RULES---\"; ls /home/cl/agent-edu/rules/)",
+      "Bash(git:*)"
+    ]
+  }
+}

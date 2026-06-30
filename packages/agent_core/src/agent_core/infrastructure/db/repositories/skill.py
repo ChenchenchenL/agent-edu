@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import Integer, and_, cast, desc, distinct, func, or_, select, update
+from sqlalchemy import Integer, and_, asc, cast, desc, distinct, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -109,6 +109,15 @@ CURRENT_MEMORY_IDENTITY_STATUSES = {"candidate", "active", "stable", "suppressed
 class SkillArtifactRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    _AUTO_STAGED_ARTIFACT_STATUSES = (
+        "staged",
+        "active",
+        "stable",
+        "deprecated",
+        "archived",
+        "suppressed",
+    )
 
     async def create(self, entity: SkillArtifact) -> None:
         self._session.add(
@@ -316,6 +325,38 @@ class SkillArtifactRepository:
             select(SkillArtifactModel.status, func.count(SkillArtifactModel.id)).group_by(SkillArtifactModel.status)
         )
         return {str(status): int(count) for status, count in result.all()}
+
+    async def count_recent_system_staged_replacements_for_goal(
+        self,
+        *,
+        learner_goal_id: str,
+        created_at_from: datetime,
+    ) -> int:
+        """Count recent system-created staged replacement artifacts for one goal.
+
+        Args:
+            learner_goal_id: Learner goal identifier.
+            created_at_from: Inclusive lower bound for artifact creation time.
+
+        Returns:
+            The number of recent staged-or-beyond artifacts created by `system`
+            from proposals linked to the target goal.
+        """
+        result = await self._session.execute(
+            select(func.count(distinct(SkillArtifactModel.id)))
+            .select_from(SkillArtifactModel)
+            .join(
+                ReflectionProposalModel,
+                ReflectionProposalModel.id == SkillArtifactModel.source_proposal_id,
+            )
+            .where(
+                ReflectionProposalModel.learner_goal_id == learner_goal_id,
+                SkillArtifactModel.created_at >= created_at_from,
+                SkillArtifactModel.created_by == "system",
+                SkillArtifactModel.status.in_(self._AUTO_STAGED_ARTIFACT_STATUSES),
+            )
+        )
+        return int(result.scalar_one())
 
     @staticmethod
     def _to_entity(model: SkillArtifactModel) -> SkillArtifact:
@@ -618,6 +659,51 @@ class SkillCuratorRecommendationRepository:
         )
         return [self._to_entity(model) for model in result.scalars().all()]
 
+    async def list_pending_auto_execution_candidates(
+        self,
+        *,
+        limit: int = 20,
+        surfaces: set[str] | None = None,
+    ) -> list[SkillCuratorRecommendation]:
+        query = select(SkillCuratorRecommendationModel).where(
+            SkillCuratorRecommendationModel.status == "pending",
+            SkillCuratorRecommendationModel.created_by == "skill_curator_job",
+            SkillCuratorRecommendationModel.recommendation_type.in_(["activate_candidate", "replace_candidate"]),
+            SkillCuratorRecommendationModel.recommended_action.in_(["activate_staged", "replace_selectable"]),
+        )
+        if surfaces is not None:
+            query = query.where(SkillCuratorRecommendationModel.surface.in_(sorted(surfaces)))
+        result = await self._session.execute(
+            query.order_by(
+                asc(SkillCuratorRecommendationModel.created_at),
+                asc(SkillCuratorRecommendationModel.id),
+            ).limit(bounded_limit(limit))
+        )
+        return [self._to_entity(model) for model in result.scalars().all()]
+
+    async def count_recent_system_auto_executed_for_goal(
+        self,
+        *,
+        learner_goal_id: str,
+        accepted_at_from: datetime,
+        accepted_by: str,
+    ) -> int:
+        result = await self._session.execute(
+            select(func.count(distinct(SkillCuratorRecommendationModel.id)))
+            .select_from(SkillCuratorRecommendationModel)
+            .join(SkillArtifactModel, SkillArtifactModel.id == SkillCuratorRecommendationModel.artifact_id)
+            .join(ReflectionProposalModel, ReflectionProposalModel.id == SkillArtifactModel.source_proposal_id)
+            .where(
+                ReflectionProposalModel.learner_goal_id == learner_goal_id,
+                SkillCuratorRecommendationModel.status == "accepted",
+                SkillCuratorRecommendationModel.accepted_by == accepted_by,
+                SkillCuratorRecommendationModel.accepted_at.is_not(None),
+                SkillCuratorRecommendationModel.accepted_at >= accepted_at_from,
+                SkillCuratorRecommendationModel.recommended_action.in_(["activate_staged", "replace_selectable"]),
+            )
+        )
+        return int(result.scalar_one())
+
     async def count_pending_by_type(self) -> dict[str, int]:
         result = await self._session.execute(
             select(
@@ -660,5 +746,4 @@ class SkillCuratorRecommendationRepository:
             created_at=model.created_at,
             updated_at=model.updated_at,
         )
-
 

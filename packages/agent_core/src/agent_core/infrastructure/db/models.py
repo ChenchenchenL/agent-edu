@@ -494,6 +494,30 @@ class MemoryGovernanceDecisionModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+
+
+class MemoryPromotionEligibilityModel(Base):
+    __tablename__ = "memory_promotion_eligibility_records"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    memory_id: Mapped[str] = mapped_column(ForeignKey("knowledge_memories.id"), nullable=False)
+    learner_profile_id: Mapped[str] = mapped_column(ForeignKey("learner_profiles.id"), nullable=False)
+    learner_goal_id: Mapped[str | None] = mapped_column(ForeignKey("learner_goals.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(64), nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    independent_source_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    high_signal_source_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    evidence_span_hours: Mapped[float] = mapped_column(Float, nullable=False)
+    conflict_blocked: Mapped[bool] = mapped_column(nullable=False, default=False)
+    blocked_conflict_set_id: Mapped[str | None] = mapped_column(ForeignKey("memory_conflict_sets.id"), nullable=True)
+    blocked_memory_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    reason_codes: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    metrics_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class MemoryAnnotationModel(Base):
     __tablename__ = "memory_annotations"
 
@@ -579,6 +603,20 @@ Index(
     unique=True,
     postgresql_where=MemoryConflictSetModel.status == "open",
     sqlite_where=MemoryConflictSetModel.status == "open",
+)
+Index(
+    "ix_memory_promotion_eligibility_current_memory",
+    MemoryPromotionEligibilityModel.memory_id,
+    unique=True,
+    postgresql_where=MemoryPromotionEligibilityModel.superseded_at.is_(None),
+    sqlite_where=MemoryPromotionEligibilityModel.superseded_at.is_(None),
+)
+Index(
+    "ix_memory_promotion_eligibility_profile_goal_status",
+    MemoryPromotionEligibilityModel.learner_profile_id,
+    MemoryPromotionEligibilityModel.learner_goal_id,
+    MemoryPromotionEligibilityModel.status,
+    MemoryPromotionEligibilityModel.evaluated_at,
 )
 
 

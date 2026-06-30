@@ -16,6 +16,9 @@ from agent_core.application.services.chat import ChatService
 from agent_core.application.services.goal import LearnerGoalService
 from agent_core.application.services.goal_skill_binding_resolver import GoalSkillBindingResolver
 from agent_core.application.services.dynamic_runtime_registry import DynamicRuntimeRegistryService
+from agent_core.application.services.llm_guard import LLMCallGuard
+from agent_core.infrastructure.llm.circuit_breaker import CircuitBreaker
+from agent_core.infrastructure.observability.alerts import AlertDispatcher
 from agent_core.application.services.long_term_memory_materialization import LongTermMemoryMaterializationService
 from agent_core.application.services.long_term_memory_materialization_replay import (
     LongTermMemoryMaterializationReplayExecutor,
@@ -44,6 +47,15 @@ from agent_core.application.services.reflection_proposal_rollout_auto_governance
 from agent_core.application.services.reflection_proposal_rollout_resolver import ReflectionProposalRolloutResolver
 from agent_core.application.services.reflection_proposal_rollouts import ReflectionProposalRolloutService
 from agent_core.application.services.reflection_proposal_sandbox import ReflectionProposalSandboxService
+from agent_core.application.services.reflection_skill_evolution_curator import (
+    ReflectionSkillEvolutionCuratorConfig,
+    ReflectionSkillEvolutionCuratorService,
+)
+from agent_core.application.services.skill_replacement_auto_execution import (
+    SkillReplacementAutoExecutionConfig,
+    SkillReplacementAutoExecutionScheduler,
+    SkillReplacementAutoExecutionService,
+)
 from agent_core.application.services.reflection_proposals import ReflectionProposalService
 from agent_core.application.services.reflection_replay import ReflectionReplayService
 from agent_core.application.services.session import SessionService
@@ -92,6 +104,7 @@ from agent_core.infrastructure.db.repositories import (
     MemoryEvidenceLinkRepository,
     MemoryEventRepository,
     MemoryGovernanceDecisionRepository,
+    MemoryPromotionEligibilityRepository,
     MemoryMaintenanceJobRepository,
     PlanStageRepository,
     ReflectionActionRepository,
@@ -154,12 +167,46 @@ def get_skill_registry() -> SkillRegistry:
 
 
 @lru_cache(maxsize=1)
+def get_llm_call_guard() -> LLMCallGuard | None:
+    settings = get_settings()
+    if not settings.llm_call_limit_enabled:
+        return None
+    return LLMCallGuard(
+        enabled=True,
+        max_calls_per_hour=settings.llm_call_limit_per_hour,
+        alert_dispatcher=get_alert_dispatcher(),
+    )
+
+
+@lru_cache(maxsize=1)
+def get_circuit_breaker() -> CircuitBreaker | None:
+    settings = get_settings()
+    if not settings.llm_circuit_breaker_enabled:
+        return None
+    return CircuitBreaker(
+        failure_threshold=settings.llm_circuit_breaker_failure_threshold,
+        cooldown_seconds=settings.llm_circuit_breaker_cooldown_seconds,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_alert_dispatcher() -> AlertDispatcher:
+    settings = get_settings()
+    return AlertDispatcher(
+        alert_log_path=settings.alert_log_path,
+        webhook_url=settings.alert_webhook_url,
+    )
+
+
+@lru_cache(maxsize=1)
 def get_llm_provider() -> LLMProvider:
     settings = get_settings()
     settings.validate_llm_configuration()
     provider_name = settings.llm_provider_name
+    guard = get_llm_call_guard()
+    breaker = get_circuit_breaker()
     if provider_name == "mock":
-        return MockLLMProvider(model_name=settings.llm_model)
+        return MockLLMProvider(model_name=settings.llm_model, llm_call_guard=guard)
     if provider_name in {"dashscope_compatible", "dashscope", "aliyun"}:
         if settings.llm_api_key is None or settings.llm_base_url is None:
             raise ConfigurationError("DashScope-compatible provider requires API key and base URL configuration.")
@@ -174,6 +221,8 @@ def get_llm_provider() -> LLMProvider:
             max_retries=settings.llm_max_retries,
             temperature=settings.llm_temperature,
             max_output_tokens=settings.llm_max_output_tokens,
+            llm_call_guard=guard,
+            circuit_breaker=breaker,
         )
     raise ConfigurationError(f"Unsupported AGENT_EDU_LLM_PROVIDER value: {settings.llm_provider}")
 
@@ -326,6 +375,7 @@ def get_memory_service(session: AsyncSession) -> MemoryService:
         behavior_memory_embedding_repository=BehaviorMemoryEmbeddingRepository(session),
         evidence_link_repository=MemoryEvidenceLinkRepository(session),
         governance_decision_repository=MemoryGovernanceDecisionRepository(session),
+        promotion_eligibility_repository=MemoryPromotionEligibilityRepository(session),
         conflict_repository=MemoryConflictRepository(session),
         annotation_repository=MemoryAnnotationRepository(session),
         task_attempt_repository=TaskAttemptRepository(session),
@@ -348,6 +398,11 @@ def get_memory_service(session: AsyncSession) -> MemoryService:
             "reflection_effective_weight": settings.memory_reflection_effective_weight,
             "reflection_ineffective_weight": settings.memory_reflection_ineffective_weight,
             "compression_min_group_size": settings.memory_compression_min_group_size,
+            "promotion_eligibility_score_min": settings.memory_promotion_eligibility_score_min,
+            "promotion_eligibility_independent_source_min": settings.memory_promotion_eligibility_independent_source_min,
+            "promotion_eligibility_high_signal_min": settings.memory_promotion_eligibility_high_signal_min,
+            "promotion_eligibility_span_hours_min": settings.memory_promotion_eligibility_span_hours_min,
+            "promotion_eligibility_retrieval_weight": settings.memory_promotion_eligibility_retrieval_weight,
         },
     )
 
@@ -545,6 +600,55 @@ def get_skill_curator_recommendation_service(
     )
 
 
+def get_skill_replacement_auto_execution_scheduler(
+    session: AsyncSession,
+) -> SkillReplacementAutoExecutionScheduler:
+    settings = get_settings()
+    return SkillReplacementAutoExecutionScheduler(
+        recommendation_repository=SkillCuratorRecommendationRepository(session),
+        proposal_repository=ReflectionProposalRepository(session),
+        autonomy_job_repository=ScheduledAutonomyJobRepository(session),
+        autonomy_job_service=get_autonomy_job_service(session),
+        audit_service=get_audit_service(session),
+        config=SkillReplacementAutoExecutionConfig(
+            enabled=settings.skill_replacement_auto_execution_enabled,
+            scan_limit=settings.skill_replacement_auto_execution_scan_limit,
+            surfaces=frozenset(settings.skill_replacement_auto_execution_surfaces),
+            rate_limit_24h=settings.skill_replacement_auto_execution_24h_limit,
+        ),
+    )
+
+
+def get_skill_replacement_auto_execution_service(
+    session: AsyncSession,
+) -> SkillReplacementAutoExecutionService:
+    settings = get_settings()
+    recommendation_repository = SkillCuratorRecommendationRepository(session)
+    artifact_repository = SkillArtifactRepository(session)
+    proposal_repository = ReflectionProposalRepository(session)
+    return SkillReplacementAutoExecutionService(
+        recommendation_repository=recommendation_repository,
+        artifact_repository=artifact_repository,
+        proposal_repository=proposal_repository,
+        recommendation_service=SkillCuratorRecommendationService(
+            recommendation_repository=recommendation_repository,
+            artifact_repository=artifact_repository,
+            lifecycle_service=get_skill_artifact_lifecycle_service(session),
+            audit_service=get_audit_service(session),
+            proposal_service=get_reflection_proposal_service(session),
+        ),
+        readiness_service=get_skill_replacement_readiness_service(session),
+        audit_service=get_audit_service(session),
+        db_session=session,
+        config=SkillReplacementAutoExecutionConfig(
+            enabled=settings.skill_replacement_auto_execution_enabled,
+            scan_limit=settings.skill_replacement_auto_execution_scan_limit,
+            surfaces=frozenset(settings.skill_replacement_auto_execution_surfaces),
+            rate_limit_24h=settings.skill_replacement_auto_execution_24h_limit,
+        ),
+    )
+
+
 def get_skill_curator_job_service(
     session: AsyncSession = Depends(get_db_session),
 ) -> SkillCuratorJobService:
@@ -566,6 +670,7 @@ def get_skill_curator_job_service(
             audit_service=get_audit_service(session),
             proposal_service=get_reflection_proposal_service(session),
         ),
+        replacement_auto_execution_scheduler=get_skill_replacement_auto_execution_scheduler(session),
         audit_service=get_audit_service(session),
         memory_conflict_repository=MemoryConflictRepository(session),
         reflection_outcome_evaluation_repository=ReflectionOutcomeEvaluationRepository(session),
@@ -774,6 +879,28 @@ def get_reflection_proposal_sandbox_service(session: AsyncSession) -> Reflection
     )
 
 
+def get_reflection_skill_evolution_curator_service(
+    session: AsyncSession,
+) -> ReflectionSkillEvolutionCuratorService:
+    settings = get_settings()
+    return ReflectionSkillEvolutionCuratorService(
+        proposal_repository=ReflectionProposalRepository(session),
+        evaluation_repository=ReflectionProposalEvaluationRepository(session),
+        sandbox_run_repository=ReflectionProposalSandboxRunRepository(session),
+        artifact_repository=SkillArtifactRepository(session),
+        proposal_service=get_reflection_proposal_service(session),
+        staging_service=get_skill_replacement_staging_service(session),
+        audit_service=get_audit_service(session),
+        db_session=session,
+        config=ReflectionSkillEvolutionCuratorConfig(
+            enabled=settings.reflection_skill_evolution_curator_enabled,
+            auto_staging_enabled=settings.reflection_skill_auto_staging_enabled,
+            auto_stage_score_delta_min=settings.reflection_skill_auto_stage_score_delta_min,
+            auto_stage_24h_limit=settings.reflection_skill_auto_stage_24h_limit,
+        ),
+    )
+
+
 def get_reflection_proposal_rollout_resolver(session: AsyncSession) -> ReflectionProposalRolloutResolver:
     return ReflectionProposalRolloutResolver(
         rollout_repository=ReflectionProposalRolloutRepository(session),
@@ -887,6 +1014,8 @@ def _build_autonomous_task_core_service(session: AsyncSession) -> AutonomousTask
         reflection_proposal_sandbox_service=get_reflection_proposal_sandbox_service(session),
         reflection_proposal_rollout_service=get_reflection_proposal_rollout_service(session),
         reflection_proposal_rollout_decision_orchestrator=get_reflection_proposal_rollout_decision_orchestrator(session),
+        reflection_skill_evolution_curator_service=get_reflection_skill_evolution_curator_service(session),
+        skill_replacement_auto_execution_service=get_skill_replacement_auto_execution_service(session),
         rollout_resolver=get_reflection_proposal_rollout_resolver(session),
         rollout_observation_scheduler=get_reflection_proposal_rollout_observation_scheduler(session),
         goal_skill_binding_resolver=get_goal_skill_binding_resolver(session),

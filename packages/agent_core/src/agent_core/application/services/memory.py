@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from math import sqrt
 from time import perf_counter
-from typing import Any
+from typing import Any, TypeVar
 
 from agent_core.application.services.audit import AuditService
 from agent_core.application.services.memory_conflict_policy import (
@@ -32,6 +33,7 @@ from agent_core.domain.entities.memory import (
     MemoryEvent,
     MemoryEvidenceLink,
     MemoryGovernanceDecision,
+    MemoryPromotionEligibilityRecord,
     MemoryRetrievalResult,
     RetrievedBehaviorMemory,
     RetrievedKnowledgeMemory,
@@ -51,6 +53,7 @@ from agent_core.infrastructure.db.repositories import (
     MemoryEventRepository,
     MemoryEvidenceLinkRepository,
     MemoryGovernanceDecisionRepository,
+    MemoryPromotionEligibilityRepository,
     MemoryConflictRepository,
     TaskAttemptRepository,
 )
@@ -61,6 +64,7 @@ from agent_core.infrastructure.observability.metrics import (
     observe_memory_governance_decision,
     observe_memory_maintenance_run,
     observe_memory_quality_assessment,
+    observe_memory_promotion_eligibility,
     observe_memory_reflection_bridge,
     observe_memory_retrieval,
     set_memory_candidate_backlog,
@@ -130,6 +134,13 @@ class BehaviorEvidenceWeights:
 
 KNOWLEDGE_EVIDENCE_WEIGHTS = KnowledgeEvidenceWeights()
 BEHAVIOR_EVIDENCE_WEIGHTS = BehaviorEvidenceWeights()
+MemoryRecordT = TypeVar("MemoryRecordT", KnowledgeMemory, BehaviorMemory)
+MemoryEmbeddingRecordT = TypeVar(
+    "MemoryEmbeddingRecordT",
+    KnowledgeMemoryEmbeddingRecord,
+    BehaviorMemoryEmbeddingRecord,
+)
+KnowledgeEligibilityMap = dict[str, MemoryPromotionEligibilityRecord]
 
 
 @dataclass(frozen=True)
@@ -297,6 +308,7 @@ class MemoryService:
         evidence_link_repository: MemoryEvidenceLinkRepository | None = None,
         governance_decision_repository: MemoryGovernanceDecisionRepository | None = None,
         conflict_repository: MemoryConflictRepository | None = None,
+        promotion_eligibility_repository: MemoryPromotionEligibilityRepository | None = None,
         annotation_repository: MemoryAnnotationRepository | None = None,
         task_attempt_repository: TaskAttemptRepository | None = None,
         learner_topic_mastery_repository: LearnerTopicMasteryRepository | None = None,
@@ -313,6 +325,7 @@ class MemoryService:
         self._evidence_link_repository = evidence_link_repository
         self._governance_decision_repository = governance_decision_repository
         self._conflict_repository = conflict_repository
+        self._promotion_eligibility_repository = promotion_eligibility_repository
         self._annotation_repository = annotation_repository
         self._task_attempt_repository = task_attempt_repository
         self._learner_topic_mastery_repository = learner_topic_mastery_repository
@@ -778,7 +791,7 @@ class MemoryService:
         min_score: float = 0.15,
     ) -> KnowledgeMemoryRetrievalResult:
         if self._embedding_provider is None or self._knowledge_memory_embedding_repository is None:
-            return KnowledgeMemoryRetrievalResult(memories=[], provider=None, model=None, latency_ms=0, candidate_count=0)
+            return KnowledgeMemoryRetrievalResult(memories=[], provider=None, model=None, latency_ms=0, candidate_count=0, eligible_candidate_count=0)
 
         started_at = perf_counter()
         query_vectors = await self._embedding_provider.embed_texts([query_text])
@@ -789,15 +802,37 @@ class MemoryService:
                 model=self._embedding_provider.model_name,
                 latency_ms=int((perf_counter() - started_at) * 1000),
                 candidate_count=0,
+                eligible_candidate_count=0,
             )
         query_vector = query_vectors[0]
-        candidates = await self._knowledge_memory_embedding_repository.list_recent_by_profile(
+        active_candidates = await self._knowledge_memory_embedding_repository.list_recent_by_profile(
             learner_profile_id=learner_profile_id,
             limit=candidate_limit,
         )
+        eligible_embeddings = []
+        if self._promotion_eligibility_repository is not None:
+            eligible_records = await self._promotion_eligibility_repository.list_current_eligible_by_profile(
+                learner_profile_id=learner_profile_id,
+                limit=candidate_limit,
+            )
+            eligible_ids = {item.memory_id: item for item in eligible_records}
+            eligible_embeddings = await self._knowledge_memory_embedding_repository.list_by_memory_ids(
+                learner_profile_id=learner_profile_id,
+                memory_ids=list(eligible_ids),
+                statuses={"candidate"},
+            )
+        else:
+            eligible_records = []
+            eligible_ids = {}
+        candidates = active_candidates + [item for item in eligible_embeddings if item.memory_id not in {cand.memory_id for cand in active_candidates}]
         scored: list[RetrievedKnowledgeMemory] = []
+        eligible_candidate_count = 0
+        retrieval_weight = float(self._governance_config.get("promotion_eligibility_retrieval_weight", 0.65))
         for item in candidates:
-            if not item.vector or item.status not in MEMORY_RETRIEVAL_STATUSES:
+            eligible_record = eligible_ids.get(item.memory_id)
+            if not item.vector:
+                continue
+            if item.status not in MEMORY_RETRIEVAL_STATUSES and eligible_record is None:
                 continue
             score = self._score_long_term_memory(
                 vector=item.vector,
@@ -809,6 +844,11 @@ class MemoryService:
                 goal_relevance_score=item.goal_relevance_score,
                 created_at=item.created_at,
             )
+            governance_state = item.status
+            if eligible_record is not None and item.status == "candidate":
+                score *= retrieval_weight
+                governance_state = "candidate_eligible"
+                eligible_candidate_count += 1
             scored.append(
                 RetrievedKnowledgeMemory(
                     memory_id=item.memory_id,
@@ -823,6 +863,8 @@ class MemoryService:
                     stability_score=item.stability_score,
                     goal_relevance_score=item.goal_relevance_score,
                     status=item.status,
+                    governance_state=governance_state,
+                    eligibility_score=eligible_record.score if eligible_record is not None else None,
                     score=score,
                     created_at=item.created_at,
                 )
@@ -833,6 +875,7 @@ class MemoryService:
             memory_type="knowledge",
             result_count=len(memories),
             candidate_count=len(candidates),
+            eligible_candidate_count=eligible_candidate_count,
         )
         return KnowledgeMemoryRetrievalResult(
             memories=memories,
@@ -840,6 +883,7 @@ class MemoryService:
             model=self._embedding_provider.model_name,
             latency_ms=int((perf_counter() - started_at) * 1000),
             candidate_count=len(candidates),
+            eligible_candidate_count=eligible_candidate_count,
         )
 
     async def retrieve_relevant_behavior_memories(
@@ -1441,6 +1485,152 @@ class MemoryService:
                 count=open_counts.get("contradictory_evidence", 0),
             )
 
+    def _summarize_governance_batch_change(
+        self,
+        previous: MemoryRecordT,
+        refreshed: MemoryRecordT,
+    ) -> tuple[int, int, int, int]:
+        if refreshed.status != previous.status:
+            if refreshed.status in {"active", "stable"} and previous.status in {"candidate", "active"}:
+                return (1, 0, 0, 0)
+            if refreshed.status == "suppressed":
+                return (0, 0, 1, 0)
+            if previous.status == "stable" and refreshed.status == "active":
+                return (0, 1, 0, 0)
+            return (0, 0, 0, 0)
+        if self._has_material_refresh_change(previous, refreshed):
+            return (0, 0, 0, 1)
+        return (0, 0, 0, 0)
+
+    async def _run_governance_batch(
+        self,
+        *,
+        learner_profile_id: str,
+        cursor: str | None,
+        batch_size: int,
+        list_batch: Callable[[str, str | None, int], Awaitable[list[MemoryRecordT]]],
+        refresh_memory: Callable[[MemoryRecordT], Awaitable[MemoryRecordT]],
+    ) -> MemoryMaintenanceBatchResult:
+        normalized_batch_size = max(batch_size, 1)
+        fetched = await list_batch(learner_profile_id, cursor, normalized_batch_size + 1)
+        batch = fetched[:normalized_batch_size]
+        promoted = 0
+        demoted = 0
+        suppressed = 0
+        refreshed_count = 0
+        for memory in batch:
+            refreshed = await refresh_memory(memory)
+            promoted_delta, demoted_delta, suppressed_delta, refreshed_delta = self._summarize_governance_batch_change(memory, refreshed)
+            promoted += promoted_delta
+            demoted += demoted_delta
+            suppressed += suppressed_delta
+            refreshed_count += refreshed_delta
+        next_cursor = batch[-1].id if batch else cursor
+        return MemoryMaintenanceBatchResult(
+            processed_count=len(batch),
+            changed_count=promoted + demoted + suppressed + refreshed_count,
+            next_cursor=next_cursor,
+            completed=len(fetched) <= normalized_batch_size,
+            metadata={
+                "promoted": promoted,
+                "demoted": demoted,
+                "suppressed": suppressed,
+                "refreshed": refreshed_count,
+            },
+        )
+
+    async def _refresh_and_govern_memories(
+        self,
+        *,
+        list_profile_ids: Callable[[], Awaitable[list[str]]],
+        list_memories: Callable[[str], Awaitable[list[MemoryRecordT]]],
+        refresh_memory: Callable[[MemoryRecordT], Awaitable[MemoryRecordT]],
+    ) -> tuple[int, int]:
+        promoted = 0
+        demoted = 0
+        for profile_id in await list_profile_ids():
+            memories = await list_memories(profile_id)
+            for memory in memories:
+                refreshed = await refresh_memory(memory)
+                promoted_delta, demoted_delta, _, _ = self._summarize_governance_batch_change(memory, refreshed)
+                promoted += promoted_delta
+                demoted += demoted_delta
+        return (promoted, demoted)
+
+    async def _compress_memories_for_profile(
+        self,
+        *,
+        learner_profile_id: str,
+        cursor: str | None,
+        batch_size: int,
+        list_active_memories: Callable[[str], Awaitable[list[MemoryRecordT]]],
+        list_embeddings_by_memory_ids: Callable[[str, list[str]], Awaitable[list[MemoryEmbeddingRecordT]]],
+        cluster_memories: Callable[[list[MemoryRecordT]], list[list[MemoryRecordT]]],
+        compress_group: Callable[[list[MemoryRecordT], dict[str, MemoryEmbeddingRecordT]], Awaitable[int]],
+    ) -> MemoryMaintenanceBatchResult:
+        active_memories = await list_active_memories(learner_profile_id)
+        groups = sorted(
+            cluster_memories(active_memories),
+            key=lambda group: min(item.id for item in group),
+        )
+        groups = [group for group in groups if cursor is None or min(item.id for item in group) > cursor]
+        normalized_batch_size = max(batch_size, 1)
+        batch = groups[:normalized_batch_size]
+        source_groups = [
+            sorted(
+                sorted(group, key=lambda item: item.id)[: max(batch_size, 2)],
+                key=lambda item: (item.importance_score, item.updated_at),
+                reverse=True,
+            )
+            for group in batch
+        ]
+        batch_memory_ids = sorted({memory.id for group in source_groups for memory in group})
+        embeddings = await list_embeddings_by_memory_ids(learner_profile_id, batch_memory_ids)
+        embeddings_by_memory_id = {item.memory_id: item for item in embeddings}
+        compressed_groups = 0
+        next_cursor = cursor
+        for group, source_group in zip(batch, source_groups):
+            next_cursor = min(item.id for item in group)
+            compressed_groups += await compress_group(source_group, embeddings_by_memory_id)
+        return MemoryMaintenanceBatchResult(
+            processed_count=len(batch),
+            changed_count=compressed_groups,
+            next_cursor=next_cursor,
+            completed=len(groups) <= normalized_batch_size,
+            metadata={"compressed_groups": compressed_groups},
+        )
+
+    async def _compress_memories(
+        self,
+        *,
+        batch_size: int,
+        list_profile_ids: Callable[[], Awaitable[list[str]]],
+        list_active_memories: Callable[[str], Awaitable[list[MemoryRecordT]]],
+        list_embeddings_by_memory_ids: Callable[[str, list[str]], Awaitable[list[MemoryEmbeddingRecordT]]],
+        cluster_memories: Callable[[list[MemoryRecordT]], list[list[MemoryRecordT]]],
+        compress_group: Callable[[list[MemoryRecordT], dict[str, MemoryEmbeddingRecordT]], Awaitable[int]],
+    ) -> int:
+        compressed_groups = 0
+        for learner_profile_id in await list_profile_ids():
+            active_memories = await list_active_memories(learner_profile_id)
+            if len(active_memories) < 2:
+                continue
+            for group in cluster_memories(active_memories):
+                if len(group) < 2:
+                    continue
+                sorted_group = sorted(
+                    group,
+                    key=lambda item: (item.importance_score, item.updated_at),
+                    reverse=True,
+                )[:batch_size]
+                embeddings = await list_embeddings_by_memory_ids(
+                    learner_profile_id,
+                    [memory.id for memory in sorted_group],
+                )
+                embeddings_by_memory_id = {item.memory_id: item for item in embeddings}
+                compressed_groups += await compress_group(sorted_group, embeddings_by_memory_id)
+        return compressed_groups
+
     async def run_knowledge_governance_batch(
         self,
         *,
@@ -1448,38 +1638,80 @@ class MemoryService:
         cursor: str | None,
         batch_size: int,
     ) -> MemoryMaintenanceBatchResult:
-        if self._knowledge_memory_repository is None:
+        repository = self._knowledge_memory_repository
+        if repository is None:
+            return MemoryMaintenanceBatchResult(processed_count=0, changed_count=0, next_cursor=None, completed=True)
+        normalized_batch_size = max(batch_size, 1)
+        fetched = await repository.list_by_profile_after_id(
+            learner_profile_id=learner_profile_id,
+            statuses={"candidate", "active", "stable"},
+            after_id=cursor,
+            limit=normalized_batch_size + 1,
+        )
+        batch = fetched[:normalized_batch_size]
+        eligibility_by_memory_id: KnowledgeEligibilityMap = {}
+        if self._promotion_eligibility_repository is not None and batch:
+            eligibility_by_memory_id = await self._promotion_eligibility_repository.list_current_by_memory_ids(
+                memory_ids=[memory.id for memory in batch if memory.status == "candidate"],
+            )
+        promoted = 0
+        demoted = 0
+        suppressed = 0
+        refreshed_count = 0
+        for memory in batch:
+            refreshed = await self._refresh_knowledge_memory(
+                memory,
+                eligibility=eligibility_by_memory_id.get(memory.id),
+                eligibility_prefetched=True,
+            )
+            promoted_delta, demoted_delta, suppressed_delta, refreshed_delta = self._summarize_governance_batch_change(memory, refreshed)
+            promoted += promoted_delta
+            demoted += demoted_delta
+            suppressed += suppressed_delta
+            refreshed_count += refreshed_delta
+        next_cursor = batch[-1].id if batch else cursor
+        return MemoryMaintenanceBatchResult(
+            processed_count=len(batch),
+            changed_count=promoted + demoted + suppressed + refreshed_count,
+            next_cursor=next_cursor,
+            completed=len(fetched) <= normalized_batch_size,
+            metadata={
+                "promoted": promoted,
+                "demoted": demoted,
+                "suppressed": suppressed,
+                "refreshed": refreshed_count,
+            },
+        )
+
+
+    # MVP scope: only knowledge memories are evaluated for promotion eligibility.
+    async def run_knowledge_promotion_eligibility_batch(
+        self,
+        *,
+        learner_profile_id: str,
+        cursor: str | None,
+        batch_size: int,
+    ) -> MemoryMaintenanceBatchResult:
+        if self._knowledge_memory_repository is None or self._promotion_eligibility_repository is None:
             return MemoryMaintenanceBatchResult(processed_count=0, changed_count=0, next_cursor=None, completed=True)
         fetched = await self._knowledge_memory_repository.list_by_profile_after_id(
             learner_profile_id=learner_profile_id,
-            statuses={"candidate", "active", "stable"},
+            statuses={"candidate"},
             after_id=cursor,
             limit=max(batch_size, 1) + 1,
         )
         batch = fetched[: max(batch_size, 1)]
-        promoted = 0
-        demoted = 0
-        refreshed_count = 0
+        changed_count = 0
         for memory in batch:
-            refreshed = await self._refresh_knowledge_memory(memory)
-            if refreshed.status != memory.status:
-                if refreshed.status in {"active", "stable"} and memory.status in {"candidate", "active"}:
-                    promoted += 1
-                elif memory.status == "stable" and refreshed.status == "active":
-                    demoted += 1
-            elif self._has_material_refresh_change(memory, refreshed):
-                refreshed_count += 1
+            record = await self._evaluate_knowledge_promotion_eligibility(memory)
+            changed_count += 1 if record is not None else 0
         next_cursor = batch[-1].id if batch else cursor
         return MemoryMaintenanceBatchResult(
             processed_count=len(batch),
-            changed_count=promoted + demoted + refreshed_count,
+            changed_count=changed_count,
             next_cursor=next_cursor,
             completed=len(fetched) <= max(batch_size, 1),
-            metadata={
-                "promoted": promoted,
-                "demoted": demoted,
-                "refreshed": refreshed_count,
-            },
+            metadata={"evaluated": changed_count},
         )
 
     async def run_behavior_governance_batch(
@@ -1489,38 +1721,20 @@ class MemoryService:
         cursor: str | None,
         batch_size: int,
     ) -> MemoryMaintenanceBatchResult:
-        if self._behavior_memory_repository is None:
+        repository = self._behavior_memory_repository
+        if repository is None:
             return MemoryMaintenanceBatchResult(processed_count=0, changed_count=0, next_cursor=None, completed=True)
-        fetched = await self._behavior_memory_repository.list_by_profile_after_id(
+        return await self._run_governance_batch(
             learner_profile_id=learner_profile_id,
-            statuses={"candidate", "active", "stable"},
-            after_id=cursor,
-            limit=max(batch_size, 1) + 1,
-        )
-        batch = fetched[: max(batch_size, 1)]
-        promoted = 0
-        demoted = 0
-        refreshed_count = 0
-        for memory in batch:
-            refreshed = await self._refresh_behavior_memory(memory)
-            if refreshed.status != memory.status:
-                if refreshed.status in {"active", "stable"} and memory.status in {"candidate", "active"}:
-                    promoted += 1
-                elif memory.status == "stable" and refreshed.status == "active":
-                    demoted += 1
-            elif self._has_material_refresh_change(memory, refreshed):
-                refreshed_count += 1
-        next_cursor = batch[-1].id if batch else cursor
-        return MemoryMaintenanceBatchResult(
-            processed_count=len(batch),
-            changed_count=promoted + demoted + refreshed_count,
-            next_cursor=next_cursor,
-            completed=len(fetched) <= max(batch_size, 1),
-            metadata={
-                "promoted": promoted,
-                "demoted": demoted,
-                "refreshed": refreshed_count,
-            },
+            cursor=cursor,
+            batch_size=batch_size,
+            list_batch=lambda profile_id, after_id, limit: repository.list_by_profile_after_id(
+                learner_profile_id=profile_id,
+                statuses={"candidate", "active", "stable"},
+                after_id=after_id,
+                limit=limit,
+            ),
+            refresh_memory=self._refresh_behavior_memory,
         )
 
     async def compress_knowledge_memories_for_profile(
@@ -1530,42 +1744,28 @@ class MemoryService:
         cursor: str | None,
         batch_size: int,
     ) -> MemoryMaintenanceBatchResult:
-        if (
-            self._knowledge_memory_repository is None
-            or self._knowledge_memory_embedding_repository is None
-            or self._embedding_provider is None
-        ):
+        repository = self._knowledge_memory_repository
+        embedding_repository = self._knowledge_memory_embedding_repository
+        if repository is None or embedding_repository is None or self._embedding_provider is None:
             return MemoryMaintenanceBatchResult(processed_count=0, changed_count=0, next_cursor=None, completed=True)
-        active_memories = await self._knowledge_memory_repository.list_by_profile(
-            learner_profile_id,
-            statuses={"active", "stable"},
-        )
-        embeddings = await self._knowledge_memory_embedding_repository.list_by_profile(
-            learner_profile_id=learner_profile_id
-        )
-        embeddings_by_memory_id = {item.memory_id: item for item in embeddings}
-        groups = sorted(
-            self._cluster_knowledge_memories(active_memories),
-            key=lambda group: min(item.id for item in group),
-        )
-        groups = [group for group in groups if cursor is None or min(item.id for item in group) > cursor]
-        batch = groups[: max(batch_size, 1)]
-        compressed_groups = 0
-        next_cursor = cursor
-        for group in batch:
-            next_cursor = min(item.id for item in group)
-            source_batch = sorted(group, key=lambda item: item.id)[: max(batch_size, 2)]
-            sorted_group = sorted(source_batch, key=lambda item: (item.importance_score, item.updated_at), reverse=True)
-            compressed_groups += await self._compress_knowledge_group(
-                sorted_group,
+        return await self._compress_memories_for_profile(
+            learner_profile_id=learner_profile_id,
+            cursor=cursor,
+            batch_size=batch_size,
+            list_active_memories=lambda profile_id: repository.list_by_profile(
+                profile_id,
+                statuses={"active", "stable"},
+            ),
+            list_embeddings_by_memory_ids=lambda profile_id, memory_ids: embedding_repository.list_by_memory_ids(
+                learner_profile_id=profile_id,
+                memory_ids=memory_ids,
+                statuses={"active", "stable"},
+            ),
+            cluster_memories=self._cluster_knowledge_memories,
+            compress_group=lambda group, embeddings_by_memory_id: self._compress_knowledge_group(
+                group,
                 embeddings_by_memory_id=embeddings_by_memory_id,
-            )
-        return MemoryMaintenanceBatchResult(
-            processed_count=len(batch),
-            changed_count=compressed_groups,
-            next_cursor=next_cursor,
-            completed=len(groups) <= max(batch_size, 1),
-            metadata={"compressed_groups": compressed_groups},
+            ),
         )
 
     async def compress_behavior_memories_for_profile(
@@ -1575,42 +1775,28 @@ class MemoryService:
         cursor: str | None,
         batch_size: int,
     ) -> MemoryMaintenanceBatchResult:
-        if (
-            self._behavior_memory_repository is None
-            or self._behavior_memory_embedding_repository is None
-            or self._embedding_provider is None
-        ):
+        repository = self._behavior_memory_repository
+        embedding_repository = self._behavior_memory_embedding_repository
+        if repository is None or embedding_repository is None or self._embedding_provider is None:
             return MemoryMaintenanceBatchResult(processed_count=0, changed_count=0, next_cursor=None, completed=True)
-        active_memories = await self._behavior_memory_repository.list_by_profile(
-            learner_profile_id,
-            statuses={"active", "stable"},
-        )
-        embeddings = await self._behavior_memory_embedding_repository.list_by_profile(
-            learner_profile_id=learner_profile_id
-        )
-        embeddings_by_memory_id = {item.memory_id: item for item in embeddings}
-        groups = sorted(
-            self._cluster_behavior_memories(active_memories),
-            key=lambda group: min(item.id for item in group),
-        )
-        groups = [group for group in groups if cursor is None or min(item.id for item in group) > cursor]
-        batch = groups[: max(batch_size, 1)]
-        compressed_groups = 0
-        next_cursor = cursor
-        for group in batch:
-            next_cursor = min(item.id for item in group)
-            source_batch = sorted(group, key=lambda item: item.id)[: max(batch_size, 2)]
-            sorted_group = sorted(source_batch, key=lambda item: (item.importance_score, item.updated_at), reverse=True)
-            compressed_groups += await self._compress_behavior_group(
-                sorted_group,
+        return await self._compress_memories_for_profile(
+            learner_profile_id=learner_profile_id,
+            cursor=cursor,
+            batch_size=batch_size,
+            list_active_memories=lambda profile_id: repository.list_by_profile(
+                profile_id,
+                statuses={"active", "stable"},
+            ),
+            list_embeddings_by_memory_ids=lambda profile_id, memory_ids: embedding_repository.list_by_memory_ids(
+                learner_profile_id=profile_id,
+                memory_ids=memory_ids,
+                statuses={"active", "stable"},
+            ),
+            cluster_memories=self._cluster_behavior_memories,
+            compress_group=lambda group, embeddings_by_memory_id: self._compress_behavior_group(
+                group,
                 embeddings_by_memory_id=embeddings_by_memory_id,
-            )
-        return MemoryMaintenanceBatchResult(
-            processed_count=len(batch),
-            changed_count=compressed_groups,
-            next_cursor=next_cursor,
-            completed=len(groups) <= max(batch_size, 1),
-            metadata={"compressed_groups": compressed_groups},
+            ),
         )
 
     async def refresh_conflict_sets_for_profile(
@@ -1979,64 +2165,52 @@ class MemoryService:
         return updates
 
     async def compress_knowledge_memories(self, *, batch_size: int = 5) -> int:
-        if (
-            self._knowledge_memory_repository is None
-            or self._knowledge_memory_embedding_repository is None
-            or self._embedding_provider is None
-        ):
+        repository = self._knowledge_memory_repository
+        embedding_repository = self._knowledge_memory_embedding_repository
+        if repository is None or embedding_repository is None or self._embedding_provider is None:
             return 0
-        compressed_groups = 0
-        profile_ids = await self._knowledge_memory_repository.list_profile_ids_with_active_memories()
-        for learner_profile_id in profile_ids:
-            active_memories = await self._knowledge_memory_repository.list_by_profile(
-                learner_profile_id,
+        return await self._compress_memories(
+            batch_size=batch_size,
+            list_profile_ids=repository.list_profile_ids_with_active_memories,
+            list_active_memories=lambda profile_id: repository.list_by_profile(
+                profile_id,
                 statuses={"active", "stable"},
-            )
-            if len(active_memories) < 2:
-                continue
-            embeddings = await self._knowledge_memory_embedding_repository.list_by_profile(
-                learner_profile_id=learner_profile_id
-            )
-            embeddings_by_memory_id = {item.memory_id: item for item in embeddings}
-            for group in self._cluster_knowledge_memories(active_memories):
-                if len(group) < 2:
-                    continue
-                group = sorted(group, key=lambda item: (item.importance_score, item.updated_at), reverse=True)[:batch_size]
-                compressed_groups += await self._compress_knowledge_group(
-                    group,
-                    embeddings_by_memory_id=embeddings_by_memory_id,
-                )
-        return compressed_groups
+            ),
+            list_embeddings_by_memory_ids=lambda profile_id, memory_ids: embedding_repository.list_by_memory_ids(
+                learner_profile_id=profile_id,
+                memory_ids=memory_ids,
+                statuses={"active", "stable"},
+            ),
+            cluster_memories=self._cluster_knowledge_memories,
+            compress_group=lambda group, embeddings_by_memory_id: self._compress_knowledge_group(
+                group,
+                embeddings_by_memory_id=embeddings_by_memory_id,
+            ),
+        )
 
     async def compress_behavior_memories(self, *, batch_size: int = 5) -> int:
-        if (
-            self._behavior_memory_repository is None
-            or self._behavior_memory_embedding_repository is None
-            or self._embedding_provider is None
-        ):
+        repository = self._behavior_memory_repository
+        embedding_repository = self._behavior_memory_embedding_repository
+        if repository is None or embedding_repository is None or self._embedding_provider is None:
             return 0
-        compressed_groups = 0
-        profile_ids = await self._behavior_memory_repository.list_profile_ids_with_active_memories()
-        for learner_profile_id in profile_ids:
-            active_memories = await self._behavior_memory_repository.list_by_profile(
-                learner_profile_id,
+        return await self._compress_memories(
+            batch_size=batch_size,
+            list_profile_ids=repository.list_profile_ids_with_active_memories,
+            list_active_memories=lambda profile_id: repository.list_by_profile(
+                profile_id,
                 statuses={"active", "stable"},
-            )
-            if len(active_memories) < 2:
-                continue
-            embeddings = await self._behavior_memory_embedding_repository.list_by_profile(
-                learner_profile_id=learner_profile_id
-            )
-            embeddings_by_memory_id = {item.memory_id: item for item in embeddings}
-            for group in self._cluster_behavior_memories(active_memories):
-                if len(group) < 2:
-                    continue
-                group = sorted(group, key=lambda item: (item.importance_score, item.updated_at), reverse=True)[:batch_size]
-                compressed_groups += await self._compress_behavior_group(
-                    group,
-                    embeddings_by_memory_id=embeddings_by_memory_id,
-                )
-        return compressed_groups
+            ),
+            list_embeddings_by_memory_ids=lambda profile_id, memory_ids: embedding_repository.list_by_memory_ids(
+                learner_profile_id=profile_id,
+                memory_ids=memory_ids,
+                statuses={"active", "stable"},
+            ),
+            cluster_memories=self._cluster_behavior_memories,
+            compress_group=lambda group, embeddings_by_memory_id: self._compress_behavior_group(
+                group,
+                embeddings_by_memory_id=embeddings_by_memory_id,
+            ),
+        )
 
     async def _compress_knowledge_group(
         self,
@@ -2227,6 +2401,7 @@ class MemoryService:
                 model=self._embedding_provider.model_name,
                 latency_ms=int((perf_counter() - started_at) * 1000),
                 candidate_count=0,
+                eligible_candidate_count=0,
             )
         candidates = await fetch()
         query_vector = query_vectors[0]
@@ -2418,44 +2593,38 @@ class MemoryService:
         )
 
     async def _refresh_and_govern_knowledge(self) -> tuple[int, int]:
-        if self._knowledge_memory_repository is None:
+        repository = self._knowledge_memory_repository
+        if repository is None:
             return (0, 0)
-        promoted = 0
-        demoted = 0
-        for profile_id in await self._knowledge_memory_repository.list_profile_ids_with_statuses({"candidate", "active", "stable"}):
-            memories = await self._knowledge_memory_repository.list_by_profile(
+        return await self._refresh_and_govern_memories(
+            list_profile_ids=lambda: repository.list_profile_ids_with_statuses({"candidate", "active", "stable"}),
+            list_memories=lambda profile_id: repository.list_by_profile(
                 profile_id,
                 statuses={"candidate", "active", "stable"},
-            )
-            for memory in memories:
-                refreshed = await self._refresh_knowledge_memory(memory)
-                if refreshed.status != memory.status:
-                    if refreshed.status in {"active", "stable"} and memory.status in {"candidate", "active"}:
-                        promoted += 1
-                    elif memory.status == "stable" and refreshed.status == "active":
-                        demoted += 1
-        return (promoted, demoted)
+            ),
+            refresh_memory=self._refresh_knowledge_memory,
+        )
 
     async def _refresh_and_govern_behavior(self) -> tuple[int, int]:
-        if self._behavior_memory_repository is None:
+        repository = self._behavior_memory_repository
+        if repository is None:
             return (0, 0)
-        promoted = 0
-        demoted = 0
-        for profile_id in await self._behavior_memory_repository.list_profile_ids_with_statuses({"candidate", "active", "stable"}):
-            memories = await self._behavior_memory_repository.list_by_profile(
+        return await self._refresh_and_govern_memories(
+            list_profile_ids=lambda: repository.list_profile_ids_with_statuses({"candidate", "active", "stable"}),
+            list_memories=lambda profile_id: repository.list_by_profile(
                 profile_id,
                 statuses={"candidate", "active", "stable"},
-            )
-            for memory in memories:
-                refreshed = await self._refresh_behavior_memory(memory)
-                if refreshed.status != memory.status:
-                    if refreshed.status in {"active", "stable"} and memory.status in {"candidate", "active"}:
-                        promoted += 1
-                    elif memory.status == "stable" and refreshed.status == "active":
-                        demoted += 1
-        return (promoted, demoted)
+            ),
+            refresh_memory=self._refresh_behavior_memory,
+        )
 
-    async def _refresh_knowledge_memory(self, memory: KnowledgeMemory) -> KnowledgeMemory:
+    async def _refresh_knowledge_memory(
+        self,
+        memory: KnowledgeMemory,
+        *,
+        eligibility: MemoryPromotionEligibilityRecord | None = None,
+        eligibility_prefetched: bool = False,
+    ) -> KnowledgeMemory:
         attempts = await self._list_relevant_attempts(memory.learner_goal_id, memory.knowledge_key)
         mastery = await self._get_relevant_mastery(memory.learner_goal_id, memory.knowledge_key)
         events = await self._list_relevant_events(memory.learner_profile_id, memory.knowledge_key)
@@ -2509,27 +2678,18 @@ class MemoryService:
                 scope_type=memory.scope_type,
             ),
         )
-        next_status = self._govern_knowledge_status(refreshed)
+        next_status = await self._govern_knowledge_status(
+            refreshed,
+            eligibility=eligibility,
+            eligibility_prefetched=eligibility_prefetched,
+        )
         if next_status != refreshed.status:
-            updated = refreshed.with_status(
-                next_status,
-                promotion_state_changed_at=datetime.now(timezone.utc),
-                promotion_rationale=self._promotion_rationale(updated_status=next_status, memory=refreshed),
-            )
-            await self._knowledge_memory_repository.update(updated)
-            await self._sync_knowledge_embedding(updated)
-            await self._record_governance_decision(
-                memory_type="knowledge",
-                memory_id=updated.id,
-                previous_status=memory.status,
-                new_status=updated.status,
-                decision_type=self._decision_type_for_transition(memory.status, updated.status),
-                trigger_source="promotion_cycle" if updated.status in {"active", "stable"} else "decay_cycle",
-                actor_type="system",
-                actor_id="worker",
-                reason_code="knowledge_governance_cycle",
-                reason_note=None,
-                metrics_snapshot=self._metrics_snapshot(updated),
+            updated = await self._apply_knowledge_status_transition(
+                original=memory,
+                refreshed=refreshed,
+                next_status=next_status,
+                eligibility=eligibility,
+                eligibility_prefetched=eligibility_prefetched,
             )
             return updated
         await self._knowledge_memory_repository.update(refreshed)
@@ -2645,11 +2805,147 @@ class MemoryService:
             )
         return refreshed
 
-    async def _sync_knowledge_embedding(self, memory: KnowledgeMemory) -> None:
+
+    async def _evaluate_knowledge_promotion_eligibility(
+        self,
+        memory: KnowledgeMemory,
+    ) -> MemoryPromotionEligibilityRecord | None:
+        if self._promotion_eligibility_repository is None or self._knowledge_memory_repository is None:
+            return None
+        reasons: list[str] = []
+        if memory.status == "suppressed":
+            reasons.append("suppressed_blocked")
+            status = "suppressed_blocked"
+            score = 0.0
+            record = MemoryPromotionEligibilityRecord.build(
+                memory_id=memory.id,
+                learner_profile_id=memory.learner_profile_id,
+                learner_goal_id=memory.learner_goal_id,
+                status=status,
+                score=score,
+                independent_source_count=0,
+                high_signal_source_count=0,
+                evidence_span_hours=0.0,
+                conflict_blocked=False,
+                blocked_conflict_set_id=None,
+                blocked_memory_id=None,
+                reason_codes=reasons,
+                metrics_snapshot={"quality_score": self._knowledge_quality_score(memory)},
+                evaluated_at=datetime.now(timezone.utc),
+            )
+            await self._promotion_eligibility_repository.upsert_current(record)
+            observe_memory_promotion_eligibility(memory_type="knowledge", status=status)
+            return record
+        links = await self.list_evidence_links(memory_type="knowledge", memory_id=memory.id)
+        independent_sources = {(item.evidence_source_type, item.evidence_source_id) for item in links}
+        high_signal_sources = [
+            item for item in links
+            if (item.evidence_source_type == "task_attempt" and str(item.payload.get("task_type")) in {"assessment", "quiz", "test"})
+            or item.evidence_source_type == "reflection_outcome"
+        ]
+        observed_times = sorted(item.observed_at for item in links)
+        span_hours = 0.0
+        if len(observed_times) >= 2:
+            span_hours = max((observed_times[-1] - observed_times[0]).total_seconds() / 3600.0, 0.0)
+        evidence_strength = self._clamp_score((len(independent_sources) / max(int(self._governance_config.get("promotion_eligibility_independent_source_min", 3)), 1)) * 0.5 + (min(len(high_signal_sources), 2) / 2.0) * 0.3 + min(span_hours / max(float(self._governance_config.get("promotion_eligibility_span_hours_min", 24.0)), 1.0), 1.0) * 0.2)
+        score = self._clamp_score(0.35 * evidence_strength + 0.30 * memory.confidence_score + 0.20 * memory.freshness_score + 0.15 * memory.stability_score)
+        conflict_memory = await self._knowledge_memory_repository.get_active_or_stable_conflict(
+            learner_profile_id=memory.learner_profile_id,
+            learner_goal_id=memory.learner_goal_id,
+            knowledge_key=memory.knowledge_key,
+            exclude_memory_id=memory.id,
+        )
+        if len(independent_sources) < int(self._governance_config.get("promotion_eligibility_independent_source_min", 3)):
+            reasons.append("independent_source_count_below_min")
+        if len(high_signal_sources) < int(self._governance_config.get("promotion_eligibility_high_signal_min", 1)):
+            reasons.append("high_signal_count_below_min")
+        if span_hours < float(self._governance_config.get("promotion_eligibility_span_hours_min", 24.0)):
+            reasons.append("evidence_span_below_min")
+        if score < float(self._governance_config.get("promotion_eligibility_score_min", 0.75)):
+            reasons.append("score_below_min")
+        if conflict_memory is not None:
+            reasons.append("active_or_stable_conflict_exists")
+        if conflict_memory is not None:
+            status = "conflict_blocked"
+        elif any(code in reasons for code in {"independent_source_count_below_min", "high_signal_count_below_min", "evidence_span_below_min"}):
+            status = "insufficient_evidence"
+        elif "score_below_min" in reasons:
+            status = "below_score"
+        else:
+            status = "eligible"
+        record = MemoryPromotionEligibilityRecord.build(
+            memory_id=memory.id,
+            learner_profile_id=memory.learner_profile_id,
+            learner_goal_id=memory.learner_goal_id,
+            status=status,
+            score=score,
+            independent_source_count=len(independent_sources),
+            high_signal_source_count=len(high_signal_sources),
+            evidence_span_hours=span_hours,
+            conflict_blocked=conflict_memory is not None,
+            blocked_conflict_set_id=None,
+            blocked_memory_id=conflict_memory.id if conflict_memory is not None else None,
+            reason_codes=reasons or [status],
+            metrics_snapshot={
+                "quality_score": self._knowledge_quality_score(memory),
+                "confidence_score": memory.confidence_score,
+                "freshness_score": memory.freshness_score,
+                "stability_score": memory.stability_score,
+                "evidence_strength": evidence_strength,
+            },
+            evaluated_at=datetime.now(timezone.utc),
+        )
+        await self._promotion_eligibility_repository.upsert_current(record)
+        observe_memory_promotion_eligibility(memory_type="knowledge", status=status)
+        if self._audit_service is not None:
+            await self._audit_service.record(
+                event_type="knowledge_memory.promotion_eligibility_evaluated",
+                resource_type="knowledge_memory",
+                resource_id=memory.id,
+                actor="system",
+                event_data={
+                    "memory_id": memory.id,
+                    "status": status,
+                    "score": score,
+                    "independent_source_count": len(independent_sources),
+                    "high_signal_source_count": len(high_signal_sources),
+                    "evidence_span_hours": span_hours,
+                    "reason_codes": reasons,
+                    "blocked_memory_id": conflict_memory.id if conflict_memory is not None else None,
+                },
+            )
+        return record
+
+    async def _sync_knowledge_embedding(self, memory: KnowledgeMemory, *, create_missing: bool = False) -> None:
         if self._knowledge_memory_embedding_repository is None:
             return
         embedding = await self._knowledge_memory_embedding_repository.get_by_memory_id(memory.id)
         if embedding is None:
+            if not create_missing or self._embedding_provider is None:
+                return
+            vector = (await self._embedding_provider.embed_texts([memory.summary]))[0]
+            await self._knowledge_memory_embedding_repository.create(
+                KnowledgeMemoryEmbeddingRecord.build(
+                    memory_id=memory.id,
+                    learner_profile_id=memory.learner_profile_id,
+                    learner_goal_id=memory.learner_goal_id,
+                    knowledge_key=memory.knowledge_key,
+                    title=memory.title,
+                    summary=memory.summary,
+                    knowledge_level=memory.knowledge_level,
+                    time_horizon=memory.time_horizon,
+                    importance_score=memory.importance_score,
+                    confidence_score=memory.confidence_score,
+                    freshness_score=memory.freshness_score,
+                    stability_score=memory.stability_score,
+                    goal_relevance_score=memory.goal_relevance_score,
+                    scope_type=memory.scope_type,
+                    provider=self._embedding_provider.provider_name,
+                    model=self._embedding_provider.model_name,
+                    vector=vector,
+                    status=memory.status,
+                )
+            )
             return
         await self._knowledge_memory_embedding_repository.update(
             KnowledgeMemoryEmbeddingRecord(
@@ -2676,6 +2972,168 @@ class MemoryService:
                 created_at=embedding.created_at,
             )
         )
+
+    async def _apply_knowledge_status_transition(
+        self,
+        *,
+        original: KnowledgeMemory,
+        refreshed: KnowledgeMemory,
+        next_status: str,
+        eligibility: MemoryPromotionEligibilityRecord | None = None,
+        eligibility_prefetched: bool = False,
+    ) -> KnowledgeMemory:
+        now = datetime.now(timezone.utc)
+        current_eligibility = eligibility
+        if current_eligibility is None and original.status == "candidate" and not eligibility_prefetched:
+            current_eligibility = await self._current_knowledge_eligibility(refreshed.id)
+        promotion_rationale = self._knowledge_transition_rationale(
+            previous_status=original.status,
+            next_status=next_status,
+            eligibility=current_eligibility,
+            memory=refreshed,
+        )
+        decision_type = self._knowledge_transition_decision_type(
+            previous_status=original.status,
+            next_status=next_status,
+        )
+        trigger_source = self._knowledge_transition_trigger_source(
+            previous_status=original.status,
+            next_status=next_status,
+        )
+        reason_code = self._knowledge_transition_reason_code(
+            previous_status=original.status,
+            next_status=next_status,
+            eligibility=current_eligibility,
+        )
+        reason_note = self._knowledge_transition_reason_note(
+            previous_status=original.status,
+            next_status=next_status,
+            eligibility=current_eligibility,
+        )
+        updated = refreshed.with_status(
+            next_status,
+            update=KnowledgeMemoryStatusUpdate(
+                promotion_state_changed_at=now,
+                promotion_rationale=promotion_rationale,
+                suppressed_reason_code=None if next_status != "suppressed" else reason_code,
+                suppressed_reason_note=None if next_status != "suppressed" else reason_note,
+                suppressed_by=None if next_status != "suppressed" else "worker",
+                suppressed_at=None if next_status != "suppressed" else now,
+            ),
+        )
+        await self._knowledge_memory_repository.update(updated)
+        await self._sync_knowledge_embedding(
+            updated,
+            create_missing=original.status == "candidate" and updated.status == "active",
+        )
+        await self._record_governance_decision(
+            memory_type="knowledge",
+            memory_id=updated.id,
+            previous_status=original.status,
+            new_status=updated.status,
+            decision_type=decision_type,
+            trigger_source=trigger_source,
+            actor_type="system",
+            actor_id="worker",
+            reason_code=reason_code,
+            reason_note=reason_note,
+            metrics_snapshot=self._knowledge_transition_metrics_snapshot(updated=updated, eligibility=current_eligibility),
+        )
+        return updated
+
+    async def _current_knowledge_eligibility(self, memory_id: str) -> MemoryPromotionEligibilityRecord | None:
+        if self._promotion_eligibility_repository is None:
+            return None
+        return await self._promotion_eligibility_repository.get_current(memory_id=memory_id)
+
+    def _knowledge_transition_rationale(
+        self,
+        *,
+        previous_status: str,
+        next_status: str,
+        eligibility: MemoryPromotionEligibilityRecord | None,
+        memory: KnowledgeMemory,
+    ) -> str:
+        if previous_status == "candidate" and next_status == "active":
+            return "Promoted from candidate after governed eligibility evaluation."
+        if previous_status == "candidate" and next_status == "suppressed":
+            return "Suppressed from candidate because governed eligibility evaluation found an active/stable conflict."
+        return self._promotion_rationale(updated_status=next_status, memory=memory)
+
+    def _knowledge_transition_decision_type(
+        self,
+        *,
+        previous_status: str,
+        next_status: str,
+    ) -> str:
+        if next_status == "suppressed":
+            return "suppress"
+        return self._decision_type_for_transition(previous_status, next_status)
+
+    def _knowledge_transition_trigger_source(
+        self,
+        *,
+        previous_status: str,
+        next_status: str,
+    ) -> str:
+        if previous_status == "candidate" and next_status in {"active", "suppressed"}:
+            return "promotion_cycle"
+        if next_status == "archived":
+            return "decay_cycle"
+        if previous_status == "stable" and next_status == "active":
+            return "decay_cycle"
+        return "promotion_cycle" if next_status == "stable" else "decay_cycle"
+
+    def _knowledge_transition_reason_code(
+        self,
+        *,
+        previous_status: str,
+        next_status: str,
+        eligibility: MemoryPromotionEligibilityRecord | None,
+    ) -> str:
+        if previous_status == "candidate" and next_status == "active":
+            return "promotion_eligibility_approved"
+        if previous_status == "candidate" and next_status == "suppressed":
+            return "promotion_conflict_blocked"
+        return "knowledge_governance_cycle"
+
+    def _knowledge_transition_reason_note(
+        self,
+        *,
+        previous_status: str,
+        next_status: str,
+        eligibility: MemoryPromotionEligibilityRecord | None,
+    ) -> str | None:
+        if previous_status != "candidate" or eligibility is None:
+            return None
+        parts = [f"eligibility_status={eligibility.status}"]
+        if eligibility.blocked_memory_id is not None:
+            parts.append(f"blocked_memory_id={eligibility.blocked_memory_id}")
+        if eligibility.reason_codes:
+            parts.append(f"reason_codes={','.join(eligibility.reason_codes)}")
+        if next_status != "suppressed" and eligibility.score is not None:
+            parts.append(f"eligibility_score={eligibility.score:.2f}")
+        return "; ".join(parts)
+
+    def _knowledge_transition_metrics_snapshot(
+        self,
+        *,
+        updated: KnowledgeMemory,
+        eligibility: MemoryPromotionEligibilityRecord | None,
+    ) -> dict[str, float | int | str | None]:
+        snapshot = self._metrics_snapshot(updated)
+        if eligibility is not None:
+            snapshot.update(
+                {
+                    "eligibility_status": eligibility.status,
+                    "eligibility_score": eligibility.score,
+                    "eligibility_independent_source_count": eligibility.independent_source_count,
+                    "eligibility_high_signal_source_count": eligibility.high_signal_source_count,
+                    "eligibility_evidence_span_hours": eligibility.evidence_span_hours,
+                    "eligibility_blocked_memory_id": eligibility.blocked_memory_id,
+                }
+            )
+        return snapshot
 
     async def _sync_behavior_embedding(self, memory: BehaviorMemory) -> None:
         if self._behavior_memory_embedding_repository is None:
@@ -3229,12 +3687,25 @@ class MemoryService:
         contradiction_penalty = min(contradiction_count, 4) * 0.05
         return self._clamp_score(memory.confidence_score * 0.84 + recurrence_bonus + evidence_bonus - contradiction_penalty)
 
-    def _govern_knowledge_status(self, memory: KnowledgeMemory) -> str:
+    async def _govern_knowledge_status(
+        self,
+        memory: KnowledgeMemory,
+        *,
+        eligibility: MemoryPromotionEligibilityRecord | None = None,
+        eligibility_prefetched: bool = False,
+    ) -> str:
         if memory.status == "suppressed":
             return "suppressed"
         if memory.status == "candidate":
-            if self._knowledge_promotion_readiness(memory, self._knowledge_quality_score(memory)) == "ready":
+            current_eligibility = eligibility
+            if current_eligibility is None and not eligibility_prefetched:
+                current_eligibility = await self._current_knowledge_eligibility(memory.id)
+            if current_eligibility is None:
+                return "candidate"
+            if current_eligibility.status == "eligible":
                 return "active"
+            if current_eligibility.status == "conflict_blocked":
+                return "suppressed"
             return "candidate"
         if memory.status == "active":
             if (
@@ -3406,8 +3877,14 @@ class MemoryService:
                 )
             )
         if self._audit_service is not None:
+            if decision_type == "suppress":
+                event_type = f"{memory_type}_memory.suppressed"
+            elif decision_type in {"promote", "demote", "archive", "restore"}:
+                event_type = f"{memory_type}_memory.{decision_type}d"
+            else:
+                event_type = f"{memory_type}_memory.{decision_type}ed"
             await self._audit_service.record(
-                event_type=f"{memory_type}_memory.{decision_type}d" if decision_type in {"promote", "demote", "archive", "restore", "suppress"} else f"{memory_type}_memory.{decision_type}ed",
+                event_type=event_type,
                 resource_type=f"{memory_type}_memory",
                 resource_id=memory_id,
                 actor=actor_type,

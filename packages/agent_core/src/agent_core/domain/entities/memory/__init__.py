@@ -27,8 +27,10 @@ from agent_core.domain.entities.memory.governance import (
     MemoryEvidenceLink,
     MemoryGovernanceDecision,
     MemoryAnnotation,
+    MemoryPromotionEligibilityRecord,
     RetrievedKnowledgeMemory,
     RetrievedBehaviorMemory,
+    MEMORY_PROMOTION_ELIGIBILITY_STATUSES,
 )
 from agent_core.domain.entities.memory.maintenance import (
     MemoryMaintenanceJob,
@@ -80,8 +82,10 @@ __all__ = [
     "MemoryEvidenceLink",
     "MemoryGovernanceDecision",
     "MemoryAnnotation",
+    "MemoryPromotionEligibilityRecord",
     "RetrievedKnowledgeMemory",
     "RetrievedBehaviorMemory",
+    "MEMORY_PROMOTION_ELIGIBILITY_STATUSES",
     # Maintenance
     "MemoryMaintenanceJob",
     "MEMORY_MAINTENANCE_JOB_TYPES",

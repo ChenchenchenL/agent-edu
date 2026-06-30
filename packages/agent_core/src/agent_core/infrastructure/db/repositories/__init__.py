@@ -21,6 +21,7 @@ from agent_core.infrastructure.db.repositories.memory import (  # noqa: F401
     BehaviorMemoryEmbeddingRepository,
     MemoryEvidenceLinkRepository,
     MemoryGovernanceDecisionRepository,
+    MemoryPromotionEligibilityRepository,
     MemoryAnnotationRepository,
     MemoryConflictRepository,
     MemoryMaintenanceJobRepository,

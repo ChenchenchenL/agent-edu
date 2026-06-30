@@ -29,6 +29,8 @@ AUTONOMY_JOB_TYPES = {
     "replan",
     "reflection_outcome_evaluation",
     "reflection_proposal_evaluation",
+    "reflection_skill_evolution_curator",
+    "skill_replacement_auto_execution",
     "reflection_proposal_rollout_decision",
     "reflection_proposal_rollout_observation",
     "review_scheduling",

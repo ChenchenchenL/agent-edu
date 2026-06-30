@@ -765,8 +765,8 @@ Docker 代理、真实 provider 回归与 Prometheus / Grafana 观测细节见 [
 - 教学质量回归样本仍需继续收敛
 - 真实 provider 回归还没有定时化调度
 - 成本治理、限流、熔断与告警通知/自动化闭环还未补齐；长期记忆告警规则基线已落地
-- 更完整的长期记忆治理仍在继续增强，但知识/行为双通道、维护队列、压缩、冲突刷新和核心观测已落地
-- 长期记忆自动沉淀已覆盖 chat / task outcome / reflection outcome 的候选生成与刷新，但晋升、压缩和恢复仍由治理链路处理
+- 更完整的长期记忆治理仍在继续增强，但知识/行为双通道、维护队列、知识候选物理晋升/压制、压缩、冲突刷新和核心观测已落地
+- 长期记忆自动沉淀已覆盖 chat / task outcome / reflection outcome 的候选生成与刷新；knowledge candidate 可由 `knowledge_governance` 应用 eligibility 结果完成物理晋升或压制，压缩和恢复仍由治理链路处理
 - 长期数据回归集仍需继续扩充，尤其是多轮学习、多 goal、多 topic 与迁移升级场景
 - TUI 仍是最小工作台版本，完整任务导航、quiz/review 交互和 connector 生态仍需继续扩展
 - reflection -> skill proposal / sandbox 仍未进入代码主链路
@@ -814,13 +814,14 @@ Docker 代理、真实 provider 回归与 Prometheus / Grafana 观测细节见 [
 - `MemoryNormalizer` 集中 topic/category/evidence role 归一化
 - 结构化模型抽取只允许校验后写入 `candidate`
 - profile 级 conflict refresh 与可解释冲突输出
+- knowledge candidate 的 `promotion_eligibility -> knowledge_governance` 物理晋升 / 压制闭环
 - 长期记忆 dashboard / alert 基线
 
 ## 仍需继续增强
 
 - 更细粒度的重要度与遗忘策略
 - 更系统化的人工审核与修正治理
-- 反思记忆与长期记忆的晋升闭环仍需继续增强，但 reflection outcome 已能桥接长期记忆 evidence / candidate
+- knowledge candidate 的 eligibility 驱动物理晋升 / 压制闭环已落地；后续仍需增强 stable 固化、衰减降级、behavior 记忆治理和 reflection outcome replay/eval
 - 更完整的 reflection outcome replay/eval 体系
 - 更完整的长期数据回归集：多轮学习、多 goal、多 topic、迁移升级
 - proposal rollout 的更细粒度观测与运营面板
@@ -851,9 +852,9 @@ Docker 代理、真实 provider 回归与 Prometheus / Grafana 观测细节见 [
 
 - 更丰富的 Prompt Optimization / Workflow Optimization 输出
 - 更细粒度的 session signal / hint signal 证据抽取
-- reflection -> skill proposal / sandbox 的闭环
+- reflection / curator evidence -> skill proposal / sandbox 的最小闭环已落地，后续重点转向更广覆盖的自动治理与更丰富 proposal 生成
 - 更完整的 review queue / priority / dedupe 聚合治理
-- outcome -> skill proposal / sandbox 的更深闭环
+- outcome -> skill proposal / sandbox 的更深闭环仍需继续增强，但 patch request auto realization / sandbox / guarded auto staging v1 已落地
 - bundle / global rollout 治理
 - auto promote / auto rollback
 - periodic goal reflection 的更重后台调度形态
@@ -869,12 +870,13 @@ Docker 代理、真实 provider 回归与 Prometheus / Grafana 观测细节见 [
 - `SkillArtifact`、`SkillUsageEvent`、`SkillCuratorRecommendation` 和 `SkillCuratorJob` MVP 已落地
 - `patch_needed` recommendation accept 已可创建 reference-only `skill_patch_request` proposal，并继续走 sandbox / evaluation / approval
 - approved / effective `skill_patch_request` 已可 realization 为 replacement `skill_package` proposal
+- `reflection_skill_evolution_curator` 已落地，可自动变现 approved / effective `skill_patch_request`、自动入沙箱低/中风险 replacement proposal、自动 reject failed / ineffective / inconclusive 候选，并在配置开启时对受信 replacement proposal 做 guarded auto staging
 - `merge_candidate` recommendation accept 已可创建 merge-sourced replacement `skill_package` proposal；merge payload 复用 source artifact 的可执行基线，只合并 list-valued `match_rules`
 - `SkillCuratorJob` 已可基于同 name/scope 或同 implementation binding 的 artifact overlap / duplicate detection 自动生成 `merge_candidate / none` recommendation；只产 recommendation，不直接修改 artifact
 - `SkillCuratorJob` 已接入 memory conflict summary、reflection outcome evaluation 和 resolver health trend 作为 `governance_evidence`，可生成或增强 `flag_for_review / none` recommendation；该 evidence 只进入 recommendation，不直接改 artifact
 - `SkillCuratorJob` 已接入 surface / topic coverage regression 输入，可基于声明外 topic demand 与 governed binding gap 生成 `patch_needed / none` recommendation，并复用既有 patch proposal 治理路径
 - skill observability 已接入 Prometheus / Grafana / alert 基线，可观测 skill usage、resolver failure、artifact status、curator pending backlog、recommendation rate 和 curator job p95
-- approved / effective replacement `skill_package` proposal 已可通过 operator-protected staging API 生成 `staged` replacement artifact
+- approved / effective replacement `skill_package` proposal 已可通过 operator-protected staging API 或 curator guarded auto staging 生成 `staged` replacement artifact
 - staged governed replacement 已接入 shared readiness evaluation、operator read API、strict source-anchor gate 和 curator ready recommendation
 - staged replacement readiness API 现会直接返回 `recommended_action`，并统一暴露 source anchor / rollout / usage / threshold 摘要
 - staging 不会自动 activate / replace source artifact；activate / replace 仍必须人工触发，不会自动执行

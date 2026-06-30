@@ -69,3 +69,17 @@ class DailyTaskMaterializationJobHandler(BaseAutonomyJobHandler):
 
     async def execute(self, job: ScheduledAutonomyJob) -> str | None:
         return await self._core._process_daily_task_materialization_job(job)  # noqa: SLF001
+
+
+class ReflectionSkillEvolutionCuratorJobHandler(BaseAutonomyJobHandler):
+    """Handler for reflection_skill_evolution_curator autonomy jobs."""
+
+    async def execute(self, job: ScheduledAutonomyJob) -> str | None:
+        return await self._core._process_reflection_skill_evolution_curator_job(job)  # noqa: SLF001
+
+
+class SkillReplacementAutoExecutionJobHandler(BaseAutonomyJobHandler):
+    """Handler for skill_replacement_auto_execution autonomy jobs."""
+
+    async def execute(self, job: ScheduledAutonomyJob) -> str | None:
+        return await self._core._process_skill_replacement_auto_execution_job(job)  # noqa: SLF001

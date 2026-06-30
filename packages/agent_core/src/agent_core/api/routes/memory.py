@@ -114,6 +114,7 @@ async def retrieve_knowledge_memories(
         model=result.model,
         latency_ms=result.latency_ms,
         candidate_count=result.candidate_count,
+        eligible_candidate_count=result.eligible_candidate_count,
     )
 
 

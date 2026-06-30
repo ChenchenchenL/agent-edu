@@ -1,3 +1,4 @@
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -25,7 +26,12 @@ from agent_core.application.services.reflection_proposal_rollout_auto_governance
 from agent_core.application.services.reflection_proposal_rollouts import ReflectionProposalRolloutService
 from agent_core.application.services.reflection_proposals import ReflectionProposalService
 from agent_core.application.services.reflection_replay import ReflectionReplayService
+from agent_core.application.services.reflection_skill_evolution_curator import (
+    ReflectionSkillEvolutionCuratorConfig,
+    ReflectionSkillEvolutionCuratorService,
+)
 from agent_core.application.services.skills import SkillCandidateService
+from agent_core.application.services.skills import SkillArtifactLifecycleService, SkillReplacementStagingService
 from agent_core.application.services.strategy_cards import StrategyCardService
 from agent_core.application.services.tool_plan_runtime import ToolPlanRuntimeExecutor
 from agent_core.application.services.workflow import WorkflowRunService
@@ -51,6 +57,7 @@ from agent_core.domain.entities.reflection_v2 import ReflectionOutcomeEvaluation
 from agent_core.domain.entities.skill import SkillArtifact, SkillUsageEvent
 from agent_core.domain.errors import ValidationError
 from agent_core.infrastructure.llm.mock_provider import MockLLMProvider
+from agent_core.infrastructure.observability.metrics import REFLECTION_SKILL_EVOLUTION_TOTAL
 
 
 class StubAuditRepository:
@@ -170,6 +177,7 @@ class StubOutcomeRepository:
 class StubProposalRepository:
     def __init__(self):
         self.items: dict[str, ReflectionProposal] = {}
+        self.artifact_repository = None
 
     async def create(self, entity):
         self.items[entity.id] = entity
@@ -185,6 +193,47 @@ class StubProposalRepository:
 
     async def count_queue(self, **kwargs):
         return len(self.items)
+
+    async def list_pending_skill_patch_realizations(self, *, limit: int = 20):
+        derived_source_ids = {
+            item.evidence_snapshot.get("source_skill_patch_request_id")
+            for item in self.items.values()
+            if item.proposal_type == "skill_package"
+        }
+        items = [
+            item
+            for item in self.items.values()
+            if item.proposal_type == "skill_patch_request"
+            and item.status == "approved"
+            and item.evaluation_status == "effective"
+            and item.id not in derived_source_ids
+        ]
+        items.sort(key=lambda item: (item.priority_score, item.created_at, item.id), reverse=True)
+        return items[:limit]
+
+    async def list_pending_skill_package_sandbox(self, *, limit: int = 20):
+        items = [
+            item
+            for item in self.items.values()
+            if item.proposal_type == "skill_package" and item.status == "proposed"
+        ]
+        items.sort(key=lambda item: (item.priority_score, item.created_at, item.id), reverse=True)
+        return items[:limit]
+
+    async def list_pending_skill_package_auto_stage(self, *, limit: int = 20):
+        completed_statuses = {"staged", "active", "stable", "deprecated", "archived", "suppressed"}
+        items: list[ReflectionProposal] = []
+        for item in self.items.values():
+            if item.proposal_type != "skill_package" or item.status not in {"sandbox_completed", "approved"}:
+                continue
+            existing_artifact = None
+            if self.artifact_repository is not None:
+                existing_artifact = await self.artifact_repository.get_by_source_proposal_id(item.id)
+            if existing_artifact is not None and existing_artifact.status in completed_statuses:
+                continue
+            items.append(item)
+        items.sort(key=lambda item: (item.priority_score, item.updated_at, item.id), reverse=True)
+        return items[:limit]
 
     async def update(self, entity):
         self.items[entity.id] = entity
@@ -390,8 +439,10 @@ class StubSkillArtifactRepository:
         self,
         artifact: SkillArtifact | None = None,
         items: list[SkillArtifact] | None = None,
+        proposal_repository: StubProposalRepository | None = None,
     ):
         self.items: dict[str, SkillArtifact] = {}
+        self.proposal_repository = proposal_repository
         if artifact is not None:
             self.items[artifact.id] = artifact
         for item in items or []:
@@ -403,11 +454,53 @@ class StubSkillArtifactRepository:
     async def get_by_id(self, artifact_id: str):
         return self.items.get(artifact_id)
 
+    async def get_by_id_for_update(self, artifact_id: str):
+        return await self.get_by_id(artifact_id)
+
     async def get_by_source_proposal_id(self, proposal_id: str):
         for item in self.items.values():
             if item.source_proposal_id == proposal_id:
                 return item
         return None
+
+    async def get_selectable_by_name_scope(self, *, name: str, scope: str):
+        for item in self.items.values():
+            if item.name == name and item.scope == scope and item.status in {"active", "stable"}:
+                return item
+        return None
+
+    async def get_selectable_by_name_scope_for_update(self, *, name: str, scope: str):
+        return await self.get_selectable_by_name_scope(name=name, scope=scope)
+
+    async def get_suppressed_by_name_scope(self, *, name: str, scope: str):
+        for item in self.items.values():
+            if item.name == name and item.scope == scope and item.status == "suppressed":
+                return item
+        return None
+
+    async def get_suppressed_by_name_scope_for_update(self, *, name: str, scope: str):
+        return await self.get_suppressed_by_name_scope(name=name, scope=scope)
+
+    async def list_artifacts(
+        self,
+        *,
+        status: str | None = None,
+        name: str | None = None,
+        scope: str | None = None,
+        lineage_id: str | None = None,
+        limit: int = 50,
+    ):
+        items = list(self.items.values())
+        if status is not None:
+            items = [item for item in items if item.status == status]
+        if name is not None:
+            items = [item for item in items if item.name == name]
+        if scope is not None:
+            items = [item for item in items if item.scope == scope]
+        if lineage_id is not None:
+            items = [item for item in items if item.lineage_id == lineage_id]
+        items.sort(key=lambda item: (item.updated_at, item.id), reverse=True)
+        return items[:limit]
 
     async def max_candidate_patch_version(self, name: str):
         max_patch = -1
@@ -418,6 +511,30 @@ class StubSkillArtifactRepository:
             if patch.isdecimal():
                 max_patch = max(max_patch, int(patch))
         return max_patch
+
+    async def count_by_status(self):
+        counts: dict[str, int] = {}
+        for item in self.items.values():
+            counts[item.status] = counts.get(item.status, 0) + 1
+        return counts
+
+    async def count_recent_system_staged_replacements_for_goal(
+        self,
+        *,
+        learner_goal_id: str,
+        created_at_from: datetime,
+    ):
+        staged_statuses = {"staged", "active", "stable", "deprecated", "archived", "suppressed"}
+        count = 0
+        for item in self.items.values():
+            if item.created_by != "system" or item.status not in staged_statuses or item.created_at < created_at_from:
+                continue
+            if item.source_proposal_id is None or self.proposal_repository is None:
+                continue
+            proposal = await self.proposal_repository.get_by_id(item.source_proposal_id)
+            if proposal is not None and proposal.learner_goal_id == learner_goal_id:
+                count += 1
+        return count
 
     async def update(self, entity: SkillArtifact):
         self.items[entity.id] = entity
@@ -729,6 +846,108 @@ class StubDbSession:
         return StubTransaction()
 
 
+class StubSkillRegistry:
+    def has_skill(self, name: str) -> bool:
+        return bool(name)
+
+    def has_runtime_handler(self, name: str) -> bool:
+        return bool(name)
+
+    def supports_runtime_handler(self, name: str, *, surface: str) -> bool:
+        return bool(name) and bool(surface)
+
+
+@dataclass
+class ReflectionSkillEvolutionCuratorHarness:
+    service: ReflectionSkillEvolutionCuratorService
+    audit_repository: StubAuditRepository
+    proposal_repository: StubProposalRepository
+    evaluation_repository: StubProposalEvaluationRepository
+    sandbox_run_repository: StubProposalSandboxRunRepository
+    artifact_repository: StubSkillArtifactRepository
+    autonomy_job_repository: StubScheduledAutonomyJobRepository | None
+    db_session: StubDbSession | None
+
+
+_HARNESS_DEFAULT = object()
+
+
+def _build_reflection_skill_evolution_curator_harness(
+    *,
+    artifact_items: list[SkillArtifact] | None = None,
+    config: ReflectionSkillEvolutionCuratorConfig | None = None,
+    autonomy_job_repository: StubScheduledAutonomyJobRepository | None | object = _HARNESS_DEFAULT,
+    db_session: StubDbSession | None | object = _HARNESS_DEFAULT,
+) -> ReflectionSkillEvolutionCuratorHarness:
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(repository=audit_repository)
+    proposal_repository = StubProposalRepository()
+    evaluation_repository = StubProposalEvaluationRepository()
+    sandbox_run_repository = StubProposalSandboxRunRepository()
+    artifact_repository = StubSkillArtifactRepository(items=artifact_items or [], proposal_repository=proposal_repository)
+    proposal_repository.artifact_repository = artifact_repository
+    actual_autonomy_job_repository = (
+        StubScheduledAutonomyJobRepository()
+        if autonomy_job_repository is _HARNESS_DEFAULT
+        else autonomy_job_repository
+    )
+    actual_db_session = StubDbSession() if db_session is _HARNESS_DEFAULT else db_session
+    proposal_service = ReflectionProposalService(
+        repository=proposal_repository,
+        approval_decision_repository=StubProposalApprovalDecisionRepository(),
+        evaluation_repository=evaluation_repository,
+        artifact_repository=artifact_repository,
+        autonomy_job_service=AutonomyJobService(repository=actual_autonomy_job_repository, audit_service=audit_service),
+        audit_service=audit_service,
+    )
+    candidate_service = SkillCandidateService(
+        artifact_repository=artifact_repository,
+        proposal_repository=proposal_repository,
+        evaluation_repository=evaluation_repository,
+        audit_service=audit_service,
+    )
+    lifecycle_service = SkillArtifactLifecycleService(
+        artifact_repository=artifact_repository,
+        proposal_repository=proposal_repository,
+        evaluation_repository=evaluation_repository,
+        rollout_repository=StubProposalRolloutRepository(),
+        rollout_observation_repository=StubProposalRolloutObservationRepository(),
+        goal_skill_binding_repository=StubGoalSkillBindingRepository(),
+        usage_repository=StubSkillUsageEventRepository(),
+        skill_registry=StubSkillRegistry(),
+        audit_service=audit_service,
+    )
+    staging_service = SkillReplacementStagingService(
+        artifact_repository=artifact_repository,
+        proposal_repository=proposal_repository,
+        evaluation_repository=evaluation_repository,
+        candidate_service=candidate_service,
+        lifecycle_service=lifecycle_service,
+        audit_service=audit_service,
+    )
+    service = ReflectionSkillEvolutionCuratorService(
+        proposal_repository=proposal_repository,
+        evaluation_repository=evaluation_repository,
+        sandbox_run_repository=sandbox_run_repository,
+        artifact_repository=artifact_repository,
+        proposal_service=proposal_service,
+        staging_service=staging_service,
+        audit_service=audit_service,
+        db_session=actual_db_session,
+        config=config or ReflectionSkillEvolutionCuratorConfig(),
+    )
+    return ReflectionSkillEvolutionCuratorHarness(
+        service=service,
+        audit_repository=audit_repository,
+        proposal_repository=proposal_repository,
+        evaluation_repository=evaluation_repository,
+        sandbox_run_repository=sandbox_run_repository,
+        artifact_repository=artifact_repository,
+        autonomy_job_repository=actual_autonomy_job_repository,
+        db_session=actual_db_session,
+    )
+
+
 def _approved_rollout_proposal(
     *,
     learner_goal_id: str,
@@ -995,6 +1214,150 @@ def _skill_patch_request_proposal(
             reason_note=None,
         )
     return completed.with_status(status)
+
+
+def _replacement_skill_package_proposal(
+    *,
+    artifact: SkillArtifact,
+    learner_goal_id: str = "goal-1",
+    status: str = "sandbox_completed",
+    evaluation_status: str = "effective",
+    risk_level: str = "low",
+    source: str = "skill_patch_request_realization",
+    approved_by: str | None = "operator",
+) -> ReflectionProposal:
+    proposal = ReflectionProposal.build(
+        reflection_record_id="reflection-package-1",
+        learner_goal_id=learner_goal_id,
+        proposal_type="skill_package",
+        target_scope=artifact.scope,
+        priority_score=0.85,
+        hypothesis=f"Governed replacement for {artifact.name} should improve outcomes.",
+        change_summary=f"Create a governed replacement package for {artifact.name}.",
+        structured_patch_payload={
+            "artifact_kind": "declarative_skill_package",
+            "skill_name": artifact.name,
+            "surface": artifact.scope,
+            "match_rules": dict(artifact.definition.get("match_rules") or {}),
+            "runtime_directives": dict(artifact.runtime_directives),
+            "tool_plan": [dict(item) for item in artifact.tool_plan],
+            "scoring_contract": dict(artifact.definition.get("scoring_contract") or {}),
+        },
+        expected_improvement="Improve sandbox performance before governed staging.",
+        risk_level=risk_level,
+        evidence_snapshot={
+            "source": source,
+            "source_artifact_id": artifact.id,
+            "source_artifact_lineage_id": artifact.lineage_id,
+            "source_skill_patch_request_id": "patch-request-1",
+            "recommendation_id": "recommendation-1",
+        },
+    )
+    if status == "proposed":
+        return proposal
+    completed = proposal.enqueue_sandbox(
+        sandbox_run_id="sandbox-package-1",
+    ).start_sandbox(
+        sandbox_run_id="sandbox-package-1",
+    ).complete_sandbox(
+        sandbox_run_id="sandbox-package-1",
+        evaluation_status=evaluation_status,
+        evaluation_summary=f"sandbox:{evaluation_status}",
+    )
+    if status == "sandbox_completed":
+        return completed
+    if status == "approved":
+        if approved_by is None:
+            return completed.with_status(
+                "approved",
+                approved_by=None,
+                approved_at=completed.updated_at,
+                approval_reason_code="validated",
+                approval_note=None,
+            )
+        return completed.approve(
+            operator_id=approved_by,
+            reason_code="validated",
+            reason_note=None,
+        )
+    return completed.with_status(status)
+
+
+def _proposal_evaluation(
+    proposal: ReflectionProposal,
+    *,
+    evaluation_status: str = "effective",
+    score_delta: float = 0.15,
+) -> ReflectionProposalEvaluation:
+    return ReflectionProposalEvaluation.build(
+        proposal_id=proposal.id,
+        comparison_window_size=3,
+        baseline_policy_snapshot={"source_artifact_id": proposal.evidence_snapshot.get("source_artifact_id")},
+        candidate_policy_snapshot=proposal.structured_patch_payload,
+        evaluator_type="rule",
+        sandbox_run_id=proposal.latest_sandbox_run_id,
+    ).with_result(
+        evaluation_status=evaluation_status,
+        simulated_outcome_summary={"score_delta": score_delta},
+        score_delta=score_delta,
+        sandbox_run_id=proposal.latest_sandbox_run_id,
+    )
+
+
+def _proposal_sandbox_run(
+    proposal: ReflectionProposal,
+    *,
+    status: str = "completed",
+    score_delta: float = 0.15,
+    error_code: str | None = None,
+) -> ReflectionProposalSandboxRun:
+    sandbox_run = ReflectionProposalSandboxRun.build(
+        proposal_id=proposal.id,
+        learner_goal_id=proposal.learner_goal_id,
+        sample_source_type="task_attempts",
+        sample_count=3,
+        provider="mock",
+        model="mock-tutor-v1",
+        evaluator_type="rule",
+        baseline_snapshot={"proposal_id": proposal.id},
+        candidate_snapshot=proposal.structured_patch_payload,
+    )
+    sandbox_run = replace(
+        sandbox_run,
+        id=proposal.latest_sandbox_run_id or sandbox_run.id,
+    )
+    if status == "queued":
+        return sandbox_run
+    if status == "running":
+        return sandbox_run.with_status("running")
+    return sandbox_run.with_status(
+        status,
+        result_summary={"score_delta": score_delta},
+        score_delta=score_delta,
+        error_code=error_code,
+    )
+
+
+def _system_staged_replacement_artifact(*, proposal: ReflectionProposal, source_artifact: SkillArtifact, version: str) -> SkillArtifact:
+    return SkillArtifact.build(
+        name=source_artifact.name,
+        version=version,
+        lineage_id=source_artifact.lineage_id,
+        parent_artifact_id=source_artifact.id,
+        supersedes_artifact_id=source_artifact.id,
+        skill_type="learned",
+        scope=source_artifact.scope,
+        status="staged",
+        description="Auto-staged replacement artifact.",
+        definition=dict(source_artifact.definition),
+        runtime_directives=dict(source_artifact.runtime_directives),
+        tool_plan=[dict(item) for item in source_artifact.tool_plan],
+        compatibility_contract=dict(source_artifact.compatibility_contract),
+        source_reflection_ids=[proposal.reflection_record_id],
+        source_proposal_id=proposal.id,
+        quality_score=0.8,
+        created_by="system",
+    )
 
 
 def _effective_patch_request_evaluation(proposal: ReflectionProposal) -> ReflectionProposalEvaluation:
@@ -2664,6 +3027,374 @@ async def test_skill_patch_request_cannot_rollout_or_create_skill_candidate():
             proposal_id=proposal.id,
             operator_id="operator",
         )
+
+
+async def test_reflection_skill_evolution_curator_realizes_patch_request_and_auto_queues_derived_package():
+    source_artifact = _realizable_source_artifact()
+    patch_request = _skill_patch_request_proposal(artifact=source_artifact)
+    harness = _build_reflection_skill_evolution_curator_harness(artifact_items=[source_artifact])
+    await harness.proposal_repository.create(patch_request)
+    await harness.evaluation_repository.create(_effective_patch_request_evaluation(patch_request))
+    before = REFLECTION_SKILL_EVOLUTION_TOTAL.labels(
+        event="auto_realized",
+        reason_code="auto_realized",
+    )._value.get()
+
+    result = await harness.service.run_once(limit=10)
+
+    derived = [
+        item
+        for item in harness.proposal_repository.items.values()
+        if item.proposal_type == "skill_package"
+        and item.evidence_snapshot.get("source_skill_patch_request_id") == patch_request.id
+    ]
+    after = REFLECTION_SKILL_EVOLUTION_TOTAL.labels(
+        event="auto_realized",
+        reason_code="auto_realized",
+    )._value.get()
+
+    assert result.realized_count == 1
+    assert len(derived) == 1
+    assert derived[0].status == "sandbox_queued"
+    assert len(harness.autonomy_job_repository.jobs) == 1
+    assert after == before + 1
+    assert any(item.event_type == "reflection.proposal.auto_realized" for item in harness.audit_repository.events)
+
+    rerun = await harness.service.run_once(limit=10)
+
+    assert rerun.realized_count == 0
+    assert sum(1 for item in harness.proposal_repository.items.values() if item.proposal_type == "skill_package") == 1
+
+
+async def test_reflection_skill_evolution_curator_auto_stages_effective_replacement_package():
+    source_artifact = _realizable_source_artifact()
+    proposal = _replacement_skill_package_proposal(artifact=source_artifact)
+    harness = _build_reflection_skill_evolution_curator_harness(
+        artifact_items=[source_artifact],
+        config=ReflectionSkillEvolutionCuratorConfig(auto_staging_enabled=True),
+    )
+    await harness.proposal_repository.create(proposal)
+    await harness.evaluation_repository.create(_proposal_evaluation(proposal, score_delta=0.2))
+    await harness.sandbox_run_repository.create(_proposal_sandbox_run(proposal, score_delta=0.2))
+    before = REFLECTION_SKILL_EVOLUTION_TOTAL.labels(
+        event="auto_staged",
+        reason_code="auto_staged",
+    )._value.get()
+
+    result = await harness.service.run_once(limit=10)
+
+    stored_proposal = await harness.proposal_repository.get_by_id(proposal.id)
+    staged = await harness.artifact_repository.get_by_source_proposal_id(proposal.id)
+    after = REFLECTION_SKILL_EVOLUTION_TOTAL.labels(
+        event="auto_staged",
+        reason_code="auto_staged",
+    )._value.get()
+
+    assert result.staged_count == 1
+    assert stored_proposal is not None
+    assert stored_proposal.status == "approved"
+    assert stored_proposal.approved_by == "system"
+    assert staged is not None
+    assert staged.status == "staged"
+    assert staged.lineage_id == source_artifact.lineage_id
+    assert staged.parent_artifact_id == source_artifact.id
+    assert staged.supersedes_artifact_id == source_artifact.id
+    assert harness.db_session.nested_transactions == 1
+    assert after == before + 1
+    assert any(item.event_type == "skill.artifact.auto_staged" for item in harness.audit_repository.events)
+
+    rerun = await harness.service.run_once(limit=10)
+
+    assert rerun.staged_count == 0
+    assert len([item for item in harness.artifact_repository.items.values() if item.source_proposal_id == proposal.id]) == 1
+
+
+async def test_reflection_skill_evolution_curator_auto_stages_preapproved_system_replacement_package():
+    source_artifact = _realizable_source_artifact()
+    proposal = _replacement_skill_package_proposal(
+        artifact=source_artifact,
+        status="approved",
+        approved_by="system",
+    )
+    harness = _build_reflection_skill_evolution_curator_harness(
+        artifact_items=[source_artifact],
+        config=ReflectionSkillEvolutionCuratorConfig(auto_staging_enabled=True),
+    )
+    await harness.proposal_repository.create(proposal)
+    await harness.evaluation_repository.create(_proposal_evaluation(proposal, score_delta=0.2))
+    await harness.sandbox_run_repository.create(_proposal_sandbox_run(proposal, score_delta=0.2))
+
+    result = await harness.service.run_once(limit=10)
+
+    stored_proposal = await harness.proposal_repository.get_by_id(proposal.id)
+    staged = await harness.artifact_repository.get_by_source_proposal_id(proposal.id)
+
+    assert result.staged_count == 1
+    assert stored_proposal is not None
+    assert stored_proposal.status == "approved"
+    assert stored_proposal.approved_by == "system"
+    assert staged is not None
+    assert staged.status == "staged"
+
+
+async def test_reflection_skill_evolution_curator_rejects_preapproved_system_package_without_sandbox_evidence():
+    source_artifact = _realizable_source_artifact()
+    proposal = _replacement_skill_package_proposal(
+        artifact=source_artifact,
+        status="approved",
+        approved_by="system",
+    )
+    harness = _build_reflection_skill_evolution_curator_harness(
+        artifact_items=[source_artifact],
+        config=ReflectionSkillEvolutionCuratorConfig(auto_staging_enabled=True),
+    )
+    await harness.proposal_repository.create(proposal)
+    await harness.evaluation_repository.create(_proposal_evaluation(proposal, score_delta=0.2))
+
+    result = await harness.service.run_once(limit=10)
+
+    stored = await harness.proposal_repository.get_by_id(proposal.id)
+    rejection_event = next(
+        item for item in harness.audit_repository.events if item.event_type == "reflection.proposal.auto_rejected"
+    )
+
+    assert result.rejected_count == 1
+    assert stored is not None
+    assert stored.status == "rejected"
+    assert rejection_event.event_data["reason_code"] == "missing_sandbox_run"
+
+
+async def test_reflection_skill_evolution_curator_requires_manual_review_for_high_risk_package():
+    source_artifact = _realizable_source_artifact()
+    proposal = _replacement_skill_package_proposal(artifact=source_artifact, status="proposed", risk_level="high")
+    harness = _build_reflection_skill_evolution_curator_harness(artifact_items=[source_artifact])
+    await harness.proposal_repository.create(proposal)
+
+    result = await harness.service.run_once(limit=10)
+
+    stored = await harness.proposal_repository.get_by_id(proposal.id)
+    review_event = next(
+        item for item in harness.audit_repository.events if item.event_type == "reflection.proposal.manual_review_required"
+    )
+
+    assert result.suspended_count == 1
+    assert stored is not None
+    assert stored.status == "proposed"
+    assert harness.autonomy_job_repository.jobs == {}
+    assert review_event.actor == "system"
+    assert review_event.event_data["phase"] == "sandbox_enqueue"
+    assert review_event.event_data["reason_code"] == "risk_level_high"
+
+
+@pytest.mark.parametrize(
+    ("evaluation_status", "score_delta", "sandbox_status", "include_evaluation", "expected_reason_code"),
+    [
+        ("ineffective", 0.05, "completed", True, "evaluation_ineffective"),
+        ("inconclusive", 0.0, "completed", True, "evaluation_inconclusive"),
+        ("effective", -0.01, "completed", True, "negative_score_delta"),
+        ("effective", 0.15, "failed", True, "sandbox_failed"),
+        ("effective", 0.15, "completed", False, "missing_evaluation"),
+    ],
+)
+async def test_reflection_skill_evolution_curator_auto_rejects_invalid_auto_stage_candidates(
+    evaluation_status,
+    score_delta,
+    sandbox_status,
+    include_evaluation,
+    expected_reason_code,
+):
+    source_artifact = _realizable_source_artifact()
+    proposal = _replacement_skill_package_proposal(
+        artifact=source_artifact,
+        evaluation_status=evaluation_status if include_evaluation else "effective",
+    )
+    harness = _build_reflection_skill_evolution_curator_harness(
+        artifact_items=[source_artifact],
+        config=ReflectionSkillEvolutionCuratorConfig(auto_staging_enabled=True),
+    )
+    await harness.proposal_repository.create(proposal)
+    if include_evaluation:
+        await harness.evaluation_repository.create(
+            _proposal_evaluation(proposal, evaluation_status=evaluation_status, score_delta=score_delta)
+        )
+    await harness.sandbox_run_repository.create(
+        _proposal_sandbox_run(
+            proposal,
+            status=sandbox_status,
+            score_delta=score_delta,
+            error_code="sandbox_runtime_failure" if sandbox_status == "failed" else None,
+        )
+    )
+    before = REFLECTION_SKILL_EVOLUTION_TOTAL.labels(
+        event="auto_rejected",
+        reason_code=expected_reason_code,
+    )._value.get()
+
+    result = await harness.service.run_once(limit=10)
+
+    stored = await harness.proposal_repository.get_by_id(proposal.id)
+    rejection_event = next(
+        item for item in harness.audit_repository.events if item.event_type == "reflection.proposal.auto_rejected"
+    )
+    after = REFLECTION_SKILL_EVOLUTION_TOTAL.labels(
+        event="auto_rejected",
+        reason_code=expected_reason_code,
+    )._value.get()
+
+    assert result.rejected_count == 1
+    assert stored is not None
+    assert stored.status == "rejected"
+    assert rejection_event.event_data["reason_code"] == expected_reason_code
+    assert after == before + 1
+
+
+async def test_reflection_skill_evolution_curator_suspends_non_replacement_source():
+    source_artifact = _realizable_source_artifact()
+    proposal = _replacement_skill_package_proposal(
+        artifact=source_artifact,
+        source="reflection_generated_candidate",
+    )
+    harness = _build_reflection_skill_evolution_curator_harness(
+        artifact_items=[source_artifact],
+        config=ReflectionSkillEvolutionCuratorConfig(auto_staging_enabled=True),
+    )
+    await harness.proposal_repository.create(proposal)
+    await harness.evaluation_repository.create(_proposal_evaluation(proposal, score_delta=0.2))
+    await harness.sandbox_run_repository.create(_proposal_sandbox_run(proposal, score_delta=0.2))
+
+    result = await harness.service.run_once(limit=10)
+
+    stored = await harness.proposal_repository.get_by_id(proposal.id)
+    suspended_event = next(
+        item for item in harness.audit_repository.events if item.event_type == "reflection.proposal.auto_staging_suspended"
+    )
+
+    assert result.suspended_count == 1
+    assert stored is not None
+    assert stored.status == "sandbox_completed"
+    assert await harness.artifact_repository.get_by_source_proposal_id(proposal.id) is None
+    assert suspended_event.event_data["reason_code"] == "non_replacement_source"
+
+
+async def test_reflection_skill_evolution_curator_suspends_preapproved_package_without_explicit_approver():
+    source_artifact = _realizable_source_artifact()
+    proposal = _replacement_skill_package_proposal(
+        artifact=source_artifact,
+        status="approved",
+        approved_by=None,
+    )
+    harness = _build_reflection_skill_evolution_curator_harness(
+        artifact_items=[source_artifact],
+        config=ReflectionSkillEvolutionCuratorConfig(auto_staging_enabled=True),
+    )
+    await harness.proposal_repository.create(proposal)
+    await harness.evaluation_repository.create(_proposal_evaluation(proposal, score_delta=0.2))
+    await harness.sandbox_run_repository.create(_proposal_sandbox_run(proposal, score_delta=0.2))
+
+    result = await harness.service.run_once(limit=10)
+
+    stored = await harness.proposal_repository.get_by_id(proposal.id)
+    suspended_event = next(
+        item for item in harness.audit_repository.events if item.event_type == "reflection.proposal.auto_staging_suspended"
+    )
+
+    assert result.suspended_count == 1
+    assert stored is not None
+    assert stored.status == "approved"
+    assert await harness.artifact_repository.get_by_source_proposal_id(proposal.id) is None
+    assert suspended_event.event_data["reason_code"] == "approved_by_missing"
+
+
+async def test_reflection_skill_evolution_curator_suspends_auto_stage_without_savepoint_protection():
+    source_artifact = _realizable_source_artifact()
+    proposal = _replacement_skill_package_proposal(artifact=source_artifact)
+    harness = _build_reflection_skill_evolution_curator_harness(
+        artifact_items=[source_artifact],
+        config=ReflectionSkillEvolutionCuratorConfig(auto_staging_enabled=True),
+        db_session=None,
+    )
+    await harness.proposal_repository.create(proposal)
+    await harness.evaluation_repository.create(_proposal_evaluation(proposal, score_delta=0.2))
+    await harness.sandbox_run_repository.create(_proposal_sandbox_run(proposal, score_delta=0.2))
+
+    result = await harness.service.run_once(limit=10)
+
+    stored = await harness.proposal_repository.get_by_id(proposal.id)
+    suspended_event = next(
+        item for item in harness.audit_repository.events if item.event_type == "reflection.proposal.auto_staging_suspended"
+    )
+
+    assert result.suspended_count == 1
+    assert stored is not None
+    assert stored.status == "sandbox_completed"
+    assert await harness.artifact_repository.get_by_source_proposal_id(proposal.id) is None
+    assert suspended_event.event_data["reason_code"] == "savepoint_unavailable"
+
+
+async def test_reflection_skill_evolution_curator_audits_sandbox_enqueue_noop():
+    source_artifact = _realizable_source_artifact()
+    proposal = _replacement_skill_package_proposal(artifact=source_artifact, status="proposed")
+    harness = _build_reflection_skill_evolution_curator_harness(
+        artifact_items=[source_artifact],
+        autonomy_job_repository=None,
+    )
+    await harness.proposal_repository.create(proposal)
+
+    result = await harness.service.run_once(limit=10)
+
+    stored = await harness.proposal_repository.get_by_id(proposal.id)
+    review_event = next(
+        item for item in harness.audit_repository.events if item.event_type == "reflection.proposal.manual_review_required"
+    )
+
+    assert result.suspended_count == 1
+    assert stored is not None
+    assert stored.status == "proposed"
+    assert harness.autonomy_job_repository is None
+    assert review_event.event_data["reason_code"] == "sandbox_enqueue_not_queued"
+
+
+async def test_reflection_skill_evolution_curator_suspends_when_auto_stage_rate_limit_is_reached():
+    source_artifact = _realizable_source_artifact()
+    learner_goal_id = "goal-rate-limit"
+    proposal = _replacement_skill_package_proposal(
+        artifact=source_artifact,
+        learner_goal_id=learner_goal_id,
+    )
+    harness = _build_reflection_skill_evolution_curator_harness(
+        artifact_items=[source_artifact],
+        config=ReflectionSkillEvolutionCuratorConfig(auto_staging_enabled=True, auto_stage_24h_limit=3),
+    )
+    await harness.proposal_repository.create(proposal)
+    await harness.evaluation_repository.create(_proposal_evaluation(proposal, score_delta=0.2))
+    await harness.sandbox_run_repository.create(_proposal_sandbox_run(proposal, score_delta=0.2))
+    for index in range(3):
+        prior_proposal = _replacement_skill_package_proposal(
+            artifact=source_artifact,
+            learner_goal_id=learner_goal_id,
+            status="approved",
+        )
+        await harness.proposal_repository.create(prior_proposal)
+        await harness.artifact_repository.create(
+            _system_staged_replacement_artifact(
+                proposal=prior_proposal,
+                source_artifact=source_artifact,
+                version=f"0.1.{index + 20}",
+            )
+        )
+
+    result = await harness.service.run_once(limit=10)
+
+    stored = await harness.proposal_repository.get_by_id(proposal.id)
+    suspended_event = next(
+        item for item in harness.audit_repository.events if item.event_type == "reflection.proposal.auto_staging_suspended"
+    )
+
+    assert result.suspended_count == 1
+    assert stored is not None
+    assert stored.status == "sandbox_completed"
+    assert await harness.artifact_repository.get_by_source_proposal_id(proposal.id) is None
+    assert suspended_event.event_data["reason_code"] == "auto_stage_24h_limit_reached"
 
 
 async def test_sandbox_service_executes_and_persists_run():

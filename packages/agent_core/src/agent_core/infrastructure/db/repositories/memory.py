@@ -27,6 +27,7 @@ from agent_core.domain.entities.memory import (
     MemoryEmbeddingRecord,
     MemoryEvent,
     MemoryGovernanceDecision,
+    MemoryPromotionEligibilityRecord,
 )
 from agent_core.domain.entities.memory_maintenance import MemoryMaintenanceJob
 from agent_core.domain.entities.message import SessionMessage
@@ -73,6 +74,7 @@ from agent_core.infrastructure.db.models import (
     MemoryConflictSetModel,
     MemoryEvidenceLinkModel,
     MemoryGovernanceDecisionModel,
+    MemoryPromotionEligibilityModel,
     MemoryMaintenanceJobModel,
     PlanStageModel,
     ReflectionActionModel,
@@ -422,6 +424,31 @@ class KnowledgeMemoryRepository:
         )
         return {status: int(count) for status, count in result.all()}
 
+    async def get_active_or_stable_conflict(
+        self,
+        *,
+        learner_profile_id: str,
+        learner_goal_id: str | None,
+        knowledge_key: str,
+        exclude_memory_id: str,
+    ) -> KnowledgeMemory | None:
+        query = (
+            select(KnowledgeMemoryModel)
+            .where(KnowledgeMemoryModel.learner_profile_id == learner_profile_id)
+            .where(KnowledgeMemoryModel.id != exclude_memory_id)
+            .where(KnowledgeMemoryModel.status.in_(("active", "stable")))
+            .where(KnowledgeMemoryModel.knowledge_key == knowledge_key)
+        )
+        if learner_goal_id is None:
+            query = query.where(KnowledgeMemoryModel.learner_goal_id.is_(None))
+        else:
+            query = query.where(KnowledgeMemoryModel.learner_goal_id == learner_goal_id)
+        result = await self._session.execute(
+            query.order_by(desc(KnowledgeMemoryModel.updated_at), desc(KnowledgeMemoryModel.id)).limit(1)
+        )
+        model = result.scalars().first()
+        return None if model is None else self._to_entity(model)
+
     @staticmethod
     def _to_entity(model: KnowledgeMemoryModel) -> KnowledgeMemory:
         return KnowledgeMemory(
@@ -538,6 +565,26 @@ class KnowledgeMemoryEmbeddingRepository:
             .where(KnowledgeMemoryEmbeddingModel.learner_profile_id == learner_profile_id)
             .order_by(desc(KnowledgeMemoryEmbeddingModel.created_at), desc(KnowledgeMemoryEmbeddingModel.id))
         )
+        return [self._to_entity(model) for model in result.scalars().all()]
+
+    async def list_by_memory_ids(
+        self,
+        *,
+        learner_profile_id: str,
+        memory_ids: list[str],
+        statuses: set[str] | None = None,
+    ) -> list[KnowledgeMemoryEmbeddingRecord]:
+        if not memory_ids:
+            return []
+        query = (
+            select(KnowledgeMemoryEmbeddingModel)
+            .where(KnowledgeMemoryEmbeddingModel.learner_profile_id == learner_profile_id)
+            .where(KnowledgeMemoryEmbeddingModel.memory_id.in_(memory_ids))
+            .order_by(desc(KnowledgeMemoryEmbeddingModel.created_at), desc(KnowledgeMemoryEmbeddingModel.id))
+        )
+        if statuses is not None:
+            query = query.where(KnowledgeMemoryEmbeddingModel.status.in_(sorted(statuses)))
+        result = await self._session.execute(query)
         return [self._to_entity(model) for model in result.scalars().all()]
 
     @staticmethod
@@ -864,6 +911,26 @@ class BehaviorMemoryEmbeddingRepository:
         )
         return [self._to_entity(model) for model in result.scalars().all()]
 
+    async def list_by_memory_ids(
+        self,
+        *,
+        learner_profile_id: str,
+        memory_ids: list[str],
+        statuses: set[str] | None = None,
+    ) -> list[BehaviorMemoryEmbeddingRecord]:
+        if not memory_ids:
+            return []
+        query = (
+            select(BehaviorMemoryEmbeddingModel)
+            .where(BehaviorMemoryEmbeddingModel.learner_profile_id == learner_profile_id)
+            .where(BehaviorMemoryEmbeddingModel.memory_id.in_(memory_ids))
+            .order_by(desc(BehaviorMemoryEmbeddingModel.created_at), desc(BehaviorMemoryEmbeddingModel.id))
+        )
+        if statuses is not None:
+            query = query.where(BehaviorMemoryEmbeddingModel.status.in_(sorted(statuses)))
+        result = await self._session.execute(query)
+        return [self._to_entity(model) for model in result.scalars().all()]
+
     @staticmethod
     def _to_entity(model: BehaviorMemoryEmbeddingModel) -> BehaviorMemoryEmbeddingRecord:
         return BehaviorMemoryEmbeddingRecord(
@@ -1086,6 +1153,98 @@ class MemoryGovernanceDecisionRepository:
             for model in result.scalars().all()
         ]
 
+
+
+
+
+class MemoryPromotionEligibilityRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def upsert_current(self, entity: MemoryPromotionEligibilityRecord) -> MemoryPromotionEligibilityRecord:
+        current = await self.get_current(memory_id=entity.memory_id)
+        if current is not None:
+            if entity.evaluated_at <= current.evaluated_at:
+                return current
+            model = await self._session.get(MemoryPromotionEligibilityModel, current.id)
+            if model is not None:
+                model.superseded_at = entity.evaluated_at
+        self._session.add(MemoryPromotionEligibilityModel(**{k: v for k, v in entity.__dict__.items() if k != "memory_type"}))
+        await self._session.flush()
+        return entity
+
+    async def get_current(self, *, memory_id: str) -> MemoryPromotionEligibilityRecord | None:
+        result = await self._session.execute(
+            select(MemoryPromotionEligibilityModel)
+            .where(MemoryPromotionEligibilityModel.memory_id == memory_id)
+            .where(MemoryPromotionEligibilityModel.superseded_at.is_(None))
+            .order_by(desc(MemoryPromotionEligibilityModel.evaluated_at), desc(MemoryPromotionEligibilityModel.id))
+            .limit(1)
+        )
+        model = result.scalars().first()
+        return None if model is None else self._to_entity(model)
+
+    async def list_current_eligible_by_profile(
+        self,
+        *,
+        learner_profile_id: str,
+        learner_goal_id: str | None = None,
+        limit: int,
+    ) -> list[MemoryPromotionEligibilityRecord]:
+        query = (
+            select(MemoryPromotionEligibilityModel)
+            .where(MemoryPromotionEligibilityModel.learner_profile_id == learner_profile_id)
+            .where(MemoryPromotionEligibilityModel.superseded_at.is_(None))
+            .where(MemoryPromotionEligibilityModel.status == "eligible")
+            .order_by(desc(MemoryPromotionEligibilityModel.score), desc(MemoryPromotionEligibilityModel.evaluated_at))
+            .limit(limit)
+        )
+        if learner_goal_id is not None:
+            query = query.where(MemoryPromotionEligibilityModel.learner_goal_id == learner_goal_id)
+        result = await self._session.execute(query)
+        return [self._to_entity(model) for model in result.scalars().all()]
+
+    async def list_current_by_memory_ids(
+        self,
+        *,
+        memory_ids: list[str],
+    ) -> dict[str, MemoryPromotionEligibilityRecord]:
+        if not memory_ids:
+            return {}
+        result = await self._session.execute(
+            select(MemoryPromotionEligibilityModel)
+            .where(MemoryPromotionEligibilityModel.memory_id.in_(memory_ids))
+            .where(MemoryPromotionEligibilityModel.superseded_at.is_(None))
+            .order_by(desc(MemoryPromotionEligibilityModel.evaluated_at), desc(MemoryPromotionEligibilityModel.id))
+        )
+        records: dict[str, MemoryPromotionEligibilityRecord] = {}
+        for model in result.scalars().all():
+            if model.memory_id in records:
+                continue
+            records[model.memory_id] = self._to_entity(model)
+        return records
+
+    @staticmethod
+    def _to_entity(model: MemoryPromotionEligibilityModel) -> MemoryPromotionEligibilityRecord:
+        return MemoryPromotionEligibilityRecord(
+            id=model.id,
+            memory_id=model.memory_id,
+            learner_profile_id=model.learner_profile_id,
+            learner_goal_id=model.learner_goal_id,
+            status=model.status,
+            score=model.score,
+            independent_source_count=model.independent_source_count,
+            high_signal_source_count=model.high_signal_source_count,
+            evidence_span_hours=model.evidence_span_hours,
+            conflict_blocked=model.conflict_blocked,
+            blocked_conflict_set_id=model.blocked_conflict_set_id,
+            blocked_memory_id=model.blocked_memory_id,
+            reason_codes=list(model.reason_codes or []),
+            metrics_snapshot=dict(model.metrics_snapshot or {}),
+            evaluated_at=model.evaluated_at,
+            superseded_at=model.superseded_at,
+            created_at=model.created_at,
+        )
 
 
 class MemoryAnnotationRepository:
@@ -1360,7 +1519,6 @@ class MemoryConflictRepository:
         return MemoryConflictMember(
             id=model.id,
             conflict_set_id=model.conflict_set_id,
-            memory_type=model.memory_type,
             memory_id=model.memory_id,
             memory_key=model.memory_key,
             stance=model.stance,
