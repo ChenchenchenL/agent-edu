@@ -27,7 +27,7 @@ def upgrade() -> None:
         sa.Column("independent_source_count", sa.Integer(), nullable=False),
         sa.Column("high_signal_source_count", sa.Integer(), nullable=False),
         sa.Column("evidence_span_hours", sa.Float(), nullable=False),
-        sa.Column("conflict_blocked", sa.Boolean(), nullable=False, server_default=sa.text("0")),
+        sa.Column("conflict_blocked", sa.Boolean(), nullable=False, server_default=sa.text("false")),
         sa.Column("blocked_conflict_set_id", sa.String(length=36), sa.ForeignKey("memory_conflict_sets.id"), nullable=True),
         sa.Column("blocked_memory_id", sa.String(length=36), nullable=True),
         sa.Column("reason_codes", sa.JSON(), nullable=False),

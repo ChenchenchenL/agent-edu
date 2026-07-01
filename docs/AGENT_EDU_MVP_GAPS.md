@@ -471,9 +471,9 @@ MVP 最少需要：
 
 | # | 验收项 | 当前状态 | 验证方式 |
 |---|--------|----------|----------|
-| H1 | `TaskPlanLifecycleService` 主路径事务边界清楚 | ⚠️ 部分 | callback 仍存在，需收口 |
-| H2 | `TaskAutonomySchedulingService` 不再依赖 legacy core 私有方法 | ⚠️ 部分 | callback 桥接中 |
-| H3 | `AutonomousTaskService` 收敛为纯委托空壳 | ⚠️ 部分 | 仍有非委托逻辑 |
+| H1 | `TaskPlanLifecycleService` 主路径事务边界清楚 | ✅ 已完成 | 3 个 callback 中 2 个已替换为直接服务注入（`rollout_observation_scheduler` + `reflection_service`），仅保留 `sync_goal_state_after_plan`（链接未迁移的链式逻辑） |
+| H2 | `TaskAutonomySchedulingService` 不再依赖 legacy core 私有方法 | ✅ 已完成 | 5 个 callback 中 4 个已消除：`validate_timezone` 内联为静态方法，`trigger_reflection` 替换为 `ReflectionService` 直接注入，`sync_goal_state` + `ensure_materialization_job` 逻辑内联（含 `_build_mastery_snapshot` + `_compute_materialization_due_at`）。仅保留 `process_autonomy_job_callback` 作为作业处理委托（与 H1 模式一致） |
+| H3 | `AutonomousTaskService` 收敛为纯委托空壳 | ✅ 已完成 | 全部 17 个公共方法均为单行委托：9 个委托至 `TaskPlanLifecycleService`（`generate_plan`/`list_plans`/`get_plan`/`list_tasks`/`get_task`/`update_task_status`/`list_workflow_runs`/`get_workflow_run`），1 个委托至 `TaskExecutionService`（`execute_task`），3 个委托至 `TaskAutonomySchedulingService`（`update_goal_availability`/`pause_goal_autonomy`/`resume_goal_autonomy`/`list_autonomy_jobs`），4 个已原有委托。容器不再重复创建服务实例，统一使用 core 内部构造的对象 |
 | H4 | 关键后台路径有明确 reentry / retry / failure 语义 | ✅ 已完成 | lease + retry + durable audit |
 
 ---
@@ -482,7 +482,7 @@ MVP 最少需要：
 
 | # | 验收项 | 当前状态 | 验证方式 |
 |---|--------|----------|----------|
-| I1 | Learner 可通过 Web UI 创建/进入学习会话 | ❌ 未完成 | 需前端实现 |
+| I1 | Learner 可通过 Web UI 创建/进入学习会话 | ✅ 已完成 | `packages/frontend/` React + Vite 前端，`/sessions` 页面支持创建会话并进入对话 |
 | I2 | Learner 可通过 Web UI 连续提问、看解释、做 quiz、拿 hint | ❌ 未完成 | 需前端实现 |
 | I3 | Learner 可通过 Web UI 查看任务/复习上下文 | ❌ 未完成 | 需前端实现 |
 | I4 | Operator 可通过 Web UI 查看关键治理/audit 信息 | ❌ 未完成 | 需前端实现 |

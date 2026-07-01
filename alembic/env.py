@@ -47,9 +47,7 @@ def run_migrations_offline() -> None:
 def do_run_migrations(connection) -> None:
     _ensure_version_column_capacity(connection)
     context.configure(connection=connection, target_metadata=target_metadata)
-
-    with context.begin_transaction():
-        context.run_migrations()
+    context.run_migrations()
 
 
 async def run_migrations_online() -> None:
@@ -59,7 +57,7 @@ async def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
 
-    async with connectable.connect() as connection:
+    async with connectable.begin() as connection:
         await connection.run_sync(do_run_migrations)
 
     await connectable.dispose()

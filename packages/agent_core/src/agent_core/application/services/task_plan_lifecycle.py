@@ -33,15 +33,14 @@ from agent_core.infrastructure.db.repositories import (
 
 if TYPE_CHECKING:
     from agent_core.application.services.audit import AuditService
+    from agent_core.application.services.reflection import ReflectionService
+    from agent_core.application.services.reflection_proposal_rollout_observation_scheduler import (
+        ReflectionProposalRolloutObservationScheduler,
+    )
     from agent_core.domain.entities.goal import LearnerGoal
 
 
 GoalStateSyncCallback = Callable[[str, str, str], Awaitable[None]]
-RolloutObservationCallback = Callable[[str, str, str, str], Awaitable[None]]
-WorkflowFailureReflectionCallback = Callable[
-    [str, str, str, str | None, str | None],
-    Awaitable[None],
-]
 
 
 class TaskPlanLifecycleService:
@@ -72,8 +71,8 @@ class TaskPlanLifecycleService:
         memory_service: MemoryServiceProtocol | None = None,
         status_update_support: TaskStatusUpdateSupportService | None = None,
         sync_goal_state_after_plan: GoalStateSyncCallback | None = None,
-        schedule_rollout_observation: RolloutObservationCallback | None = None,
-        trigger_workflow_failure_reflection: WorkflowFailureReflectionCallback | None = None,
+        rollout_observation_scheduler: ReflectionProposalRolloutObservationScheduler | None = None,
+        reflection_service: ReflectionService | None = None,
     ) -> None:
         """Initialize the lifecycle service with real dependencies.
 
@@ -90,8 +89,8 @@ class TaskPlanLifecycleService:
             memory_service: Optional memory interpretation provider for planning.
             status_update_support: Shared support for attempts, mastery, and post-update side effects.
             sync_goal_state_after_plan: Optional callback for autonomy state synchronization.
-            schedule_rollout_observation: Optional callback for rollout observation scheduling.
-            trigger_workflow_failure_reflection: Optional callback for workflow failure reflection.
+            rollout_observation_scheduler: Optional scheduler for rollout observation tracking.
+            reflection_service: Optional reflection service for workflow failure reflection.
         """
         self._db_session = db_session
         self._goal_repository = goal_repository
@@ -105,8 +104,8 @@ class TaskPlanLifecycleService:
         self._memory_service = memory_service
         self._status_update_support = status_update_support
         self._sync_goal_state_after_plan_callback = sync_goal_state_after_plan
-        self._schedule_rollout_observation_callback = schedule_rollout_observation
-        self._trigger_workflow_failure_reflection_callback = trigger_workflow_failure_reflection
+        self._rollout_observation_scheduler = rollout_observation_scheduler
+        self._reflection_service = reflection_service
 
     async def generate_plan(
         self,
@@ -115,7 +114,7 @@ class TaskPlanLifecycleService:
         trigger_source: str,
         commit: bool = True,
         scheduled_job_id: str | None = None,
-    ) -> StudyPlanResponse:
+    ) -> tuple[StudyPlanResponse, str]:
         """Generate or replan a study plan.
 
         Args:
@@ -206,7 +205,7 @@ class TaskPlanLifecycleService:
             )
             raise
 
-        return await self.get_plan(materialized.study_plan.id)
+        return await self.get_plan(materialized.study_plan.id), run.id
 
     async def list_plans(self, goal_id: str) -> list[StudyPlanResponse]:
         """List all study plans for a goal.
@@ -585,13 +584,13 @@ class TaskPlanLifecycleService:
         trigger_source: str,
         source_ref: str,
     ) -> None:
-        if self._schedule_rollout_observation_callback is None:
+        if self._rollout_observation_scheduler is None:
             return
-        await self._schedule_rollout_observation_callback(
-            learner_goal_id,
-            surface,
-            trigger_source,
-            source_ref,
+        await self._rollout_observation_scheduler.schedule_active(
+            learner_goal_id=learner_goal_id,
+            surface=surface,
+            trigger_source=trigger_source,
+            source_ref=source_ref,
         )
 
     async def _trigger_workflow_failure_reflection(
@@ -601,14 +600,23 @@ class TaskPlanLifecycleService:
         workflow_run_id: str,
         study_plan_id: str | None,
     ) -> None:
-        if self._trigger_workflow_failure_reflection_callback is None:
+        if self._reflection_service is None:
             return
-        await self._trigger_workflow_failure_reflection_callback(
-            goal.learner_profile_id,
-            goal.id,
-            workflow_run_id,
-            None,
-            study_plan_id,
+        from agent_core.application.services.reflection import ReflectionTriggerRequest
+
+        await self._reflection_service.trigger_reflection(
+            ReflectionTriggerRequest(
+                learner_profile_id=goal.learner_profile_id,
+                learner_goal_id=goal.id,
+                scope="goal",
+                target_type="workflow_run",
+                target_id=workflow_run_id,
+                trigger_source="workflow_failed",
+                reflection_depth=1,
+                workflow_run_id=workflow_run_id,
+                study_plan_id=study_plan_id,
+                source_attempt_id=workflow_run_id,
+            )
         )
 
     @staticmethod

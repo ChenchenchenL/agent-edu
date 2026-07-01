@@ -51,6 +51,8 @@ from agent_core.application.services.tool_plan_runtime import (
 )
 from agent_core.application.services.task_status_update_support import TaskStatusUpdateSupportService
 from agent_core.application.services.task_autonomy_scheduling import TaskAutonomySchedulingService
+from agent_core.application.services.task_plan_lifecycle import TaskPlanLifecycleService
+from agent_core.application.services.task_execution import TaskExecutionService
 from agent_core.application.services.workflow import WorkflowRunService
 from agent_core.application.tools.registry import InternalToolRegistry
 from agent_core.application.tools.registry import ToolExecutionRequest, ToolSpec
@@ -237,13 +239,43 @@ class AutonomousTaskService:
             learner_topic_mastery_repository=learner_topic_mastery_repository,
             autonomy_job_repository=autonomy_job_repository,
             audit_service=audit_service,
-            sync_goal_state_callback=lambda goal_id, phase, reason, next_due_at=None: self._sync_goal_state(goal_id, phase=phase, reason=reason, next_due_at=next_due_at),
-            ensure_materialization_job_callback=lambda goal_id, trigger: self._ensure_daily_materialization_job(goal_id, trigger_source=trigger),
-            validate_timezone_callback=self._validate_timezone,
             autonomy_job_service=autonomy_job_service,
-            trigger_reflection_callback=self._trigger_reflection_callback,
+            reflection_service=self._reflection_service,
             process_autonomy_job_callback=self._process_autonomy_job,
             autonomy_job_dispatcher=autonomy_job_dispatcher,
+        )
+        self._plan_lifecycle = TaskPlanLifecycleService(
+            db_session=db_session,
+            goal_repository=goal_repository,
+            study_plan_repository=study_plan_repository,
+            plan_stage_repository=plan_stage_repository,
+            daily_task_repository=daily_task_repository,
+            workflow_run_repository=workflow_run_repository,
+            planner_service=planner_service,
+            workflow_run_service=workflow_run_service,
+            audit_service=audit_service,
+            memory_service=memory_service,
+            status_update_support=self._status_update_support,
+            sync_goal_state_after_plan=lambda goal_id, plan_id, trigger: self._sync_goal_state_after_plan(goal_id, plan_id, trigger_source=trigger),
+            rollout_observation_scheduler=self._rollout_observation_scheduler,
+            reflection_service=self._reflection_service,
+        )
+        self._execution = TaskExecutionService(
+            db_session=db_session,
+            goal_repository=goal_repository,
+            daily_task_repository=daily_task_repository,
+            session_service=session_service,
+            chat_service=chat_service,
+            quiz_service=quiz_service,
+            workflow_run_service=workflow_run_service,
+            audit_service=audit_service,
+            failure_reflection_callback=lambda *, goal, task, run_id: self._trigger_workflow_failure_reflection(
+                goal_learner_profile_id=goal.learner_profile_id,
+                goal_id=goal.id,
+                workflow_run_id=run_id,
+                daily_task_id=task.id,
+                study_plan_id=task.study_plan_id,
+            ),
         )
         self._autonomy_jobs_running = False
         self._register_internal_tools()
@@ -256,7 +288,7 @@ class AutonomousTaskService:
         commit: bool = True,
         scheduled_job_id: str | None = None,
     ) -> StudyPlanResponse:
-        plan, _ = await self._generate_plan_with_run_context(
+        plan, _ = await self._plan_lifecycle.generate_plan(
             goal_id=goal_id,
             trigger_source=trigger_source,
             commit=commit,
@@ -272,116 +304,18 @@ class AutonomousTaskService:
         commit: bool = True,
         scheduled_job_id: str | None = None,
     ) -> tuple[StudyPlanResponse, str]:
-        goal = await self._require_goal(goal_id)
-        active_plan = await self._study_plan_repository.get_active_by_goal(goal.id)
-        if active_plan is not None and trigger_source not in {"manual_replan", "task_failed", "task_skipped"}:
-            raise ValidationError("An active study plan already exists for this goal.")
-        version = 1 if active_plan is None else active_plan.version + 1
-        run = await self._workflow_run_service.create_run(
-            workflow_type="plan_generation",
+        return await self._plan_lifecycle.generate_plan(
+            goal_id=goal_id,
             trigger_source=trigger_source,
-            learner_goal_id=goal.id,
-            study_plan_id=active_plan.id if active_plan is not None else None,
-            daily_task_id=None,
+            commit=commit,
             scheduled_job_id=scheduled_job_id,
         )
-        try:
-            memory_interpretation = None
-            if self._memory_service is not None:
-                memory_interpretation = await self._memory_service.build_interpretation(
-                    learner_profile_id=goal.learner_profile_id,
-                    learner_goal_id=goal.id,
-                    limit_per_type=4,
-                )
-            materialized = await self._planner_service.build_plan(
-                goal=goal,
-                version=version,
-                trigger_source=trigger_source,
-                supersedes_plan_id=active_plan.id if active_plan is not None else None,
-                memory_interpretation=memory_interpretation,
-            )
-            if active_plan is not None:
-                superseded = active_plan.with_status("superseded")
-                await self._study_plan_repository.update(superseded)
-                await self._daily_task_repository.bulk_mark_superseded(active_plan.id)
-                await self._audit_service.record(
-                    event_type="study_plan.superseded",
-                    resource_type="study_plan",
-                    resource_id=active_plan.id,
-                    actor="system",
-                    event_data={
-                        "study_plan_id": active_plan.id,
-                        "learner_goal_id": goal.id,
-                        "superseded_by_plan_id": materialized.study_plan.id,
-                    },
-                )
-            await self._study_plan_repository.create(materialized.study_plan)
-            await self._plan_stage_repository.create_many(materialized.stages)
-            await self._daily_task_repository.create_many(materialized.tasks)
-            await self._audit_service.record(
-                event_type="study_plan.generated" if active_plan is None else "study_plan.replanned",
-                resource_type="study_plan",
-                resource_id=materialized.study_plan.id,
-                actor="system",
-                event_data={
-                    "learner_goal_id": goal.id,
-                    "study_plan_id": materialized.study_plan.id,
-                    "version": materialized.study_plan.version,
-                    "trigger_source": trigger_source,
-                    "task_count": len(materialized.tasks),
-                    "fallback_used": materialized.llm_draft.fallback_used,
-                },
-            )
-            for task in materialized.tasks:
-                await self._audit_service.record(
-                    event_type="daily_task.created",
-                    resource_type="daily_task",
-                    resource_id=task.id,
-                    actor="system",
-                    event_data={
-                        "daily_task_id": task.id,
-                        "learner_goal_id": task.learner_goal_id,
-                        "study_plan_id": task.study_plan_id,
-                        "task_type": task.task_type,
-                        "scheduled_for": task.scheduled_for.isoformat(),
-                    },
-                )
-            run = await self._workflow_run_service.complete_run(
-                run=run,
-                result_resource_type="study_plan",
-                result_resource_ids=[materialized.study_plan.id, *[task.id for task in materialized.tasks]],
-            )
-            await self._sync_goal_state_after_plan(goal.id, materialized.study_plan.id, trigger_source=trigger_source)
-            await self._schedule_surface_rollout_observation(
-                learner_goal_id=goal.id,
-                surface="plan_generation",
-                trigger_source=trigger_source,
-                source_ref=run.id,
-            )
-            if commit:
-                await self._db_session.commit()
-        except Exception as exc:
-            await self._db_session.rollback()
-            await self._workflow_run_service.fail_run(run=run, error_code=type(exc).__name__)
-            await self._trigger_workflow_failure_reflection(
-                goal_learner_profile_id=goal.learner_profile_id,
-                goal_id=goal.id,
-                workflow_run_id=run.id,
-                study_plan_id=active_plan.id if active_plan is not None else None,
-            )
-            raise
-        return await self.get_plan(materialized.study_plan.id), run.id
 
     async def list_plans(self, goal_id: str) -> list[StudyPlanResponse]:
-        await self._require_goal(goal_id)
-        plans = await self._study_plan_repository.list_by_goal(goal_id)
-        return [await self._to_plan_response(item) for item in plans]
+        return await self._plan_lifecycle.list_plans(goal_id)
 
     async def get_plan(self, plan_id: str) -> StudyPlanResponse:
-        plan = await self._study_plan_repository.get_by_id(plan_id)
-        if plan is None:
-            raise NotFoundError(f"Study plan '{plan_id}' was not found.")
-        return await self._to_plan_response(plan)
+        return await self._plan_lifecycle.get_plan(plan_id)
 
     async def list_tasks(
         self,
@@ -392,152 +326,15 @@ class AutonomousTaskService:
         scheduled_to: date | None = None,
         task_type: str | None = None,
     ) -> list[DailyTaskResponse]:
-        await self._require_goal(goal_id)
-        if statuses is None and scheduled_from is None and scheduled_to is None and task_type is None:
-            tasks = await self._daily_task_repository.list_by_goal(goal_id)
-        else:
-            tasks = await self._daily_task_repository.list_filtered(
-                learner_goal_id=goal_id,
-                statuses=statuses,
-                scheduled_from=self._to_datetime(scheduled_from) if scheduled_from is not None else None,
-                scheduled_to=self._to_datetime(scheduled_to) if scheduled_to is not None else None,
-                task_type=task_type,
-            )
-        return [DailyTaskResponse.model_validate(item) for item in tasks]
+        return await self._plan_lifecycle.list_tasks(
+            goal_id, statuses=statuses, scheduled_from=scheduled_from, scheduled_to=scheduled_to, task_type=task_type,
+        )
 
     async def get_task(self, task_id: str) -> DailyTaskResponse:
-        task = await self._daily_task_repository.get_by_id(task_id)
-        if task is None:
-            raise NotFoundError(f"Daily task '{task_id}' was not found.")
-        return DailyTaskResponse.model_validate(task)
+        return await self._plan_lifecycle.get_task(task_id)
 
     async def execute_task(self, task_id: str) -> ExecuteDailyTaskResponse:
-        task = await self._require_task(task_id)
-        if task.status == "in_progress" and task.execution_session_id is not None and task.last_workflow_run_id is not None:
-            await self._audit_service.record_durable(
-                event_type="daily_task.execution.reused",
-                resource_type="daily_task",
-                resource_id=task.id,
-                actor="system",
-                event_data={
-                    "daily_task_id": task.id,
-                    "workflow_run_id": task.last_workflow_run_id,
-                    "execution_session_id": task.execution_session_id,
-                    "task_type": task.task_type,
-                    "execution_mode": task.execution_mode,
-                },
-            )
-            return ExecuteDailyTaskResponse(
-                task=DailyTaskResponse.model_validate(task),
-                workflow_run_id=task.last_workflow_run_id,
-                execution_session_id=task.execution_session_id,
-                reused_existing_execution=True,
-            )
-        if task.status != "pending":
-            raise ValidationError("Only pending tasks can be executed.")
-
-        run = await self._workflow_run_service.create_run(
-            workflow_type="task_execution",
-            trigger_source="manual_execute",
-            learner_goal_id=task.learner_goal_id,
-            study_plan_id=task.study_plan_id,
-            daily_task_id=task.id,
-        )
-        try:
-            goal = await self._require_goal(task.learner_goal_id)
-            session = await self._session_service.create_session(
-                CreateSessionRequest(
-                    learner_profile_id=goal.learner_profile_id,
-                    learner_goal_id=goal.id,
-                    title=task.title,
-                    subject=goal.subject,
-                ),
-                daily_task_id=task.id,
-                commit=False,
-            )
-            working_task = task.with_execution_session(
-                execution_session_id=session.id,
-                workflow_run_id=run.id,
-            )
-            await self._daily_task_repository.update(working_task)
-            await self._audit_service.record(
-                event_type="daily_task.execution.started",
-                resource_type="daily_task",
-                resource_id=task.id,
-                actor="system",
-                event_data={
-                    "daily_task_id": task.id,
-                    "workflow_run_id": run.id,
-                    "execution_session_id": session.id,
-                    "execution_mode": task.execution_mode,
-                },
-            )
-            if task.execution_mode == "chat":
-                await self._chat_service.create_message(
-                    session_id=session.id,
-                    payload=MessageRequest(content=task.instructions, mode="chat"),
-                    commit=False,
-                )
-            elif task.execution_mode == "quiz":
-                await self._quiz_service.generate_quiz(
-                    GenerateQuizRequest(
-                        session_id=session.id,
-                        topic=task.topic_focus,
-                        difficulty=task.difficulty or "medium",
-                        question_count=task.question_count or 3,
-                    ),
-                    commit=False,
-                )
-            else:
-                raise ValidationError("Unsupported task execution mode.")
-            run = await self._workflow_run_service.complete_run(
-                run=run,
-                result_resource_type="learning_session",
-                result_resource_ids=[session.id],
-            )
-            await self._audit_service.record(
-                event_type="daily_task.execution.completed",
-                resource_type="daily_task",
-                resource_id=task.id,
-                actor="system",
-                event_data={
-                    "daily_task_id": task.id,
-                    "workflow_run_id": run.id,
-                    "execution_session_id": session.id,
-                },
-            )
-            await self._db_session.commit()
-            refreshed_task = await self._require_task(task.id)
-            return ExecuteDailyTaskResponse(
-                task=DailyTaskResponse.model_validate(refreshed_task),
-                workflow_run_id=run.id,
-                execution_session_id=session.id,
-                reused_existing_execution=False,
-            )
-        except Exception as exc:
-            await self._workflow_run_service.fail_run(run=run, error_code=type(exc).__name__)
-            goal = await self._require_goal(task.learner_goal_id)
-            await self._trigger_workflow_failure_reflection(
-                goal_learner_profile_id=goal.learner_profile_id,
-                goal_id=goal.id,
-                daily_task_id=task.id,
-                workflow_run_id=run.id,
-                study_plan_id=task.study_plan_id,
-            )
-            await self._audit_service.record_durable(
-                event_type="daily_task.execution.failed",
-                resource_type="daily_task",
-                resource_id=task.id,
-                actor="system",
-                event_data={
-                    "daily_task_id": task.id,
-                    "workflow_run_id": run.id,
-                    "error_code": type(exc).__name__,
-                    "error": str(exc),
-                },
-            )
-            await self._db_session.rollback()
-            raise
+        return await self._execution.execute_task(task_id)
 
     async def update_task_status(
         self,
@@ -545,33 +342,7 @@ class AutonomousTaskService:
         task_id: str,
         payload: UpdateDailyTaskStatusRequest,
     ) -> DailyTaskResponse:
-        original_task = await self._daily_task_repository.get_by_id(task_id)
-        try:
-            updated_task, attempt = await self._write_task_status_core(
-                task_id=task_id,
-                payload=payload,
-            )
-            await self._status_update_support.coordinate_post_update(updated_task, attempt)
-            await self._db_session.commit()
-        except Exception as exc:
-            await self._db_session.rollback()
-            await self._audit_service.record_durable(
-                event_type="daily_task.status.update.failed",
-                resource_type="daily_task",
-                resource_id=task_id,
-                actor="learner",
-                event_data={
-                    "daily_task_id": task_id,
-                    "workflow_run_id": original_task.last_workflow_run_id if original_task is not None else None,
-                    "previous_status": original_task.status if original_task is not None else None,
-                    "requested_status": payload.status,
-                    "result_note": payload.result_note,
-                    "error_code": type(exc).__name__,
-                    "error": str(exc),
-                },
-            )
-            raise
-        return DailyTaskResponse.model_validate(await self._require_task(task_id))
+        return await self._plan_lifecycle.update_task_status(task_id=task_id, payload=payload)
 
     async def _write_task_status_core(
         self,
@@ -695,15 +466,10 @@ class AutonomousTaskService:
             )
 
     async def list_workflow_runs(self, goal_id: str) -> list[WorkflowRunResponse]:
-        await self._require_goal(goal_id)
-        runs = await self._workflow_run_repository.list_by_goal(goal_id)
-        return [WorkflowRunResponse.model_validate(item) for item in runs]
+        return await self._plan_lifecycle.list_workflow_runs(goal_id)
 
     async def get_workflow_run(self, run_id: str) -> WorkflowRunResponse:
-        run = await self._workflow_run_repository.get_by_id(run_id)
-        if run is None:
-            raise NotFoundError(f"Workflow run '{run_id}' was not found.")
-        return WorkflowRunResponse.model_validate(run)
+        return await self._plan_lifecycle.get_workflow_run(run_id)
 
     async def update_goal_availability(
         self,
@@ -711,74 +477,16 @@ class AutonomousTaskService:
         goal_id: str,
         payload: UpdateLearnerAvailabilityRequest,
     ) -> LearnerAvailabilityResponse:
-        goal = await self._require_goal(goal_id)
-        if self._learner_availability_repository is None:
-            raise ValidationError("Learner availability storage is not configured.")
-        validated_timezone = self._validate_timezone(payload.timezone)
-        availability = LearnerAvailability.build(
-            learner_goal_id=goal.id,
-            timezone=validated_timezone,
-            available_days=payload.available_days,
-            time_windows=payload.time_windows,
-            max_daily_minutes=payload.max_daily_minutes,
-            preferred_session_length_minutes=payload.preferred_session_length_minutes,
-        )
-        await self._learner_availability_repository.upsert(availability)
-        await self._audit_service.record(
-            event_type="learner_availability.updated",
-            resource_type="learner_goal",
-            resource_id=goal.id,
-            actor="learner",
-            event_data={
-                "learner_goal_id": goal.id,
-                "timezone": validated_timezone,
-                "available_days": payload.available_days,
-                "max_daily_minutes": payload.max_daily_minutes,
-                "preferred_session_length_minutes": payload.preferred_session_length_minutes,
-            },
-        )
-        await self._sync_goal_state(goal.id, reason="availability_updated")
-        await self._ensure_daily_materialization_job(goal.id, trigger_source="availability_updated")
-        await self._db_session.commit()
-        stored = await self._learner_availability_repository.get_by_goal(goal.id)
-        if stored is None:
-            raise NotFoundError(f"Learner availability for goal '{goal.id}' was not found.")
-        return LearnerAvailabilityResponse.model_validate(stored)
+        return await self._autonomy_scheduling.update_goal_availability(goal_id=goal_id, payload=payload)
 
     async def pause_goal_autonomy(self, goal_id: str, reason: str | None = None) -> GoalAutonomyStateResponse:
-        goal = await self._require_goal(goal_id)
-        await self._sync_goal_state(goal_id, phase="paused", reason=reason or "paused")
-        await self._audit_service.record(
-            event_type="autonomy.state.paused",
-            resource_type="learner_goal",
-            resource_id=goal.id,
-            actor="learner",
-            event_data={"learner_goal_id": goal.id, "reason": reason},
-        )
-        await self._db_session.commit()
-        refreshed = await self._require_goal_autonomy_state(goal_id)
-        return GoalAutonomyStateResponse.model_validate(refreshed)
+        return await self._autonomy_scheduling.pause_goal_autonomy(goal_id, reason)
 
     async def resume_goal_autonomy(self, goal_id: str, reason: str | None = None) -> GoalAutonomyStateResponse:
-        goal = await self._require_goal(goal_id)
-        await self._sync_goal_state(goal_id, phase="active", reason=reason or "resumed")
-        await self._ensure_daily_materialization_job(goal.id, trigger_source="autonomy_resumed")
-        await self._audit_service.record(
-            event_type="autonomy.state.resumed",
-            resource_type="learner_goal",
-            resource_id=goal.id,
-            actor="learner",
-            event_data={"learner_goal_id": goal.id, "reason": reason},
-        )
-        await self._db_session.commit()
-        refreshed = await self._require_goal_autonomy_state(goal_id)
-        return GoalAutonomyStateResponse.model_validate(refreshed)
+        return await self._autonomy_scheduling.resume_goal_autonomy(goal_id, reason)
 
     async def list_autonomy_jobs(self, goal_id: str) -> list[ScheduledAutonomyJob]:
-        await self._require_goal(goal_id)
-        if self._autonomy_job_repository is None:
-            return []
-        return await self._autonomy_job_repository.list_by_goal(goal_id)
+        return await self._autonomy_scheduling.list_autonomy_jobs(goal_id)
 
     async def materialize_today(self, goal_id: str) -> GoalAutonomyStateResponse:
         return await self._autonomy_scheduling.materialize_today(goal_id)

@@ -79,7 +79,8 @@ async def create_study_plan(
 ) -> StudyPlanResponse:
     await require_goal_access(goal_id, context, session)
     service = get_task_plan_lifecycle_service(session)
-    return await service.generate_plan(goal_id=goal_id, trigger_source=payload.trigger_source)
+    plan, _ = await service.generate_plan(goal_id=goal_id, trigger_source=payload.trigger_source)
+    return plan
 
 
 @router.get("/goals/{goal_id}/plans", response_model=list[StudyPlanResponse])

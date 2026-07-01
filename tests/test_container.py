@@ -16,6 +16,19 @@ from agent_core.domain.schemas.planning import UpdateDailyTaskStatusRequest
 from agent_core.infrastructure.container import ApplicationContainer
 
 
+class _FakeAutonomyJobDispatcher:
+    def __init__(self) -> None:
+        self._handlers: dict = {}
+
+    def register_handler(self, job_type: str, handler: object) -> None:
+        self._handlers[job_type] = handler
+
+
+class _FakeAutonomyScheduling:
+    def __init__(self) -> None:
+        self._autonomy_job_dispatcher = _FakeAutonomyJobDispatcher()
+
+
 @dataclass
 class _FakeTaskCore:
     session_id: int
@@ -40,6 +53,16 @@ class _FakeTaskCore:
     _should_schedule_assessment: object | None = None
     _derive_replan_mode: object | None = None
     _run_inline_status_followups: object | None = None
+    _process_autonomy_job: object | None = None
+    _runtime_registry: object | None = None
+    _skill_usage_service: object | None = None
+    _goal_skill_binding_resolver: object | None = None
+    _tool_plan_runtime_executor: object | None = None
+    _internal_tool_registry: object | None = None
+    _rollout_resolver: object | None = None
+    _autonomy_scheduling: object = _FakeAutonomyScheduling()
+    _plan_lifecycle: object | None = None
+    _execution: object | None = None
 
     async def _sync_goal_state_after_plan(self, goal_id: str, plan_id: str, trigger_source: str) -> None:
         return None

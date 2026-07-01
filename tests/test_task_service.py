@@ -2760,9 +2760,6 @@ async def test_milestone_gate_blocks_downstream_until_completed():
         learner_topic_mastery_repository=task_service._learner_topic_mastery_repository,
         autonomy_job_repository=task_service._autonomy_job_repository,
         audit_service=audit_service,
-        sync_goal_state_callback=task_service._sync_goal_state,
-        ensure_materialization_job_callback=task_service._ensure_daily_materialization_job,
-        validate_timezone_callback=task_service._validate_timezone,
     )
 
     state = await autonomy_service.get_goal_autonomy_state(goal.id)

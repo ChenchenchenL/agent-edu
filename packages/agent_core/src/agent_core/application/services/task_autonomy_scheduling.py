@@ -1,13 +1,19 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
-from zoneinfo import ZoneInfo
-from typing import TYPE_CHECKING, Awaitable, Callable, Any
+from datetime import date, datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_core.domain.errors import NotFoundError, ValidationError
-from agent_core.domain.entities.autonomy import LearnerAvailability, ScheduledAutonomyJob, AUTONOMY_REPLAN_MODES
+from agent_core.domain.entities.autonomy import (
+    GoalAutonomyState,
+    LearnerAvailability,
+    ScheduledAutonomyJob,
+    AUTONOMY_REPLAN_MODES,
+    _UNSET,
+)
 from agent_core.domain.schemas.autonomy import (
     GoalAutonomyStateResponse,
     LearnerAvailabilityResponse,
@@ -26,6 +32,7 @@ from agent_core.application.services.long_term_memory_materialization_replay imp
     LONG_TERM_MEMORY_MATERIALIZATION_REPLAY_JOB_TYPE,
     long_term_memory_replay_backoff,
 )
+from agent_core.application.services.reflection import ReflectionService, ReflectionTriggerRequest
 
 if TYPE_CHECKING:
     from agent_core.application.services.audit import AuditService
@@ -33,12 +40,7 @@ if TYPE_CHECKING:
     from agent_core.application.services.autonomy_jobs.dispatcher import AutonomyJobDispatcherService
 
 
-# Callback types for complex coordination
-SyncGoalStateCallback = Callable[[str, str | None, str | None, datetime | None], Awaitable[None]]
-EnsureMaterializationJobCallback = Callable[[str, str], Awaitable[None]]
-ValidateTimezoneCallback = Callable[[str | None], str | None]
-TriggerReflectionCallback = Callable[[str, str], Awaitable[None]]
-ProcessAutonomyJobCallback = Callable[[ScheduledAutonomyJob], Awaitable[str | None]]
+ProcessAutonomyJobCallback = Any
 
 
 class TaskAutonomySchedulingService:
@@ -51,7 +53,7 @@ class TaskAutonomySchedulingService:
     - Autonomy control operations (pause/resume)
     - Autonomy jobs listing
     - Autonomy scheduling operations (materialize_today, manual_replan,
-      run_periodic_reflection, run_due_jobs) via callbacks.
+      run_periodic_reflection, run_due_jobs).
     """
 
     def __init__(
@@ -64,32 +66,11 @@ class TaskAutonomySchedulingService:
         learner_topic_mastery_repository: LearnerTopicMasteryRepository | None = None,
         autonomy_job_repository: ScheduledAutonomyJobRepository | None = None,
         audit_service: AuditService | None = None,
-        sync_goal_state_callback: SyncGoalStateCallback | None = None,
-        ensure_materialization_job_callback: EnsureMaterializationJobCallback | None = None,
-        validate_timezone_callback: ValidateTimezoneCallback | None = None,
         autonomy_job_service: AutonomyJobService | None = None,
-        trigger_reflection_callback: TriggerReflectionCallback | None = None,
+        reflection_service: ReflectionService | None = None,
         process_autonomy_job_callback: ProcessAutonomyJobCallback | None = None,
         autonomy_job_dispatcher: AutonomyJobDispatcherService | None = None,
     ) -> None:
-        """Initialize the scheduling service with real dependencies.
-
-        Args:
-            db_session: Database session for transaction management.
-            goal_repository: Repository for learner goals.
-            goal_autonomy_state_repository: Optional repository for autonomy state.
-            learner_availability_repository: Optional repository for availability.
-            learner_topic_mastery_repository: Optional repository for mastery.
-            autonomy_job_repository: Optional repository for autonomy jobs.
-            audit_service: Optional audit service for state changes.
-            sync_goal_state_callback: Optional callback for goal state synchronization.
-            ensure_materialization_job_callback: Optional callback for job scheduling.
-            validate_timezone_callback: Optional callback for timezone validation.
-            autonomy_job_service: Optional service for scheduling jobs.
-            trigger_reflection_callback: Optional callback for triggering reflection.
-            process_autonomy_job_callback: Optional callback for job processing.
-            autonomy_job_dispatcher: Dispatcher for autonomy jobs.
-        """
         self._db_session = db_session
         self._goal_repository = goal_repository
         self._goal_autonomy_state_repository = goal_autonomy_state_repository
@@ -97,28 +78,18 @@ class TaskAutonomySchedulingService:
         self._learner_topic_mastery_repository = learner_topic_mastery_repository
         self._autonomy_job_repository = autonomy_job_repository
         self._audit_service = audit_service
-        self._sync_goal_state_callback = sync_goal_state_callback
-        self._ensure_materialization_job_callback = ensure_materialization_job_callback
-        self._validate_timezone_callback = validate_timezone_callback
         self._autonomy_job_service = autonomy_job_service
-        self._trigger_reflection_callback = trigger_reflection_callback
+        self._reflection_service = reflection_service
         self._process_autonomy_job_callback = process_autonomy_job_callback
         self._autonomy_job_dispatcher = autonomy_job_dispatcher
         self._autonomy_jobs_running = False
 
     async def get_goal_autonomy_state(self, goal_id: str) -> GoalAutonomyStateResponse:
-        """Get the autonomy state for a goal.
-
-        Args:
-            goal_id: Learner goal identifier.
-
-        Returns:
-            Autonomy state response.
-
-        Raises:
-            NotFoundError: If goal or autonomy state does not exist.
-        """
-        state = await self._require_goal_autonomy_state(goal_id)
+        if self._goal_autonomy_state_repository is None:
+            raise NotFoundError(f"Autonomy state for goal '{goal_id}' was not found.")
+        state = await self._goal_autonomy_state_repository.get_by_goal(goal_id)
+        if state is None:
+            raise NotFoundError(f"Autonomy state for goal '{goal_id}' was not found.")
         return GoalAutonomyStateResponse.model_validate(state)
 
     async def update_goal_availability(
@@ -127,19 +98,6 @@ class TaskAutonomySchedulingService:
         goal_id: str,
         payload: UpdateLearnerAvailabilityRequest,
     ) -> LearnerAvailabilityResponse:
-        """Update learner availability for a goal.
-
-        Args:
-            goal_id: Learner goal identifier.
-            payload: Availability update request.
-
-        Returns:
-            Updated availability response.
-
-        Raises:
-            ValidationError: If availability storage is not configured.
-            NotFoundError: If goal does not exist.
-        """
         if self._audit_service is None:
             raise RuntimeError("Standalone availability updates require an audit service.")
         if self._learner_availability_repository is None:
@@ -147,12 +105,8 @@ class TaskAutonomySchedulingService:
 
         goal = await self._require_goal(goal_id)
 
-        # Validate timezone
-        validated_timezone = payload.timezone
-        if self._validate_timezone_callback is not None:
-            validated_timezone = self._validate_timezone_callback(payload.timezone) or payload.timezone
+        validated_timezone = self._validate_timezone(payload.timezone) or payload.timezone
 
-        # Build and persist availability
         availability = LearnerAvailability.build(
             learner_goal_id=goal.id,
             timezone=validated_timezone,
@@ -163,7 +117,6 @@ class TaskAutonomySchedulingService:
         )
         await self._learner_availability_repository.upsert(availability)
 
-        # Audit
         await self._audit_service.record(
             event_type="learner_availability.updated",
             resource_type="learner_goal",
@@ -178,32 +131,17 @@ class TaskAutonomySchedulingService:
             },
         )
 
-        # Coordinate: sync state and ensure materialization job
-        if self._sync_goal_state_callback is not None:
-            await self._sync_goal_state_callback(goal.id, None, "availability_updated")
-        if self._ensure_materialization_job_callback is not None:
-            await self._ensure_materialization_job_callback(goal.id, "availability_updated")
+        await self._sync_goal_state(goal.id, phase=None, reason="availability_updated")
+        await self._ensure_daily_materialization_job(goal.id, trigger_source="availability_updated")
 
         await self._db_session.commit()
 
-        # Refresh and return
         stored = await self._learner_availability_repository.get_by_goal(goal.id)
         if stored is None:
             raise NotFoundError(f"Learner availability for goal '{goal.id}' was not found.")
         return LearnerAvailabilityResponse.model_validate(stored)
 
     async def get_goal_availability(self, goal_id: str) -> LearnerAvailabilityResponse:
-        """Fetch learner availability for a goal.
-
-        Args:
-            goal_id: Learner goal identifier.
-
-        Returns:
-            Availability response.
-
-        Raises:
-            NotFoundError: If goal or availability does not exist.
-        """
         await self._require_goal(goal_id)
         if self._learner_availability_repository is None:
             raise NotFoundError(f"Learner availability for goal '{goal_id}' was not found.")
@@ -213,17 +151,6 @@ class TaskAutonomySchedulingService:
         return LearnerAvailabilityResponse.model_validate(availability)
 
     async def list_goal_mastery(self, goal_id: str) -> list[LearnerTopicMasteryResponse]:
-        """List learner mastery snapshots for a goal.
-
-        Args:
-            goal_id: Learner goal identifier.
-
-        Returns:
-            List of topic mastery responses (empty if mastery not configured).
-
-        Raises:
-            NotFoundError: If goal does not exist.
-        """
         await self._require_goal(goal_id)
         if self._learner_topic_mastery_repository is None:
             return []
@@ -231,28 +158,13 @@ class TaskAutonomySchedulingService:
         return [LearnerTopicMasteryResponse.model_validate(item) for item in masteries]
 
     async def pause_goal_autonomy(self, goal_id: str, reason: str | None = None) -> GoalAutonomyStateResponse:
-        """Pause autonomy for a goal.
-
-        Args:
-            goal_id: Learner goal identifier.
-            reason: Optional reason for pausing.
-
-        Returns:
-            Updated autonomy state response.
-
-        Raises:
-            NotFoundError: If goal does not exist.
-        """
         if self._audit_service is None:
             raise RuntimeError("Standalone autonomy control requires an audit service.")
 
         goal = await self._require_goal(goal_id)
 
-        # Sync state to paused
-        if self._sync_goal_state_callback is not None:
-            await self._sync_goal_state_callback(goal_id, "paused", reason or "paused")
+        await self._sync_goal_state(goal_id, phase="paused", reason=reason or "paused")
 
-        # Audit
         await self._audit_service.record(
             event_type="autonomy.state.paused",
             resource_type="learner_goal",
@@ -263,37 +175,18 @@ class TaskAutonomySchedulingService:
 
         await self._db_session.commit()
 
-        # Refresh and return
         refreshed = await self._require_goal_autonomy_state(goal_id)
         return GoalAutonomyStateResponse.model_validate(refreshed)
 
     async def resume_goal_autonomy(self, goal_id: str, reason: str | None = None) -> GoalAutonomyStateResponse:
-        """Resume autonomy for a goal.
-
-        Args:
-            goal_id: Learner goal identifier.
-            reason: Optional reason for resuming.
-
-        Returns:
-            Updated autonomy state response.
-
-        Raises:
-            NotFoundError: If goal does not exist.
-        """
         if self._audit_service is None:
             raise RuntimeError("Standalone autonomy control requires an audit service.")
 
         goal = await self._require_goal(goal_id)
 
-        # Sync state to active
-        if self._sync_goal_state_callback is not None:
-            await self._sync_goal_state_callback(goal.id, "active", reason or "resumed")
+        await self._sync_goal_state(goal.id, phase="active", reason=reason or "resumed")
+        await self._ensure_daily_materialization_job(goal.id, trigger_source="autonomy_resumed")
 
-        # Ensure materialization job
-        if self._ensure_materialization_job_callback is not None:
-            await self._ensure_materialization_job_callback(goal.id, "autonomy_resumed")
-
-        # Audit
         await self._audit_service.record(
             event_type="autonomy.state.resumed",
             resource_type="learner_goal",
@@ -304,22 +197,10 @@ class TaskAutonomySchedulingService:
 
         await self._db_session.commit()
 
-        # Refresh and return
         refreshed = await self._require_goal_autonomy_state(goal_id)
         return GoalAutonomyStateResponse.model_validate(refreshed)
 
     async def list_autonomy_jobs(self, goal_id: str) -> list[ScheduledAutonomyJob]:
-        """List autonomy jobs for a goal.
-
-        Args:
-            goal_id: Learner goal identifier.
-
-        Returns:
-            List of scheduled autonomy jobs (empty if repository not configured).
-
-        Raises:
-            NotFoundError: If goal does not exist.
-        """
         await self._require_goal(goal_id)
         if self._autonomy_job_repository is None:
             return []
@@ -333,9 +214,7 @@ class TaskAutonomySchedulingService:
         else:
             availability = await self._learner_availability_repository.get_by_goal(goal_id)
 
-        timezone_name = None
-        if self._validate_timezone_callback is not None:
-            timezone_name = self._validate_timezone_callback(availability.timezone if availability is not None else None)
+        timezone_name = self._validate_timezone(availability.timezone if availability is not None else None)
         if not timezone_name:
             timezone_name = "UTC"
         zone = ZoneInfo(timezone_name)
@@ -378,8 +257,10 @@ class TaskAutonomySchedulingService:
                 "source_task_id": payload.source_task_id or "",
             },
         )
-        if self._sync_goal_state_callback is not None:
-            await self._sync_goal_state_callback(goal.id, "replanning", "manual_replan_requested", datetime.now(timezone.utc))
+        await self._sync_goal_state(
+            goal.id, phase="replanning", reason="manual_replan_requested",
+            next_due_at=datetime.now(timezone.utc),
+        )
         if self._audit_service is not None:
             await self._audit_service.record(
                 event_type="autonomy.replan.requested",
@@ -401,12 +282,22 @@ class TaskAutonomySchedulingService:
     async def run_periodic_goal_reflection(self, goal_id: str) -> GoalAutonomyStateResponse:
         """Run periodic reflection for a goal."""
         goal = await self._require_goal(goal_id)
-        if self._trigger_reflection_callback is not None:
-            await self._trigger_reflection_callback(goal.learner_profile_id, goal.id)
-        if self._sync_goal_state_callback is not None:
-            await self._sync_goal_state_callback(goal.id, "active", "periodic_goal_reflection", None)
+        if self._reflection_service is not None:
+            await self._reflection_service.trigger_reflection(
+                ReflectionTriggerRequest(
+                    learner_profile_id=goal.learner_profile_id,
+                    learner_goal_id=goal.id,
+                    scope="goal",
+                    target_type="learner_goal",
+                    target_id=goal.id,
+                    trigger_source="plan_replanned",
+                    reflection_depth=1,
+                    source_attempt_id=f"{goal.id}:{date.today().isoformat()}",
+                )
+            )
+        await self._sync_goal_state(goal.id, phase="active", reason="periodic_goal_reflection")
         await self._db_session.commit()
-        refreshed = await self._require_goal_autonomy_state(goal.id)
+        refreshed = await self._require_goal_autonomy_state(goal_id)
         return GoalAutonomyStateResponse.model_validate(refreshed)
 
     async def run_due_autonomy_jobs(
@@ -535,6 +426,147 @@ class TaskAutonomySchedulingService:
         finally:
             self._autonomy_jobs_running = False
 
+    # --- Inlined coordination logic (previously delegated to legacy core callbacks) ---
+
+    async def _sync_goal_state(
+        self,
+        goal_id: str,
+        *,
+        phase: str | None = None,
+        reason: str | None = None,
+        next_due_at: datetime | None = None,
+    ) -> None:
+        if self._goal_autonomy_state_repository is None:
+            return
+        state = await self._goal_autonomy_state_repository.get_by_goal(goal_id)
+        if state is None:
+            state = GoalAutonomyState.build(learner_goal_id=goal_id)
+            await self._goal_autonomy_state_repository.create(state)
+        await self._goal_autonomy_state_repository.update(
+            state.with_transition(
+                phase=phase,
+                next_due_at=next_due_at if next_due_at is not None else _UNSET,
+                mastery_snapshot=await self._build_mastery_snapshot(goal_id),
+                reason=reason,
+            )
+        )
+
+    async def _build_mastery_snapshot(self, goal_id: str) -> dict[str, Any]:
+        if self._learner_topic_mastery_repository is None:
+            return {}
+        masteries = await self._learner_topic_mastery_repository.list_by_goal(goal_id)
+        return {
+            "topics": [
+                {
+                    "topic_key": mastery.topic_key,
+                    "mastery_score": mastery.mastery_score,
+                    "confidence": mastery.confidence,
+                    "evidence_count": mastery.evidence_count,
+                }
+                for mastery in masteries
+            ]
+        }
+
+    async def _ensure_daily_materialization_job(
+        self,
+        learner_goal_id: str,
+        *,
+        trigger_source: str,
+    ) -> ScheduledAutonomyJob | None:
+        if self._autonomy_job_repository is None:
+            return None
+        availability = (
+            await self._learner_availability_repository.get_by_goal(learner_goal_id)
+            if self._learner_availability_repository is not None
+            else None
+        )
+        timezone_name = self._validate_timezone(availability.timezone if availability is not None else None) or "UTC"
+        zone = ZoneInfo(timezone_name)
+        target_day = datetime.now(zone).date()
+        idempotency_key = f"{learner_goal_id}:daily_task_materialization:{target_day.isoformat()}:{timezone_name}"
+
+        existing = await self._autonomy_job_repository.list_active_by_goal(
+            learner_goal_id, job_types={"daily_task_materialization"},
+        )
+        for job in existing:
+            if job.idempotency_key == idempotency_key:
+                return job
+        for job in existing:
+            cancelled = job.cancel(error_code="rescheduled")
+            await self._autonomy_job_repository.update(cancelled)
+            if self._audit_service is not None:
+                await self._audit_service.record(
+                    event_type="autonomy.job.cancelled",
+                    resource_type="autonomy_job",
+                    resource_id=cancelled.id,
+                    actor="system",
+                    event_data={
+                        "autonomy_job_id": cancelled.id,
+                        "learner_goal_id": learner_goal_id,
+                        "job_type": cancelled.job_type,
+                        "reason": "rescheduled",
+                    },
+                )
+
+        due_at, scheduled_local_time = self._compute_materialization_due_at(
+            availability=availability,
+            timezone_name=timezone_name,
+            target_day=target_day,
+        )
+        return await self._schedule_autonomy_job(
+            learner_goal_id=learner_goal_id,
+            job_type="daily_task_materialization",
+            trigger_source=trigger_source,
+            due_at=due_at,
+            idempotency_key=idempotency_key,
+            payload={
+                "window_days": 3,
+                "target_local_date": target_day.isoformat(),
+                "target_timezone": timezone_name,
+                "scheduled_local_time": scheduled_local_time,
+            },
+        )
+
+    @staticmethod
+    def _validate_timezone(value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        try:
+            ZoneInfo(normalized)
+        except ZoneInfoNotFoundError as exc:
+            raise ValidationError("Unsupported learner timezone.") from exc
+        return normalized
+
+    @staticmethod
+    def _compute_materialization_due_at(
+        *,
+        availability: LearnerAvailability | None,
+        timezone_name: str,
+        target_day: date,
+    ) -> tuple[datetime, str]:
+        zone = ZoneInfo(timezone_name)
+        local_due = datetime.combine(target_day, datetime.min.time(), tzinfo=zone).replace(hour=0, minute=5)
+        scheduled_local_time = "00:05"
+        if availability is not None:
+            for item in availability.time_windows:
+                start = str(item.get("start") or "").strip()
+                if len(start) == 5 and start[2] == ":":
+                    hour = int(start[:2])
+                    minute = int(start[3:])
+                    local_due = datetime.combine(target_day, datetime.min.time(), tzinfo=zone).replace(
+                        hour=hour,
+                        minute=minute,
+                    ) - timedelta(minutes=30)
+                    scheduled_local_time = f"{hour:02d}:{minute:02d}"
+                    break
+        now_local = datetime.now(zone)
+        if target_day == now_local.date() and local_due < now_local:
+            local_due = now_local
+        return local_due.astimezone(timezone.utc), scheduled_local_time
+
     async def _schedule_autonomy_job(
         self,
         *,
@@ -583,37 +615,13 @@ class TaskAutonomySchedulingService:
             payload=dict(payload or {}),
         )
 
-    # Private helper methods
-
     async def _require_goal(self, goal_id: str):
-        """Require goal to exist, raising NotFoundError otherwise.
-
-        Args:
-            goal_id: Learner goal identifier.
-
-        Returns:
-            The learner goal entity.
-
-        Raises:
-            NotFoundError: If goal does not exist.
-        """
         goal = await self._goal_repository.get_by_id(goal_id)
         if goal is None:
             raise NotFoundError(f"Learner goal '{goal_id}' was not found.")
         return goal
 
     async def _require_goal_autonomy_state(self, goal_id: str):
-        """Require autonomy state to exist, raising NotFoundError otherwise.
-
-        Args:
-            goal_id: Learner goal identifier.
-
-        Returns:
-            The autonomy state entity.
-
-        Raises:
-            NotFoundError: If autonomy state does not exist.
-        """
         if self._goal_autonomy_state_repository is None:
             raise NotFoundError(f"Autonomy state for goal '{goal_id}' was not found.")
         state = await self._goal_autonomy_state_repository.get_by_goal(goal_id)

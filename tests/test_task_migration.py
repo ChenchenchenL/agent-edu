@@ -382,6 +382,21 @@ async def test_generate_plan_runs_real_lifecycle_logic_without_core_delegation()
     rollout_calls: list[tuple[str, str, str, str]] = []
     reflection_calls: list[tuple[str, str, str, str | None, str | None]] = []
 
+    class _StubRolloutScheduler:
+        async def schedule_active(self, *, learner_goal_id, surface, trigger_source, source_ref):
+            rollout_calls.append((learner_goal_id, surface, trigger_source, source_ref))
+
+    class _StubReflectionService:
+        async def trigger_reflection(self, request):
+            reflection_calls.append((
+                request.learner_profile_id,
+                request.learner_goal_id,
+                request.target_id,
+                getattr(request, "daily_task_id", None),
+                getattr(request, "study_plan_id", None),
+            ))
+            return None
+
     service = TaskPlanLifecycleService(
         db_session=session,
         goal_repository=_StubGoalRepository(goal),
@@ -397,17 +412,12 @@ async def test_generate_plan_runs_real_lifecycle_logic_without_core_delegation()
         sync_goal_state_after_plan=lambda goal_id, plan_id, trigger: _append_and_return(
             sync_calls, (goal_id, plan_id, trigger)
         ),
-        schedule_rollout_observation=lambda learner_goal_id, surface, trigger_source, source_ref: _append_and_return(
-            rollout_calls, (learner_goal_id, surface, trigger_source, source_ref)
-        ),
-        trigger_workflow_failure_reflection=lambda profile_id, goal_id, workflow_run_id, daily_task_id, study_plan_id: _append_and_return(
-            reflection_calls,
-            (profile_id, goal_id, workflow_run_id, daily_task_id, study_plan_id),
-        ),
+        rollout_observation_scheduler=_StubRolloutScheduler(),
+        reflection_service=_StubReflectionService(),
     )
     service._legacy_core = core  # sentinel: should remain unused
 
-    response = await service.generate_plan(goal_id=goal.id, trigger_source="initial")
+    response, _run_id = await service.generate_plan(goal_id=goal.id, trigger_source="initial")
 
     assert response.id == study_plan.id
     assert getattr(core, "generate_called", False) is False

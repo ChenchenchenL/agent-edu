@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from agent_core.api.dependencies import get_alert_dispatcher, get_session_factory
 from agent_core.api.error_handlers import register_error_handlers
@@ -37,6 +38,14 @@ def create_app() -> FastAPI:
         version="0.1.0",
         docs_url="/docs" if settings.app_env != "production" else None,
         redoc_url="/redoc" if settings.app_env != "production" else None,
+    )
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:5173"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
     if settings.metrics_enabled:
