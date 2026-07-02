@@ -234,12 +234,22 @@ class DashScopeCompatibleLLMProvider:
         topic: str,
         difficulty: str,
         question_count: int,
+        skill_directives: list[str] | None = None,
+        feedback_style: str | None = None,
     ) -> QuizDraft:
+        directives_hint = ""
+        if skill_directives:
+            joined = "; ".join(skill_directives)
+            directives_hint = f" Incorporate these teaching directives into the questions: {joined}."
+        feedback_hint = ""
+        if feedback_style:
+            feedback_hint = f" Use the following feedback style for answers: {feedback_style}."
         system_prompt = (
             "You are an educational assessment assistant. "
             "Return only valid JSON with keys: topic, difficulty, questions. "
             "Each question must contain prompt and answer fields. "
             f"Return exactly {question_count} questions."
+            f"{directives_hint}{feedback_hint}"
         )
         user_prompt = (
             f"Create a quiz for topic '{topic}'. "
@@ -294,13 +304,19 @@ class DashScopeCompatibleLLMProvider:
         stage_blueprint: list[dict[str, object]],
         task_blueprint: list[dict[str, object]],
         strategy_summary: dict[str, object] | None = None,
+        skill_directives: list[str] | None = None,
     ) -> StudyPlanDraft:
+        directives_hint = ""
+        if skill_directives:
+            joined = "; ".join(skill_directives)
+            directives_hint = f" Incorporate these teaching directives into the plan: {joined}."
         system_prompt = (
             "You are an educational planning assistant. "
             "Return only valid JSON with keys: plan_summary, stages, tasks. "
             "Each stage must contain title, objective, focus_topics. "
             "Each task must contain stage_position, scheduled_for, due_on, task_type, execution_mode, "
             "title, instructions, topic_focus, difficulty, question_count, estimated_minutes."
+            f"{directives_hint}"
         )
         user_prompt = json.dumps(
             {

@@ -483,9 +483,9 @@ MVP 最少需要：
 | # | 验收项 | 当前状态 | 验证方式 |
 |---|--------|----------|----------|
 | I1 | Learner 可通过 Web UI 创建/进入学习会话 | ✅ 已完成 | `packages/frontend/` React + Vite 前端，`/sessions` 页面支持创建会话并进入对话 |
-| I2 | Learner 可通过 Web UI 连续提问、看解释、做 quiz、拿 hint | ❌ 未完成 | 需前端实现 |
-| I3 | Learner 可通过 Web UI 查看任务/复习上下文 | ❌ 未完成 | 需前端实现 |
-| I4 | Operator 可通过 Web UI 查看关键治理/audit 信息 | ❌ 未完成 | 需前端实现 |
+| I2 | Learner 可通过 Web UI 连续提问、看解释、做 quiz、拿 hint | ✅ 已完成 | `/sessions/:id` 页面已实现连续对话、结构化解释、quiz 生成/历史选择/逐题作答/参考核对/完成进度，以及基于 quiz 题目和作答的 hint 与讨论入口 |
+| I3 | Learner 可通过 Web UI 查看任务/复习上下文 | ✅ 已完成 | `/sessions/:id` 工作台右侧「任务」面板，按状态分组展示今日任务/待复习/已完成，显示主题、难度、预估时长、截止日期，支持一键执行任务并跳转至对应会话 |
+| I4 | Operator 可通过 Web UI 查看关键治理/audit 信息 | ✅ 已完成 | `/operator` 运营控制台展示系统防护状态（LLM 限流/熔断器）、反思审核队列、提案审核队列、Curator 建议、最近审计事件；后端新增 `GET /api/v1/audit/events` 审计读取接口 |
 
 > **注**：I1-I4 是产品级 MVP 的必要条件。如果当前 MVP 定义限定为"后端 MVP"，则 I1-I4 可降级为 `NOT IN MVP`。团队需明确决定。
 

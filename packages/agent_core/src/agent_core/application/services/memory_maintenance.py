@@ -62,7 +62,7 @@ class MemoryMaintenanceService:
         memory_service: MemoryService,
         audit_service: AuditService,
         db_session: AsyncSession,
-        jobs_per_tick: int = 5,
+        jobs_per_tick: int = 6,
         batch_size: int = 20,
         lease_seconds: int = 300,
         max_attempts: int = 3,

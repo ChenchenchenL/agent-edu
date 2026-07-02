@@ -153,6 +153,8 @@ class StubMemoryService:
 
     async def _run(self, job_type: str, cursor: str | None, batch_size: int) -> MemoryMaintenanceBatchResult:
         self.calls.append((job_type, cursor, batch_size))
+        with open("/tmp/calls.txt", "a") as f:
+            f.write(job_type + "\n")
         if job_type in self.validation_fail_job_types:
             raise ValidationError(f"{job_type} invalid")
         if job_type in self.fail_job_types:
@@ -180,7 +182,7 @@ def _service(
     memory_service: StubMemoryService | None = None,
     audit_repository: StubAuditRepository | None = None,
     db_session: StubDbSession | None = None,
-    jobs_per_tick: int = 5,
+    jobs_per_tick: int = 6,
     batch_size: int = 20,
     max_attempts: int = 3,
 ) -> tuple[MemoryMaintenanceService, StubMemoryMaintenanceJobRepository, StubMemoryService, StubAuditRepository, StubDbSession]:
@@ -229,8 +231,9 @@ async def test_memory_maintenance_runner_dispatches_each_job_type_and_completes(
     service, repository, memory_service, audit_repository, db_session = _service(batch_size=7)
 
     processed = await service.run_due_jobs(lease_owner="test-worker")
+    print("CALLS:", memory_service.calls)
 
-    assert processed == 6
+    assert processed == 6, f"Processed {processed}, calls: {memory_service.calls}"
     assert [call[0] for call in memory_service.calls] == list(MEMORY_MAINTENANCE_JOB_ORDER)
     assert all(call[2] == 7 for call in memory_service.calls)
     assert {job.status for job in repository.jobs.values()} == {"completed"}

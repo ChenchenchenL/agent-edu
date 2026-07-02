@@ -9,6 +9,7 @@ from agent_core.api.dependencies import (
     get_session_service,
 )
 from agent_core.domain.schemas.session import (
+    BindGoalRequest,
     CreateSessionRequest,
     MessageHistoryResponse,
     MessageRequest,
@@ -60,6 +61,16 @@ async def update_session_status(
 ) -> SessionResponse:
     service = get_session_service(session)
     return await service.update_session_status(session_id, payload)
+
+
+@router.patch("/sessions/{session_id}/goal", response_model=SessionResponse)
+async def bind_session_goal(
+    session_id: str,
+    payload: BindGoalRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> SessionResponse:
+    service = get_session_service(session)
+    return await service.bind_goal(session_id, payload.learner_goal_id)
 
 
 @router.post("/sessions/{session_id}/messages", response_model=MessageResponse)

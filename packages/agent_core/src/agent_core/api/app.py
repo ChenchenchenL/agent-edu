@@ -19,6 +19,7 @@ from agent_core.api.routes.reflection import router as reflection_router
 from agent_core.api.routes.sessions import router as sessions_router
 from agent_core.api.routes.skills import router as skills_router
 from agent_core.api.routes.workspace import router as workspace_router
+from agent_core.api.routes.audit import router as audit_router
 from agent_core.application.services.skills import refresh_skill_observability_metrics
 from agent_core.infrastructure.config.settings import get_settings
 from agent_core.infrastructure.db.repositories import SkillArtifactRepository, SkillCuratorRecommendationRepository
@@ -84,5 +85,6 @@ def create_app() -> FastAPI:
     app.include_router(reflection_router, prefix="/api/v1")
     app.include_router(sessions_router, prefix="/api/v1")
     app.include_router(quiz_router, prefix="/api/v1")
+    app.include_router(audit_router, prefix="/api/v1")
 
     return app

@@ -6,6 +6,8 @@ migrated from AutonomousTaskService.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_core.application.interfaces import (
@@ -25,6 +27,11 @@ from agent_core.infrastructure.db.repositories import (
     LearnerGoalRepository,
     DailyTaskRepository,
 )
+
+if TYPE_CHECKING:
+    from agent_core.application.services.task_failure_reflection_coordinator import (
+        TaskFailureReflectionCoordinator,
+    )
 
 
 class TaskExecutionService:
@@ -47,22 +54,8 @@ class TaskExecutionService:
         quiz_service: QuizServiceProtocol,
         workflow_run_service: WorkflowRunServiceProtocol,
         audit_service,
-        failure_reflection_callback=None,
+        failure_reflection_coordinator: TaskFailureReflectionCoordinator | None = None,
     ) -> None:
-        """Initialize the execution service with real dependencies.
-
-        Args:
-            db_session: Database session for transaction management.
-            goal_repository: Repository for learner goals.
-            daily_task_repository: Repository for daily tasks.
-            session_service: Service for creating learning sessions.
-            chat_service: Service for chat interactions.
-            quiz_service: Service for quiz generation.
-            workflow_run_service: Service for workflow management.
-            audit_service: Service for audit logging.
-            failure_reflection_callback: Optional async callback(goal, task, run_id)
-                for triggering reflection on workflow failures.
-        """
         self._db_session = db_session
         self._goal_repository = goal_repository
         self._daily_task_repository = daily_task_repository
@@ -71,7 +64,7 @@ class TaskExecutionService:
         self._quiz_service = quiz_service
         self._workflow_run_service = workflow_run_service
         self._audit_service = audit_service
-        self._failure_reflection_callback = failure_reflection_callback
+        self._failure_reflection_coordinator = failure_reflection_coordinator
 
     async def execute_task(self, task_id: str) -> ExecuteDailyTaskResponse:
         """Execute a pending daily task.
@@ -221,13 +214,13 @@ class TaskExecutionService:
             # Fail workflow run
             await self._workflow_run_service.fail_run(run=run, error_code=type(exc).__name__)
 
-            # Trigger failure reflection (optional)
-            if self._failure_reflection_callback is not None:
+            if self._failure_reflection_coordinator is not None:
                 goal = await self._require_goal(task.learner_goal_id)
-                await self._failure_reflection_callback(
+                await self._failure_reflection_coordinator.trigger_for_task_failure(
                     goal=goal,
-                    task=task,
-                    run_id=run.id,
+                    workflow_run_id=run.id,
+                    daily_task_id=task.id,
+                    study_plan_id=task.study_plan_id,
                 )
 
             # Audit: execution failed

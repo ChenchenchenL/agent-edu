@@ -1,0 +1,213 @@
+{
+  "description": "Reflection corpus output contract regression fixtures",
+  "cases": [
+    {
+      "name": "mixed_memories_ranking",
+      "description": "Verify reflection corpus ranks items by priority and produces correct summary counts",
+      "setup": {
+        "learner_profile_id": "profile-001",
+        "learner_goal_id": "goal-001",
+        "limit_per_type": 8
+      },
+      "knowledge_memories": [
+        {
+          "id": "k-001",
+          "knowledge_key": "matrix basics",
+          "title": "Matrix basics",
+          "summary": "Basic matrix operations",
+          "status": "candidate",
+          "knowledge_level": "foundation",
+          "time_horizon": "early",
+          "importance_score": 0.7,
+          "confidence_score": 0.6,
+          "freshness_score": 0.3,
+          "stability_score": 0.5,
+          "goal_relevance_score": 0.7,
+          "support_score": 0.5,
+          "contradiction_score": 0.1,
+          "evidence_count": 3,
+          "contradiction_count": 0,
+          "assessment_evidence_count": 1,
+          "task_evidence_count": 1,
+          "semantic_category": "concept",
+          "validation_status": "validated",
+          "source_event_ids": ["evt-001"]
+        },
+        {
+          "id": "k-002",
+          "knowledge_key": "determinants",
+          "title": "Determinants",
+          "summary": "Matrix determinant calculation",
+          "status": "active",
+          "knowledge_level": "core",
+          "time_horizon": "mid",
+          "importance_score": 0.8,
+          "confidence_score": 0.75,
+          "freshness_score": 0.85,
+          "stability_score": 0.7,
+          "goal_relevance_score": 0.8,
+          "support_score": 0.65,
+          "contradiction_score": 0.05,
+          "evidence_count": 5,
+          "contradiction_count": 0,
+          "assessment_evidence_count": 2,
+          "task_evidence_count": 2,
+          "semantic_category": "concept",
+          "validation_status": "validated",
+          "source_event_ids": ["evt-002", "evt-003"]
+        }
+      ],
+      "behavior_memories": [
+        {
+          "id": "b-001",
+          "behavior_key": "asks hints",
+          "behavior_category": "support_request",
+          "title": "Asks for hints",
+          "summary": "Requests hints when stuck",
+          "status": "candidate",
+          "behavior_level": "recurrent",
+          "time_horizon": "mid",
+          "importance_score": 0.6,
+          "confidence_score": 0.55,
+          "freshness_score": 0.8,
+          "stability_score": 0.6,
+          "goal_relevance_score": 0.65,
+          "support_score": 0.5,
+          "contradiction_score": 0.1,
+          "evidence_count": 4,
+          "contradiction_count": 0,
+          "cross_session_recurrence_count": 3,
+          "semantic_category": "strategy",
+          "validation_status": "validated",
+          "source_event_ids": ["evt-004"]
+        }
+      ],
+      "expected": {
+        "summary": {
+          "total_items": 3,
+          "knowledge_items": 2,
+          "behavior_items": 1,
+          "candidate_items": 2,
+          "stable_items": 0
+        },
+        "ordering_constraint": "items sorted by reflection_priority_score descending",
+        "item_fields_required": [
+          "memory_type",
+          "memory_id",
+          "memory_key",
+          "status",
+          "recommended_action",
+          "recommended_action_reason",
+          "quality_score",
+          "quality_tier",
+          "promotion_readiness",
+          "quality_reasons",
+          "contested",
+          "review_recommended",
+          "governance_pressure"
+        ],
+        "recommended_action_values": ["reinforce", "validate", "refresh", "review"],
+        "quality_tier_values": ["high", "medium", "low"],
+        "promotion_readiness_values": ["ready", "monitor", "not_ready"]
+      }
+    },
+    {
+      "name": "contested_memory_flagged",
+      "description": "Verify contested memory is correctly flagged in corpus",
+      "setup": {
+        "learner_profile_id": "profile-001",
+        "learner_goal_id": "goal-001",
+        "limit_per_type": 8
+      },
+      "knowledge_memories": [
+        {
+          "id": "k-contested",
+          "knowledge_key": "contested concept",
+          "title": "Contested concept",
+          "summary": "Has contradictory evidence",
+          "status": "candidate",
+          "knowledge_level": "core",
+          "time_horizon": "mid",
+          "importance_score": 0.7,
+          "confidence_score": 0.5,
+          "freshness_score": 0.7,
+          "stability_score": 0.4,
+          "goal_relevance_score": 0.6,
+          "support_score": 0.4,
+          "contradiction_score": 0.4,
+          "evidence_count": 4,
+          "contradiction_count": 3,
+          "assessment_evidence_count": 1,
+          "task_evidence_count": 1,
+          "semantic_category": "misconception",
+          "validation_status": "contested",
+          "source_event_ids": ["evt-001"]
+        }
+      ],
+      "behavior_memories": [],
+      "expected": {
+        "contested_items": ["k-contested"],
+        "recommended_action_for_contested": "validate",
+        "review_recommended_for_contested": true
+      }
+    },
+    {
+      "name": "governance_summary_counts",
+      "description": "Verify governance summary produces correct status counts and topic buckets",
+      "setup": {
+        "learner_profile_id": "profile-001",
+        "learner_goal_id": "goal-001"
+      },
+      "knowledge_memories": [
+        {
+          "id": "k-gov-001",
+          "knowledge_key": "topic a",
+          "title": "Topic A",
+          "status": "candidate",
+          "freshness_score": 0.8,
+          "contradiction_score": 0.1,
+          "goal_relevance_score": 0.7
+        },
+        {
+          "id": "k-gov-002",
+          "knowledge_key": "topic a",
+          "title": "Topic A variant",
+          "status": "active",
+          "freshness_score": 0.7,
+          "contradiction_score": 0.1,
+          "goal_relevance_score": 0.6
+        },
+        {
+          "id": "k-gov-003",
+          "knowledge_key": "topic b",
+          "title": "Topic B",
+          "status": "stable",
+          "freshness_score": 0.9,
+          "contradiction_score": 0.05,
+          "goal_relevance_score": 0.8
+        }
+      ],
+      "behavior_memories": [
+        {
+          "id": "b-gov-001",
+          "behavior_key": "behavior x",
+          "behavior_category": "support_request",
+          "title": "Behavior X",
+          "status": "candidate",
+          "freshness_score": 0.3,
+          "contradiction_score": 0.1,
+          "goal_relevance_score": 0.5
+        }
+      ],
+      "expected": {
+        "status_counts": {
+          "candidate": 2,
+          "active": 1,
+          "stable": 1
+        },
+        "topic_bucket_count_min": 2,
+        "topic_bucket_fields": ["topic_key", "memory_count", "candidate_count", "review_recommended"]
+      }
+    }
+  ]
+}

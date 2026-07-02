@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { BookOpen, GraduationCap } from "lucide-react";
+import { BookOpen, Compass, GraduationCap, MessageSquare, Shield } from "lucide-react";
 
 interface LayoutProps {
   children: ReactNode;
@@ -9,13 +9,15 @@ interface LayoutProps {
 export function Layout({ children }: LayoutProps) {
   const location = useLocation();
   const isSessionDetail = /^\/sessions\/[^/]+$/.test(location.pathname);
+  const isGoalDetail = /^\/goals\/[^/]+$/.test(location.pathname);
+  const isDetailPage = isSessionDetail || isGoalDetail;
 
   return (
     <div className="flex min-h-screen flex-col">
       <header className="sticky top-0 z-10 border-b border-border-subtle bg-surface/90 backdrop-blur-md">
         <div className="mx-auto flex h-16 max-w-5xl items-center justify-between px-6">
           <Link
-            to="/sessions"
+            to="/goals"
             className="group flex items-center gap-3 no-underline"
           >
             <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary-surface transition-colors group-hover:bg-primary/10">
@@ -31,18 +33,53 @@ export function Layout({ children }: LayoutProps) {
             </div>
           </Link>
 
-          {!isSessionDetail && (
-            <div className="hidden items-center gap-1.5 text-xs text-text-secondary sm:flex">
-              <GraduationCap className="h-3.5 w-3.5 text-accent-gold" />
-              <span>引导式学习 · AI 导师</span>
-            </div>
-          )}
+          <nav className="flex items-center gap-4">
+            <Link
+              to="/goals"
+              className={`flex items-center gap-1.5 text-xs transition-colors no-underline ${
+                location.pathname.startsWith("/goals")
+                  ? "text-primary"
+                  : "text-text-secondary hover:text-text-primary"
+              }`}
+            >
+              <Compass className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">学习目标</span>
+            </Link>
+            <Link
+              to="/sessions"
+              className={`flex items-center gap-1.5 text-xs transition-colors no-underline ${
+                location.pathname.startsWith("/sessions")
+                  ? "text-primary"
+                  : "text-text-secondary hover:text-text-primary"
+              }`}
+            >
+              <MessageSquare className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">学习会话</span>
+            </Link>
+            <Link
+              to="/operator"
+              className={`flex items-center gap-1.5 text-xs transition-colors no-underline ${
+                location.pathname === "/operator"
+                  ? "text-primary"
+                  : "text-text-secondary hover:text-text-primary"
+              }`}
+            >
+              <Shield className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">运营控制台</span>
+            </Link>
+            {!isDetailPage && (
+              <div className="hidden items-center gap-1.5 text-xs text-text-secondary sm:flex">
+                <GraduationCap className="h-3.5 w-3.5 text-accent-gold" />
+                <span>引导式学习 · AI 导师</span>
+              </div>
+            )}
+          </nav>
         </div>
       </header>
 
       <main
         className={`mx-auto w-full flex-1 px-6 ${
-          isSessionDetail ? "max-w-5xl py-5" : "max-w-5xl py-10"
+          isDetailPage ? "max-w-5xl py-5" : "max-w-5xl py-10"
         }`}
       >
         {children}

@@ -1,0 +1,10 @@
+services:
+  api:
+    volumes:
+      - ./packages/agent_core/src/agent_core:/app/packages/agent_core/src/agent_core:ro
+      - ./apps:/app/apps:ro
+      - ./alembic:/app/alembic:ro
+  tester:
+    volumes:
+      - ./tests:/app/tests:ro
+      - ./packages/agent_core/src/agent_core:/app/packages/agent_core/src/agent_core:ro

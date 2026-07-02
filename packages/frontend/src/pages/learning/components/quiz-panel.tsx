@@ -1,10 +1,15 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ClipboardList,
   Loader2,
   Sparkles,
   Lightbulb,
   CheckCircle2,
+  RotateCcw,
+  MessageSquareText,
+  Eye,
+  Circle,
+  AlertCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -18,6 +23,8 @@ import {
 } from "@/hooks/use-quiz";
 import { difficultyLabel } from "@/pages/learning/lib/labels";
 import type { MessageRequest } from "@/types/session";
+
+type PracticeFlags = Record<number, boolean>;
 
 interface QuizPanelProps {
   sessionId: string;
@@ -39,15 +46,26 @@ export function QuizPanel({
   const [questionCount, setQuestionCount] = useState(3);
   const [activeQuizId, setActiveQuizId] = useState<string | null>(null);
   const [answers, setAnswers] = useState<Record<number, string>>({});
-  const [revealed, setRevealed] = useState<Record<number, boolean>>({});
+  const [revealed, setRevealed] = useState<PracticeFlags>({});
+  const [hinted, setHinted] = useState<PracticeFlags>({});
+  const [discussed, setDiscussed] = useState<PracticeFlags>({});
 
-  const { data: quizList, isLoading: listLoading } =
-    useSessionQuizzes(sessionId);
-  const { data: activeQuiz, isLoading: detailLoading } = useQuizDetail(
-    sessionId,
-    activeQuizId,
-  );
+  const {
+    data: quizList,
+    isLoading: listLoading,
+    error: listError,
+  } = useSessionQuizzes(sessionId);
+  const {
+    data: activeQuiz,
+    isLoading: detailLoading,
+    error: detailError,
+  } = useQuizDetail(sessionId, activeQuizId);
   const generateQuiz = useGenerateQuiz(sessionId);
+
+  useEffect(() => {
+    if (activeQuizId || !quizList || quizList.length === 0) return;
+    setActiveQuizId(quizList[0].quiz_id);
+  }, [activeQuizId, quizList]);
 
   function handleGenerate(e: React.FormEvent) {
     e.preventDefault();
@@ -62,8 +80,7 @@ export function QuizPanel({
       {
         onSuccess: (quiz) => {
           setActiveQuizId(quiz.quiz_id);
-          setAnswers({});
-          setRevealed({});
+          resetPracticeState();
         },
       },
     );
@@ -71,8 +88,14 @@ export function QuizPanel({
 
   function handleSelectQuiz(quizId: string) {
     setActiveQuizId(quizId);
+    resetPracticeState();
+  }
+
+  function resetPracticeState() {
     setAnswers({});
     setRevealed({});
+    setHinted({});
+    setDiscussed({});
   }
 
   function handleRequestHint(questionIndex: number) {
@@ -89,6 +112,7 @@ export function QuizPanel({
       question_prompt: question.prompt,
       learner_answer: learnerAnswer || undefined,
     });
+    setHinted((prev) => ({ ...prev, [questionIndex]: true }));
   }
 
   function handleDiscuss(questionIndex: number) {
@@ -98,7 +122,50 @@ export function QuizPanel({
     onDiscussAnswer(
       `关于练习题「${question.prompt}」，我的答案是：${learnerAnswer}。请帮我分析是否正确并讲解。`,
     );
+    setDiscussed((prev) => ({ ...prev, [questionIndex]: true }));
   }
+
+  function handleReveal(questionIndex: number) {
+    setRevealed((prev) => ({
+      ...prev,
+      [questionIndex]: !prev[questionIndex],
+    }));
+  }
+
+  function handleQuestionCountChange(value: string) {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isNaN(parsed)) {
+      setQuestionCount(1);
+      return;
+    }
+    setQuestionCount(Math.min(10, Math.max(1, parsed)));
+  }
+
+  function formatDateTime(value: string) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return new Intl.DateTimeFormat("zh-CN", {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(date);
+  }
+
+  const quizListItems = quizList ?? [];
+  const totalQuestions = activeQuiz?.questions.length ?? 0;
+  const answeredCount =
+    activeQuiz?.questions.filter((_, index) => answers[index]?.trim()).length ??
+    0;
+  const checkedCount =
+    activeQuiz?.questions.filter((_, index) => revealed[index]).length ?? 0;
+  const progressPercent =
+    totalQuestions === 0 ? 0 : Math.round((checkedCount / totalQuestions) * 100);
+  const canResetPractice =
+    Object.keys(answers).length > 0 ||
+    Object.keys(revealed).length > 0 ||
+    Object.keys(hinted).length > 0 ||
+    Object.keys(discussed).length > 0;
 
   return (
     <div className="flex h-full flex-col">
@@ -155,9 +222,7 @@ export function QuizPanel({
                 min={1}
                 max={10}
                 value={questionCount}
-                onChange={(e) =>
-                  setQuestionCount(Number.parseInt(e.target.value, 10) || 1)
-                }
+                onChange={(e) => handleQuestionCountChange(e.target.value)}
                 className="h-9 text-sm"
               />
             </div>
@@ -172,7 +237,7 @@ export function QuizPanel({
             {generateQuiz.isPending ? (
               <>
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                生成中…
+                生成中...
               </>
             ) : (
               <>
@@ -182,18 +247,59 @@ export function QuizPanel({
             )}
           </Button>
 
+          {generateQuiz.isPending && (
+            <div className="rounded-lg border border-accent-gold/20 bg-accent-gold-surface/60 px-3 py-3">
+              <div className="flex items-center gap-2">
+                <Loader2 className="h-4 w-4 animate-spin text-accent-gold" />
+                <p className="text-sm font-medium text-text-primary">
+                  AI 正在生成练习题...
+                </p>
+              </div>
+              <p className="mt-1.5 text-xs leading-relaxed text-text-secondary">
+                {questionCount <= 3
+                  ? "通常需要 30 秒左右，请耐心等待。"
+                  : `正在生成 ${questionCount} 道题目，最多可能需要几分钟，请耐心等待。`}
+              </p>
+            </div>
+          )}
+
           {generateQuiz.error && (
             <p className="text-xs text-error">{generateQuiz.error.message}</p>
           )}
         </form>
 
-        {!listLoading && quizList && quizList.length > 0 && (
+        {listLoading && (
+          <div className="mt-5 flex items-center justify-center gap-2 rounded-lg border border-border-subtle bg-surface px-3 py-4 text-xs text-text-secondary">
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+            正在读取练习记录
+          </div>
+        )}
+
+        {listError && (
+          <div className="mt-5 flex items-start gap-2 rounded-lg border border-error/20 bg-error/5 px-3 py-3 text-xs text-error">
+            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>练习记录读取失败：{listError.message}</span>
+          </div>
+        )}
+
+        {!listLoading && !listError && quizListItems.length === 0 && (
+          <div className="mt-5 rounded-lg border border-dashed border-border bg-accent-gold-surface/50 px-3 py-4">
+            <p className="text-sm font-medium text-text-primary">
+              还没有练习题
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-text-secondary">
+              生成一组题目后，可以逐题作答、请求提示、对照参考答案，并把有疑问的答案发回对话区讨论。
+            </p>
+          </div>
+        )}
+
+        {!listLoading && !listError && quizListItems.length > 0 && (
           <div className="mt-5 space-y-2">
             <p className="text-[11px] font-medium tracking-wide text-text-secondary uppercase">
               历史练习
             </p>
             <div className="space-y-1.5">
-              {quizList.map((quiz) => (
+              {quizListItems.map((quiz) => (
                 <button
                   key={quiz.quiz_id}
                   type="button"
@@ -209,8 +315,10 @@ export function QuizPanel({
                   </p>
                   <div className="mt-1 flex items-center gap-2 text-[11px] text-text-secondary">
                     <span>{difficultyLabel(quiz.difficulty)}</span>
-                    <span>·</span>
+                    <span>|</span>
                     <span>{quiz.question_count} 题</span>
+                    <span>|</span>
+                    <span>{formatDateTime(quiz.created_at)}</span>
                   </div>
                 </button>
               ))}
@@ -226,13 +334,52 @@ export function QuizPanel({
               </div>
             ) : activeQuiz ? (
               <>
-                <div className="flex items-center justify-between">
-                  <p className="text-sm font-medium text-text-primary">
-                    {activeQuiz.topic}
-                  </p>
-                  <Badge variant="outline" className="text-[10px]">
-                    {activeQuiz.questions.length} 题
-                  </Badge>
+                <div className="rounded-lg border border-primary/15 bg-primary-surface/60 px-3 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium text-text-primary">
+                        {activeQuiz.topic}
+                      </p>
+                      <p className="mt-1 text-xs text-text-secondary">
+                        已作答 {answeredCount}/{totalQuestions}，已核对{" "}
+                        {checkedCount}/{totalQuestions}
+                      </p>
+                    </div>
+                    <Badge variant="outline" className="shrink-0 text-[10px]">
+                      {difficultyLabel(activeQuiz.difficulty)}
+                    </Badge>
+                  </div>
+                  <div
+                    className="mt-3 h-1.5 overflow-hidden rounded-full bg-surface"
+                    aria-label="练习完成进度"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={progressPercent}
+                    role="progressbar"
+                  >
+                    <div
+                      className="h-full rounded-full bg-primary transition-all"
+                      style={{ width: `${progressPercent}%` }}
+                    />
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={!canResetPractice}
+                      onClick={resetPracticeState}
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" />
+                      重置本轮
+                    </Button>
+                    {checkedCount === totalQuestions && totalQuestions > 0 && (
+                      <span className="inline-flex items-center gap-1 rounded-md bg-success/10 px-2.5 py-1.5 text-xs font-medium text-success">
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                        本轮已完成
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {activeQuiz.questions.map((question, index) => (
@@ -240,15 +387,36 @@ export function QuizPanel({
                     key={question.prompt}
                     className="notebook-margin rounded-lg border border-border-subtle bg-surface p-3"
                   >
-                    <p className="text-xs font-medium text-text-secondary">
-                      第 {index + 1} 题
-                    </p>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-1.5 text-xs font-medium text-text-secondary">
+                        {revealed[index] ? (
+                          <CheckCircle2 className="h-3.5 w-3.5 text-success" />
+                        ) : answers[index]?.trim() ? (
+                          <Circle className="h-3.5 w-3.5 fill-accent-gold text-accent-gold" />
+                        ) : (
+                          <Circle className="h-3.5 w-3.5 text-text-secondary" />
+                        )}
+                        第 {index + 1} 题
+                      </div>
+                      <div className="flex shrink-0 gap-1">
+                        {hinted[index] && (
+                          <Badge variant="secondary" className="text-[10px]">
+                            已要提示
+                          </Badge>
+                        )}
+                        {discussed[index] && (
+                          <Badge variant="secondary" className="text-[10px]">
+                            已讨论
+                          </Badge>
+                        )}
+                      </div>
+                    </div>
                     <p className="mt-1 text-sm leading-relaxed text-text-primary">
                       {question.prompt}
                     </p>
 
                     <Textarea
-                      placeholder="写下你的答案…"
+                      placeholder="写下你的答案..."
                       value={answers[index] ?? ""}
                       onChange={(e) =>
                         setAnswers((prev) => ({
@@ -279,19 +447,17 @@ export function QuizPanel({
                         disabled={isPending || !answers[index]?.trim()}
                         onClick={() => handleDiscuss(index)}
                       >
+                        <MessageSquareText className="h-3.5 w-3.5" />
                         提交讨论
                       </Button>
                       <Button
                         type="button"
                         variant="ghost"
                         size="sm"
-                        onClick={() =>
-                          setRevealed((prev) => ({
-                            ...prev,
-                            [index]: !prev[index],
-                          }))
-                        }
+                        disabled={!answers[index]?.trim()}
+                        onClick={() => handleReveal(index)}
                       >
+                        <Eye className="h-3.5 w-3.5" />
                         {revealed[index] ? "隐藏参考" : "查看参考"}
                       </Button>
                     </div>
@@ -305,6 +471,11 @@ export function QuizPanel({
                   </div>
                 ))}
               </>
+            ) : detailError ? (
+              <div className="flex items-start gap-2 rounded-lg border border-error/20 bg-error/5 px-3 py-3 text-xs text-error">
+                <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>练习详情读取失败：{detailError.message}</span>
+              </div>
             ) : null}
           </div>
         )}

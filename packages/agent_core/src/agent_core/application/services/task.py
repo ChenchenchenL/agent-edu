@@ -49,6 +49,8 @@ from agent_core.application.services.tool_plan_runtime import (
     ToolPlanStepResult,
     ToolPlanRuntimeExecutor,
 )
+from agent_core.application.services.task_autonomy_state_coordinator import TaskAutonomyStateCoordinator
+from agent_core.application.services.task_failure_reflection_coordinator import TaskFailureReflectionCoordinator
 from agent_core.application.services.task_status_update_support import TaskStatusUpdateSupportService
 from agent_core.application.services.task_autonomy_scheduling import TaskAutonomySchedulingService
 from agent_core.application.services.task_plan_lifecycle import TaskPlanLifecycleService
@@ -209,28 +211,43 @@ class AutonomousTaskService:
             inline_status_followup_handler=self._run_inline_status_followups,
         )
         from agent_core.application.services.autonomy_jobs.dispatcher import AutonomyJobDispatcherService
-        from agent_core.application.services.autonomy_jobs.handlers import (
-            ReplanJobHandler,
-            ReviewSchedulingJobHandler,
-            AssessmentGenerationJobHandler,
-            DailyTaskMaterializationJobHandler,
-            ReflectionSkillEvolutionCuratorJobHandler,
-            SkillReplacementAutoExecutionJobHandler,
-        )
+        from agent_core.application.services.autonomy_jobs import handlers as _handler_factories
         autonomy_job_dispatcher = AutonomyJobDispatcherService()
-        autonomy_job_dispatcher.register_handler("replan", ReplanJobHandler(db_session=db_session, core=self))
-        autonomy_job_dispatcher.register_handler("review_scheduling", ReviewSchedulingJobHandler(db_session=db_session, core=self))
-        autonomy_job_dispatcher.register_handler("assessment_generation", AssessmentGenerationJobHandler(db_session=db_session, core=self))
-        autonomy_job_dispatcher.register_handler("daily_task_materialization", DailyTaskMaterializationJobHandler(db_session=db_session, core=self))
+        autonomy_job_dispatcher.register_handler("replan", _handler_factories.replan_handler(self))
+        autonomy_job_dispatcher.register_handler("review_scheduling", _handler_factories.review_scheduling_handler(self))
+        autonomy_job_dispatcher.register_handler("assessment_generation", _handler_factories.assessment_generation_handler(self))
+        autonomy_job_dispatcher.register_handler("daily_task_materialization", _handler_factories.daily_task_materialization_handler(self))
         autonomy_job_dispatcher.register_handler(
             "reflection_skill_evolution_curator",
-            ReflectionSkillEvolutionCuratorJobHandler(db_session=db_session, core=self),
+            _handler_factories.reflection_skill_evolution_curator_handler(self),
         )
         autonomy_job_dispatcher.register_handler(
             "skill_replacement_auto_execution",
-            SkillReplacementAutoExecutionJobHandler(db_session=db_session, core=self),
+            _handler_factories.skill_replacement_auto_execution_handler(self),
         )
+        autonomy_job_dispatcher.register_handler("reflection_proposal_evaluation", _handler_factories.reflection_proposal_evaluation_handler(self))
+        autonomy_job_dispatcher.register_handler("reflection_proposal_rollout_observation", _handler_factories.reflection_proposal_rollout_observation_handler(self))
+        autonomy_job_dispatcher.register_handler("reflection_proposal_rollout_decision", _handler_factories.reflection_proposal_rollout_decision_handler(self))
+        autonomy_job_dispatcher.register_handler("plan_extension", _handler_factories.plan_extension_handler(self))
+        autonomy_job_dispatcher.register_handler("milestone_generation", _handler_factories.milestone_generation_handler(self))
+        autonomy_job_dispatcher.register_handler("mastery_refresh", _handler_factories.mastery_refresh_handler(self))
+        autonomy_job_dispatcher.register_handler("goal_reflection_periodic", _handler_factories.periodic_goal_reflection_handler(self))
+        autonomy_job_dispatcher.register_handler("reflection_outcome_evaluation", _handler_factories.reflection_outcome_evaluation_handler(self))
+        autonomy_job_dispatcher.register_handler(LONG_TERM_MEMORY_MATERIALIZATION_REPLAY_JOB_TYPE, _handler_factories.long_term_memory_replay_handler(self))
 
+        self._autonomy_state_coordinator = TaskAutonomyStateCoordinator(
+            db_session=db_session,
+            goal_repository=goal_repository,
+            goal_autonomy_state_repository=goal_autonomy_state_repository,
+            learner_availability_repository=learner_availability_repository,
+            learner_topic_mastery_repository=learner_topic_mastery_repository,
+            autonomy_job_repository=autonomy_job_repository,
+            autonomy_job_service=autonomy_job_service,
+            audit_service=audit_service,
+        )
+        self._failure_reflection_coordinator = TaskFailureReflectionCoordinator(
+            reflection_service=self._reflection_service,
+        )
         self._autonomy_scheduling = TaskAutonomySchedulingService(
             db_session=db_session,
             goal_repository=goal_repository,
@@ -241,7 +258,6 @@ class AutonomousTaskService:
             audit_service=audit_service,
             autonomy_job_service=autonomy_job_service,
             reflection_service=self._reflection_service,
-            process_autonomy_job_callback=self._process_autonomy_job,
             autonomy_job_dispatcher=autonomy_job_dispatcher,
         )
         self._plan_lifecycle = TaskPlanLifecycleService(
@@ -256,7 +272,7 @@ class AutonomousTaskService:
             audit_service=audit_service,
             memory_service=memory_service,
             status_update_support=self._status_update_support,
-            sync_goal_state_after_plan=lambda goal_id, plan_id, trigger: self._sync_goal_state_after_plan(goal_id, plan_id, trigger_source=trigger),
+            autonomy_state_coordinator=self._autonomy_state_coordinator,
             rollout_observation_scheduler=self._rollout_observation_scheduler,
             reflection_service=self._reflection_service,
         )
@@ -269,16 +285,66 @@ class AutonomousTaskService:
             quiz_service=quiz_service,
             workflow_run_service=workflow_run_service,
             audit_service=audit_service,
-            failure_reflection_callback=lambda *, goal, task, run_id: self._trigger_workflow_failure_reflection(
-                goal_learner_profile_id=goal.learner_profile_id,
-                goal_id=goal.id,
-                workflow_run_id=run_id,
-                daily_task_id=task.id,
-                study_plan_id=task.study_plan_id,
-            ),
+            failure_reflection_coordinator=self._failure_reflection_coordinator,
         )
         self._autonomy_jobs_running = False
         self._register_internal_tools()
+
+    @property
+    def plan_lifecycle(self) -> TaskPlanLifecycleService:
+        return self._plan_lifecycle
+
+    @property
+    def execution(self) -> TaskExecutionService:
+        return self._execution
+
+    @property
+    def autonomy_scheduling(self) -> TaskAutonomySchedulingService:
+        return self._autonomy_scheduling
+
+    @property
+    def autonomy_job_dispatcher(self):
+        return self._autonomy_scheduling._autonomy_job_dispatcher
+
+    @property
+    def runtime_registry(self):
+        return self._runtime_registry
+
+    @property
+    def skill_usage_service(self):
+        return self._skill_usage_service
+
+    @property
+    def goal_skill_binding_resolver(self):
+        return self._goal_skill_binding_resolver
+
+    @property
+    def tool_plan_runtime_executor(self):
+        return self._tool_plan_runtime_executor
+
+    @property
+    def internal_tool_registry(self):
+        return self._internal_tool_registry
+
+    @property
+    def rollout_resolver(self):
+        return self._rollout_resolver
+
+    @property
+    def rollout_observation_scheduler(self):
+        return self._rollout_observation_scheduler
+
+    @property
+    def task_attempt_repository(self):
+        return self._task_attempt_repository
+
+    @property
+    def autonomy_state_coordinator(self) -> TaskAutonomyStateCoordinator:
+        return self._autonomy_state_coordinator
+
+    @property
+    def failure_reflection_coordinator(self) -> TaskFailureReflectionCoordinator:
+        return self._failure_reflection_coordinator
 
     async def generate_plan(
         self,
@@ -512,41 +578,41 @@ class AutonomousTaskService:
 
     async def _process_autonomy_job(self, job: ScheduledAutonomyJob) -> str | None:
         if job.job_type == "review_scheduling":
-            workflow_run_id = await self._process_review_scheduling_job(job)
+            workflow_run_id = await self.process_review_scheduling_job(job)
         elif job.job_type == "daily_task_materialization":
-            workflow_run_id = await self._process_daily_task_materialization_job(job)
+            workflow_run_id = await self.process_daily_task_materialization_job(job)
         elif job.job_type == "plan_extension":
-            workflow_run_id = await self._process_plan_extension_job(job)
+            workflow_run_id = await self.process_plan_extension_job(job)
         elif job.job_type == "replan":
-            workflow_run_id = await self._process_replan_job(job)
+            workflow_run_id = await self.process_replan_job(job)
         elif job.job_type == "assessment_generation":
-            workflow_run_id = await self._process_assessment_generation_job(job)
+            workflow_run_id = await self.process_assessment_generation_job(job)
         elif job.job_type == "milestone_generation":
-            workflow_run_id = await self._process_milestone_generation_job(job)
+            workflow_run_id = await self.process_milestone_generation_job(job)
         elif job.job_type == "mastery_refresh":
-            workflow_run_id = await self._process_mastery_refresh_job(job)
+            workflow_run_id = await self.process_mastery_refresh_job(job)
         elif job.job_type == "goal_reflection_periodic":
-            workflow_run_id = await self._process_periodic_goal_reflection_job(job)
+            workflow_run_id = await self.process_periodic_goal_reflection_job(job)
         elif job.job_type == "reflection_outcome_evaluation":
-            workflow_run_id = await self._process_reflection_outcome_evaluation_job(job)
+            workflow_run_id = await self.process_reflection_outcome_evaluation_job(job)
         elif job.job_type == "reflection_proposal_evaluation":
-            workflow_run_id = await self._process_reflection_proposal_evaluation_job(job)
+            workflow_run_id = await self.process_reflection_proposal_evaluation_job(job)
         elif job.job_type == "reflection_skill_evolution_curator":
-            workflow_run_id = await self._process_reflection_skill_evolution_curator_job(job)
+            workflow_run_id = await self.process_reflection_skill_evolution_curator_job(job)
         elif job.job_type == "skill_replacement_auto_execution":
-            workflow_run_id = await self._process_skill_replacement_auto_execution_job(job)
+            workflow_run_id = await self.process_skill_replacement_auto_execution_job(job)
         elif job.job_type == "reflection_proposal_rollout_observation":
-            workflow_run_id = await self._process_reflection_proposal_rollout_observation_job(job)
+            workflow_run_id = await self.process_reflection_proposal_rollout_observation_job(job)
         elif job.job_type == "reflection_proposal_rollout_decision":
-            workflow_run_id = await self._process_reflection_proposal_rollout_decision_job(job)
+            workflow_run_id = await self.process_reflection_proposal_rollout_decision_job(job)
         elif job.job_type == LONG_TERM_MEMORY_MATERIALIZATION_REPLAY_JOB_TYPE:
-            workflow_run_id = await self._process_long_term_memory_materialization_replay_job(job)
+            workflow_run_id = await self.process_long_term_memory_materialization_replay_job(job)
         else:
             raise ValidationError("Unsupported autonomy job type.")
         await self._db_session.commit()
         return workflow_run_id
 
-    async def _process_long_term_memory_materialization_replay_job(self, job: ScheduledAutonomyJob) -> str | None:
+    async def process_long_term_memory_materialization_replay_job(self, job: ScheduledAutonomyJob) -> str | None:
         if self._long_term_memory_replay_executor is None:
             raise ValidationError("Long-term memory materialization replay executor is not configured.")
         begin_nested = getattr(self._db_session, "begin_nested", None)
@@ -557,7 +623,7 @@ class AutonomousTaskService:
                 await self._long_term_memory_replay_executor.replay(job)
         return None
 
-    async def _process_review_scheduling_job(self, job: ScheduledAutonomyJob) -> str | None:
+    async def process_review_scheduling_job(self, job: ScheduledAutonomyJob) -> str | None:
         source_task_id = str(job.payload.get("source_task_id") or "")
         if not source_task_id:
             raise ValidationError("Missing source_task_id for review scheduling job.")
@@ -742,7 +808,7 @@ class AutonomousTaskService:
             )
             raise
 
-    async def _process_reflection_proposal_evaluation_job(self, job: ScheduledAutonomyJob) -> str | None:
+    async def process_reflection_proposal_evaluation_job(self, job: ScheduledAutonomyJob) -> str | None:
         if self._reflection_proposal_sandbox_service is None:
             raise ValidationError("Reflection proposal sandbox service is not configured.")
         proposal_id = str(job.payload.get("proposal_id") or "")
@@ -751,7 +817,7 @@ class AutonomousTaskService:
         sandbox_run = await self._reflection_proposal_sandbox_service.execute(proposal_id=proposal_id)
         return sandbox_run.id
 
-    async def _process_reflection_skill_evolution_curator_job(self, job: ScheduledAutonomyJob) -> str | None:
+    async def process_reflection_skill_evolution_curator_job(self, job: ScheduledAutonomyJob) -> str | None:
         if self._reflection_skill_evolution_curator_service is None:
             raise ValidationError("Reflection skill evolution curator service is not configured.")
         raw_limit = job.payload.get("limit", 20)
@@ -764,7 +830,7 @@ class AutonomousTaskService:
         await self._reflection_skill_evolution_curator_service.run_once(limit=limit, now=datetime.now(timezone.utc))
         return None
 
-    async def _process_skill_replacement_auto_execution_job(self, job: ScheduledAutonomyJob) -> str | None:
+    async def process_skill_replacement_auto_execution_job(self, job: ScheduledAutonomyJob) -> str | None:
         if self._skill_replacement_auto_execution_service is None:
             raise ValidationError("Skill replacement auto execution service is not configured.")
         recommendation_id = str(job.payload.get("recommendation_id") or "").strip()
@@ -790,7 +856,7 @@ class AutonomousTaskService:
         await self._skill_replacement_auto_execution_service.run_once(limit=limit, now=current_time)
         return None
 
-    async def _process_reflection_proposal_rollout_observation_job(self, job: ScheduledAutonomyJob) -> str | None:
+    async def process_reflection_proposal_rollout_observation_job(self, job: ScheduledAutonomyJob) -> str | None:
         if self._reflection_proposal_rollout_service is None:
             raise ValidationError("Reflection proposal rollout service is not configured.")
         rollout_id = str(job.payload.get("rollout_id") or "")
@@ -802,7 +868,7 @@ class AutonomousTaskService:
         )
         return observation.id
 
-    async def _process_reflection_proposal_rollout_decision_job(self, job: ScheduledAutonomyJob) -> str | None:
+    async def process_reflection_proposal_rollout_decision_job(self, job: ScheduledAutonomyJob) -> str | None:
         if self._reflection_proposal_rollout_decision_orchestrator is None:
             raise ValidationError("Reflection proposal rollout decision orchestrator is not configured.")
         rollout_id = str(job.payload.get("rollout_id") or "")
@@ -815,7 +881,7 @@ class AutonomousTaskService:
         )
         return rollout.id if rollout is not None else None
 
-    async def _process_plan_extension_job(self, job: ScheduledAutonomyJob) -> str | None:
+    async def process_plan_extension_job(self, job: ScheduledAutonomyJob) -> str | None:
         goal = await self._require_goal(job.learner_goal_id)
         active_plan = await self._study_plan_repository.get_active_by_goal(goal.id)
         if active_plan is None:
@@ -884,7 +950,7 @@ class AutonomousTaskService:
         )
         return run.id
 
-    async def _process_replan_job(self, job: ScheduledAutonomyJob) -> str | None:
+    async def process_replan_job(self, job: ScheduledAutonomyJob) -> str | None:
         goal = await self._require_goal(job.learner_goal_id)
         mode = str(job.payload.get("mode") or "partial")
         topic_key = str(job.payload.get("topic_focus") or goal.subject)
@@ -1365,7 +1431,7 @@ class AutonomousTaskService:
             )
             raise
 
-    async def _process_assessment_generation_job(self, job: ScheduledAutonomyJob) -> str | None:
+    async def process_assessment_generation_job(self, job: ScheduledAutonomyJob) -> str | None:
         goal = await self._require_goal(job.learner_goal_id)
         topic_key = str(job.payload.get("topic_focus") or goal.subject)
         source_task_id = str(job.payload.get("source_task_id") or "")
@@ -1549,7 +1615,7 @@ class AutonomousTaskService:
             )
             raise
 
-    async def _process_daily_task_materialization_job(self, job: ScheduledAutonomyJob) -> str | None:
+    async def process_daily_task_materialization_job(self, job: ScheduledAutonomyJob) -> str | None:
         goal = await self._require_goal(job.learner_goal_id)
         active_plan = await self._study_plan_repository.get_active_by_goal(goal.id)
         if active_plan is None:
@@ -1699,7 +1765,7 @@ class AutonomousTaskService:
         )
         return run.id
 
-    async def _process_milestone_generation_job(self, job: ScheduledAutonomyJob) -> str | None:
+    async def process_milestone_generation_job(self, job: ScheduledAutonomyJob) -> str | None:
         goal = await self._require_goal(job.learner_goal_id)
         active_plan = await self._study_plan_repository.get_active_by_goal(goal.id)
         if active_plan is None:
@@ -1764,13 +1830,13 @@ class AutonomousTaskService:
         )
         return run.id
 
-    async def _process_mastery_refresh_job(self, job: ScheduledAutonomyJob) -> str | None:
+    async def process_mastery_refresh_job(self, job: ScheduledAutonomyJob) -> str | None:
         goal = await self._require_goal(job.learner_goal_id)
         await self._refresh_goal_mastery_snapshot(goal.id)
         await self._sync_goal_state(goal.id, phase="active", reason="mastery_refreshed")
         return None
 
-    async def _process_periodic_goal_reflection_job(self, job: ScheduledAutonomyJob) -> str | None:
+    async def process_periodic_goal_reflection_job(self, job: ScheduledAutonomyJob) -> str | None:
         await self.run_periodic_goal_reflection(job.learner_goal_id)
         await self._schedule_periodic_goal_reflection_job(
             job.learner_goal_id,
@@ -1778,7 +1844,7 @@ class AutonomousTaskService:
         )
         return None
 
-    async def _process_reflection_outcome_evaluation_job(self, job: ScheduledAutonomyJob) -> str | None:
+    async def process_reflection_outcome_evaluation_job(self, job: ScheduledAutonomyJob) -> str | None:
         if self._reflection_service is None or self._reflection_outcome_service is None:
             return None
         pending = await self._reflection_outcome_service.list_pending(learner_goal_id=job.learner_goal_id, limit=10)
@@ -1803,26 +1869,18 @@ class AutonomousTaskService:
         next_due_at: datetime | None | object = AUTONOMY_UNSET,
         reason: str | None = None,
     ) -> None:
-        if self._goal_autonomy_state_repository is None:
-            return
-        state = await self._goal_autonomy_state_repository.get_by_goal(goal_id)
-        if state is None:
-            state = GoalAutonomyState.build(learner_goal_id=goal_id)
-            await self._goal_autonomy_state_repository.create(state)
-        await self._goal_autonomy_state_repository.update(
-            state.with_transition(
-                phase=phase,
-                current_plan_id=current_plan_id,
-                next_due_at=next_due_at,
-                mastery_snapshot=await self._build_mastery_snapshot(goal_id),
-                reason=reason,
-            )
+        await self._autonomy_state_coordinator.sync_goal_state(
+            goal_id,
+            phase=phase,
+            current_plan_id=current_plan_id,
+            next_due_at=next_due_at,
+            reason=reason,
         )
 
     async def _sync_goal_state_after_plan(self, goal_id: str, plan_id: str, *, trigger_source: str) -> None:
-        await self._sync_goal_state(goal_id, phase="active", current_plan_id=plan_id, reason=trigger_source)
-        await self._ensure_daily_materialization_job(goal_id, trigger_source=trigger_source)
-        await self._schedule_periodic_goal_reflection_job(goal_id, trigger_source=trigger_source)
+        await self._autonomy_state_coordinator.sync_after_plan_generation(
+            goal_id=goal_id, plan_id=plan_id, trigger_source=trigger_source,
+        )
 
     async def _trigger_reflection_callback(self, profile_id: str, goal_id: str) -> None:
         if self._reflection_service is not None:
@@ -1877,20 +1935,7 @@ class AutonomousTaskService:
         )
 
     async def _build_mastery_snapshot(self, goal_id: str) -> dict[str, object]:
-        if self._learner_topic_mastery_repository is None:
-            return {}
-        masteries = await self._learner_topic_mastery_repository.list_by_goal(goal_id)
-        return {
-            "topics": [
-                {
-                    "topic_key": mastery.topic_key,
-                    "mastery_score": mastery.mastery_score,
-                    "confidence": mastery.confidence,
-                    "evidence_count": mastery.evidence_count,
-                }
-                for mastery in masteries
-            ]
-        }
+        return await self._autonomy_state_coordinator.build_mastery_snapshot(goal_id)
 
     async def _enqueue_autonomy_followups(self, task: DailyTask) -> None:
         if self._autonomy_job_repository is None:
@@ -2090,22 +2135,14 @@ class AutonomousTaskService:
         daily_task_id: str | None = None,
         study_plan_id: str | None = None,
     ) -> None:
-        if self._reflection_service is None:
-            return
-        await self._reflection_service.trigger_reflection(
-            ReflectionTriggerRequest(
-                learner_profile_id=goal_learner_profile_id,
-                learner_goal_id=goal_id,
-                scope="task" if daily_task_id is not None else "goal",
-                target_type="workflow_run",
-                target_id=workflow_run_id,
-                trigger_source="workflow_failed",
-                reflection_depth=1,
-                daily_task_id=daily_task_id,
-                workflow_run_id=workflow_run_id,
-                study_plan_id=study_plan_id,
-                source_attempt_id=workflow_run_id,
-            )
+        from agent_core.domain.entities.goal import LearnerGoal
+
+        goal = await self._require_goal(goal_id)
+        await self._failure_reflection_coordinator.trigger_for_task_failure(
+            goal=goal,
+            workflow_run_id=workflow_run_id,
+            daily_task_id=daily_task_id,
+            study_plan_id=study_plan_id,
         )
 
     async def _derive_replan_mode(self, task: DailyTask, *, runtime_directives: dict[str, object] | None = None) -> str:
@@ -2288,50 +2325,8 @@ class AutonomousTaskService:
         trigger_source: str,
         days_offset: int = 0,
     ) -> ScheduledAutonomyJob | None:
-        if self._autonomy_job_repository is None:
-            return None
-        availability = await self._get_goal_availability_entity(learner_goal_id)
-        timezone_name = self._validate_timezone(availability.timezone if availability is not None else None) or "UTC"
-        zone = ZoneInfo(timezone_name)
-        now_local = datetime.now(zone)
-        target_day = now_local.date() + timedelta(days=days_offset)
-        idempotency_key = f"{learner_goal_id}:daily_task_materialization:{target_day.isoformat()}:{timezone_name}"
-        existing = await self._autonomy_job_repository.list_active_by_goal(learner_goal_id, job_types={"daily_task_materialization"})
-        for job in existing:
-            if job.idempotency_key == idempotency_key:
-                return job
-        for job in existing:
-            cancelled = job.cancel(error_code="rescheduled")
-            await self._autonomy_job_repository.update(cancelled)
-            await self._audit_service.record(
-                event_type="autonomy.job.cancelled",
-                resource_type="autonomy_job",
-                resource_id=cancelled.id,
-                actor="system",
-                event_data={
-                    "autonomy_job_id": cancelled.id,
-                    "learner_goal_id": learner_goal_id,
-                    "job_type": cancelled.job_type,
-                    "reason": "rescheduled",
-                },
-            )
-        due_at, scheduled_local_time = self._compute_materialization_due_at(
-            availability=availability,
-            timezone_name=timezone_name,
-            target_day=target_day,
-        )
-        return await self._schedule_autonomy_job(
-            learner_goal_id=learner_goal_id,
-            job_type="daily_task_materialization",
-            trigger_source=trigger_source,
-            due_at=due_at,
-            idempotency_key=idempotency_key,
-            payload={
-                "window_days": 3,
-                "target_local_date": target_day.isoformat(),
-                "target_timezone": timezone_name,
-                "scheduled_local_time": scheduled_local_time,
-            },
+        return await self._autonomy_state_coordinator.ensure_daily_materialization_job(
+            learner_goal_id, trigger_source=trigger_source, days_offset=days_offset,
         )
 
     async def _ensure_milestone_jobs(self, learner_goal_id: str, study_plan_id: str) -> None:
@@ -2614,22 +2609,8 @@ class AutonomousTaskService:
         *,
         trigger_source: str,
     ) -> ScheduledAutonomyJob | None:
-        if self._autonomy_job_repository is None:
-            return None
-        existing = await self._autonomy_job_repository.list_active_by_goal(
-            learner_goal_id,
-            job_types={"goal_reflection_periodic"},
-        )
-        if existing:
-            return existing[0]
-        due_at = datetime.now(timezone.utc) + timedelta(days=2)
-        return await self._schedule_autonomy_job(
-            learner_goal_id=learner_goal_id,
-            job_type="goal_reflection_periodic",
-            trigger_source=trigger_source,
-            due_at=due_at,
-            idempotency_key=f"{learner_goal_id}:goal_reflection_periodic:{due_at.date().isoformat()}",
-            payload={"cooldown_days": 2},
+        return await self._autonomy_state_coordinator.schedule_periodic_goal_reflection_job(
+            learner_goal_id, trigger_source=trigger_source,
         )
 
     async def _schedule_outcome_evaluation_job(

@@ -160,3 +160,41 @@ class SessionService:
             )
             raise
         return SessionResponse.model_validate(updated)
+
+    async def bind_goal(
+        self,
+        session_id: str,
+        learner_goal_id: str | None,
+        commit: bool = True,
+    ) -> SessionResponse:
+        session = await self._repository.get_by_id(session_id)
+        if session is None:
+            raise NotFoundError(f"Session '{session_id}' was not found.")
+
+        if learner_goal_id is not None:
+            goal = await self._learner_goal_repository.get_by_id(learner_goal_id)
+            if goal is None:
+                raise NotFoundError(f"Learner goal '{learner_goal_id}' was not found.")
+            if goal.learner_profile_id != session.learner_profile_id:
+                raise ValidationError("Goal does not belong to the same learner profile.")
+
+        updated = session.with_goal(learner_goal_id)
+        try:
+            await self._repository.update(updated)
+            await self._audit_service.record(
+                event_type="session.goal.bound",
+                resource_type="learning_session",
+                resource_id=session.id,
+                actor="learner",
+                event_data={
+                    "session_id": session.id,
+                    "previous_goal_id": session.learner_goal_id,
+                    "new_goal_id": learner_goal_id,
+                },
+            )
+            if commit:
+                await self._db_session.commit()
+        except Exception as exc:
+            await self._db_session.rollback()
+            raise
+        return SessionResponse.model_validate(updated)

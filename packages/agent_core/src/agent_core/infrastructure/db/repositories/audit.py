@@ -115,4 +115,31 @@ class AuditRepository:
         self._session.add(model)
         await self._session.flush()
 
+    async def list_recent(
+        self,
+        *,
+        event_type: str | None = None,
+        resource_type: str | None = None,
+        limit: int = 50,
+    ) -> list[AuditEvent]:
+        stmt = select(AuditEventModel).order_by(desc(AuditEventModel.created_at))
+        if event_type:
+            stmt = stmt.where(AuditEventModel.event_type == event_type)
+        if resource_type:
+            stmt = stmt.where(AuditEventModel.resource_type == resource_type)
+        stmt = stmt.limit(limit)
+        result = await self._session.execute(stmt)
+        return [
+            AuditEvent(
+                id=row.id,
+                event_type=row.event_type,
+                resource_type=row.resource_type,
+                resource_id=row.resource_id,
+                actor=row.actor,
+                event_data=row.event_data,
+                created_at=row.created_at,
+            )
+            for row in result.scalars().all()
+        ]
+
 

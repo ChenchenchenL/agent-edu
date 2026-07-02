@@ -397,6 +397,10 @@ async def test_generate_plan_runs_real_lifecycle_logic_without_core_delegation()
             ))
             return None
 
+    class _StubCoordinator:
+        async def sync_after_plan_generation(self, *, goal_id, plan_id, trigger_source):
+            sync_calls.append((goal_id, plan_id, trigger_source))
+
     service = TaskPlanLifecycleService(
         db_session=session,
         goal_repository=_StubGoalRepository(goal),
@@ -409,9 +413,7 @@ async def test_generate_plan_runs_real_lifecycle_logic_without_core_delegation()
         audit_service=audit_service,
         memory_service=memory_service,
         status_update_support=None,
-        sync_goal_state_after_plan=lambda goal_id, plan_id, trigger: _append_and_return(
-            sync_calls, (goal_id, plan_id, trigger)
-        ),
+        autonomy_state_coordinator=_StubCoordinator(),
         rollout_observation_scheduler=_StubRolloutScheduler(),
         reflection_service=_StubReflectionService(),
     )

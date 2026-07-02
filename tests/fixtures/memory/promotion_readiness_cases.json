@@ -1,0 +1,318 @@
+{
+  "description": "Promotion readiness edge cases for knowledge and behavior memories",
+  "governance_config": {
+    "candidate_to_active_evidence_min": 2,
+    "candidate_to_active_support_min": 0.35,
+    "candidate_to_active_confidence_min": 0.55,
+    "candidate_to_active_contradiction_max": 0.25
+  },
+  "knowledge_cases": [
+    {
+      "name": "knowledge_ready_exact_threshold",
+      "description": "Knowledge at exact promotion threshold",
+      "memory": {
+        "id": "k-ready-001",
+        "learner_profile_id": "profile-001",
+        "learner_goal_id": "goal-001",
+        "knowledge_key": "threshold concept",
+        "title": "At threshold",
+        "summary": "Exactly at promotion threshold",
+        "details": null,
+        "knowledge_level": "core",
+        "time_horizon": "mid",
+        "importance_score": 0.7,
+        "confidence_score": 0.55,
+        "freshness_score": 0.8,
+        "stability_score": 0.6,
+        "goal_relevance_score": 0.6,
+        "support_score": 0.35,
+        "contradiction_score": 0.24,
+        "evidence_count": 2,
+        "contradiction_count": 0,
+        "assessment_evidence_count": 1,
+        "task_evidence_count": 1,
+        "source_event_ids": ["evt-001"],
+        "status": "candidate",
+        "semantic_category": "concept",
+        "validation_status": "validated"
+      },
+      "expected": {
+        "promotion_readiness": "monitor"
+      }
+    },
+    {
+      "name": "knowledge_not_ready_low_evidence",
+      "description": "Knowledge with good quality but insufficient evidence",
+      "memory": {
+        "id": "k-ready-002",
+        "learner_profile_id": "profile-001",
+        "learner_goal_id": "goal-001",
+        "knowledge_key": "low evidence concept",
+        "title": "Low evidence",
+        "summary": "Good quality but only 1 evidence",
+        "details": null,
+        "knowledge_level": "core",
+        "time_horizon": "mid",
+        "importance_score": 0.7,
+        "confidence_score": 0.6,
+        "freshness_score": 0.8,
+        "stability_score": 0.6,
+        "goal_relevance_score": 0.6,
+        "support_score": 0.4,
+        "contradiction_score": 0.1,
+        "evidence_count": 1,
+        "contradiction_count": 0,
+        "assessment_evidence_count": 1,
+        "task_evidence_count": 0,
+        "source_event_ids": ["evt-002"],
+        "status": "candidate",
+        "semantic_category": "concept",
+        "validation_status": "validated"
+      },
+      "expected": {
+        "promotion_readiness": "monitor"
+      }
+    },
+    {
+      "name": "knowledge_not_ready_low_support",
+      "description": "Knowledge with good quality but insufficient support score",
+      "memory": {
+        "id": "k-ready-003",
+        "learner_profile_id": "profile-001",
+        "learner_goal_id": "goal-001",
+        "knowledge_key": "low support concept",
+        "title": "Low support",
+        "summary": "Good quality but support too low",
+        "details": null,
+        "knowledge_level": "core",
+        "time_horizon": "mid",
+        "importance_score": 0.7,
+        "confidence_score": 0.6,
+        "freshness_score": 0.8,
+        "stability_score": 0.6,
+        "goal_relevance_score": 0.6,
+        "support_score": 0.34,
+        "contradiction_score": 0.1,
+        "evidence_count": 3,
+        "contradiction_count": 0,
+        "assessment_evidence_count": 1,
+        "task_evidence_count": 1,
+        "source_event_ids": ["evt-003"],
+        "status": "candidate",
+        "semantic_category": "concept",
+        "validation_status": "validated"
+      },
+      "expected": {
+        "promotion_readiness": "monitor"
+      }
+    },
+    {
+      "name": "knowledge_not_ready_high_contradiction",
+      "description": "Knowledge with good quality but contradiction too high",
+      "memory": {
+        "id": "k-ready-004",
+        "learner_profile_id": "profile-001",
+        "learner_goal_id": "goal-001",
+        "knowledge_key": "high contradiction concept",
+        "title": "High contradiction",
+        "summary": "Good quality but contradiction too high",
+        "details": null,
+        "knowledge_level": "core",
+        "time_horizon": "mid",
+        "importance_score": 0.7,
+        "confidence_score": 0.6,
+        "freshness_score": 0.8,
+        "stability_score": 0.6,
+        "goal_relevance_score": 0.6,
+        "support_score": 0.4,
+        "contradiction_score": 0.25,
+        "evidence_count": 3,
+        "contradiction_count": 2,
+        "assessment_evidence_count": 1,
+        "task_evidence_count": 1,
+        "source_event_ids": ["evt-004"],
+        "status": "candidate",
+        "semantic_category": "concept",
+        "validation_status": "contested"
+      },
+      "expected": {
+        "promotion_readiness": "monitor"
+      }
+    },
+    {
+      "name": "knowledge_monitor_medium_quality",
+      "description": "Knowledge with medium quality, monitor status",
+      "memory": {
+        "id": "k-ready-005",
+        "learner_profile_id": "profile-001",
+        "learner_goal_id": "goal-001",
+        "knowledge_key": "medium quality concept",
+        "title": "Medium quality",
+        "summary": "Medium quality, needs more evidence",
+        "details": null,
+        "knowledge_level": "foundation",
+        "time_horizon": "early",
+        "importance_score": 0.5,
+        "confidence_score": 0.5,
+        "freshness_score": 0.7,
+        "stability_score": 0.5,
+        "goal_relevance_score": 0.5,
+        "support_score": 0.4,
+        "contradiction_score": 0.1,
+        "evidence_count": 2,
+        "contradiction_count": 0,
+        "assessment_evidence_count": 0,
+        "task_evidence_count": 1,
+        "source_event_ids": ["evt-005"],
+        "status": "candidate",
+        "semantic_category": "concept",
+        "validation_status": "unverified"
+      },
+      "expected": {
+        "promotion_readiness": "not_ready"
+      }
+    }
+  ],
+  "behavior_cases": [
+    {
+      "name": "behavior_ready_exact_threshold",
+      "description": "Behavior at exact promotion threshold",
+      "memory": {
+        "id": "b-ready-001",
+        "learner_profile_id": "profile-001",
+        "learner_goal_id": "goal-001",
+        "behavior_key": "threshold behavior",
+        "behavior_category": "support_request",
+        "title": "At threshold",
+        "summary": "Exactly at promotion threshold",
+        "details": null,
+        "behavior_level": "recurrent",
+        "time_horizon": "mid",
+        "importance_score": 0.7,
+        "confidence_score": 0.5,
+        "freshness_score": 0.8,
+        "stability_score": 0.6,
+        "goal_relevance_score": 0.6,
+        "support_score": 0.4,
+        "contradiction_score": 0.1,
+        "evidence_count": 2,
+        "contradiction_count": 0,
+        "intervention_success_count": 1,
+        "intervention_failure_count": 0,
+        "cross_session_recurrence_count": 2,
+        "source_event_ids": ["evt-001"],
+        "status": "candidate",
+        "semantic_category": "strategy",
+        "validation_status": "validated"
+      },
+      "expected": {
+        "promotion_readiness": "monitor"
+      }
+    },
+    {
+      "name": "behavior_not_ready_low_recurrence",
+      "description": "Behavior with good quality but insufficient cross-session recurrence",
+      "memory": {
+        "id": "b-ready-002",
+        "learner_profile_id": "profile-001",
+        "learner_goal_id": "goal-001",
+        "behavior_key": "low recurrence behavior",
+        "behavior_category": "response_preference",
+        "title": "Low recurrence",
+        "summary": "Good quality but only 1 recurrence",
+        "details": null,
+        "behavior_level": "surface",
+        "time_horizon": "early",
+        "importance_score": 0.6,
+        "confidence_score": 0.55,
+        "freshness_score": 0.8,
+        "stability_score": 0.5,
+        "goal_relevance_score": 0.6,
+        "support_score": 0.4,
+        "contradiction_score": 0.1,
+        "evidence_count": 3,
+        "contradiction_count": 0,
+        "intervention_success_count": 2,
+        "intervention_failure_count": 0,
+        "cross_session_recurrence_count": 1,
+        "source_event_ids": ["evt-002"],
+        "status": "candidate",
+        "semantic_category": "preference",
+        "validation_status": "validated"
+      },
+      "expected": {
+        "promotion_readiness": "monitor"
+      }
+    },
+    {
+      "name": "behavior_not_ready_low_confidence",
+      "description": "Behavior with good quality but insufficient confidence",
+      "memory": {
+        "id": "b-ready-003",
+        "learner_profile_id": "profile-001",
+        "learner_goal_id": "goal-001",
+        "behavior_key": "low confidence behavior",
+        "behavior_category": "error_pattern",
+        "title": "Low confidence",
+        "summary": "Good quality but confidence too low",
+        "details": null,
+        "behavior_level": "recurrent",
+        "time_horizon": "mid",
+        "importance_score": 0.6,
+        "confidence_score": 0.49,
+        "freshness_score": 0.8,
+        "stability_score": 0.5,
+        "goal_relevance_score": 0.6,
+        "support_score": 0.4,
+        "contradiction_score": 0.1,
+        "evidence_count": 3,
+        "contradiction_count": 0,
+        "intervention_success_count": 2,
+        "intervention_failure_count": 0,
+        "cross_session_recurrence_count": 2,
+        "source_event_ids": ["evt-003"],
+        "status": "candidate",
+        "semantic_category": "meta",
+        "validation_status": "unverified"
+      },
+      "expected": {
+        "promotion_readiness": "monitor"
+      }
+    },
+    {
+      "name": "behavior_monitor_medium_quality",
+      "description": "Behavior with medium quality, monitor status",
+      "memory": {
+        "id": "b-ready-004",
+        "learner_profile_id": "profile-001",
+        "learner_goal_id": "goal-001",
+        "behavior_key": "medium quality behavior",
+        "behavior_category": "guided_progress",
+        "title": "Medium quality",
+        "summary": "Medium quality, needs more evidence",
+        "details": null,
+        "behavior_level": "surface",
+        "time_horizon": "early",
+        "importance_score": 0.5,
+        "confidence_score": 0.5,
+        "freshness_score": 0.7,
+        "stability_score": 0.4,
+        "goal_relevance_score": 0.5,
+        "support_score": 0.35,
+        "contradiction_score": 0.1,
+        "evidence_count": 2,
+        "contradiction_count": 0,
+        "intervention_success_count": 1,
+        "intervention_failure_count": 0,
+        "cross_session_recurrence_count": 1,
+        "source_event_ids": ["evt-004"],
+        "status": "candidate",
+        "semantic_category": "strategy",
+        "validation_status": "unverified"
+      },
+      "expected": {
+        "promotion_readiness": "monitor"
+      }
+    }
+  ]
+}

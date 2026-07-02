@@ -14,12 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent_core.application.services.memory import MemoryService
 from agent_core.application.services.task import AutonomousTaskService
 
-from agent_core.application.services.autonomy_jobs.handlers import (
-    ReplanJobHandler,
-    ReviewSchedulingJobHandler,
-    AssessmentGenerationJobHandler,
-    DailyTaskMaterializationJobHandler,
-)
+from agent_core.application.services.autonomy_jobs import handlers as _handler_factories
 
 from agent_core.application.services.task_runtime_skill import TaskRuntimeSkillService
 from agent_core.application.services.review import ReviewService
@@ -83,37 +78,31 @@ class RequestScopeContainer:
     def task_services(self) -> TaskServiceBundle:
         """Get the scoped task service bundle with real dependencies."""
         if self._task_services is None:
-            # Build legacy core service first; migration-safe facades delegate to it.
             core = self._task_core_builder(self._session)
 
-            # Use service instances created inside the core constructor.
-            # The core creates TaskStatusUpdateSupportService, TaskPlanLifecycleService,
-            # TaskExecutionService, and TaskAutonomySchedulingService internally.
-            autonomy_scheduling = core._autonomy_scheduling
-            autonomy_job_dispatcher = autonomy_scheduling._autonomy_job_dispatcher
+            autonomy_scheduling = core.autonomy_scheduling
+            autonomy_job_dispatcher = core.autonomy_job_dispatcher
 
-            # Register additional job handlers on the core's dispatcher
-            autonomy_job_dispatcher.register_handler("replan", ReplanJobHandler(db_session=self._session, core=core))
-            autonomy_job_dispatcher.register_handler("review_scheduling", ReviewSchedulingJobHandler(db_session=self._session, core=core))
-            autonomy_job_dispatcher.register_handler("assessment_generation", AssessmentGenerationJobHandler(db_session=self._session, core=core))
-            autonomy_job_dispatcher.register_handler("daily_task_materialization", DailyTaskMaterializationJobHandler(db_session=self._session, core=core))
+            autonomy_job_dispatcher.register_handler("replan", _handler_factories.replan_handler(core))
+            autonomy_job_dispatcher.register_handler("review_scheduling", _handler_factories.review_scheduling_handler(core))
+            autonomy_job_dispatcher.register_handler("assessment_generation", _handler_factories.assessment_generation_handler(core))
+            autonomy_job_dispatcher.register_handler("daily_task_materialization", _handler_factories.daily_task_materialization_handler(core))
 
-            # Build TaskRuntimeSkillService (completed runtime skill orchestration split)
             runtime_skill = TaskRuntimeSkillService(
-                runtime_registry=core._runtime_registry,
-                skill_usage_service=core._skill_usage_service,
-                goal_skill_binding_resolver=core._goal_skill_binding_resolver,
-                tool_plan_runtime_executor=core._tool_plan_runtime_executor,
-                internal_tool_registry=core._internal_tool_registry,
-                rollout_resolver=core._rollout_resolver,
-                rollout_observation_scheduler=core._rollout_observation_scheduler,
-                review_service=ReviewService(task_attempt_repository=core._task_attempt_repository),
+                runtime_registry=core.runtime_registry,
+                skill_usage_service=core.skill_usage_service,
+                goal_skill_binding_resolver=core.goal_skill_binding_resolver,
+                tool_plan_runtime_executor=core.tool_plan_runtime_executor,
+                internal_tool_registry=core.internal_tool_registry,
+                rollout_resolver=core.rollout_resolver,
+                rollout_observation_scheduler=core.rollout_observation_scheduler,
+                review_service=ReviewService(task_attempt_repository=core.task_attempt_repository),
             )
 
             self._task_services = TaskServiceBundle(
                 core=core,
-                plan_lifecycle=core._plan_lifecycle,
-                execution=core._execution,
+                plan_lifecycle=core.plan_lifecycle,
+                execution=core.execution,
                 autonomy_scheduling=autonomy_scheduling,
                 runtime_skill=runtime_skill,
             )

@@ -64,6 +64,54 @@ class _FakeTaskCore:
     _plan_lifecycle: object | None = None
     _execution: object | None = None
 
+    @property
+    def plan_lifecycle(self):
+        return self._plan_lifecycle
+
+    @property
+    def execution(self):
+        return self._execution
+
+    @property
+    def autonomy_scheduling(self):
+        return self._autonomy_scheduling
+
+    @property
+    def autonomy_job_dispatcher(self):
+        return self._autonomy_scheduling._autonomy_job_dispatcher
+
+    @property
+    def runtime_registry(self):
+        return self._runtime_registry
+
+    @property
+    def skill_usage_service(self):
+        return self._skill_usage_service
+
+    @property
+    def goal_skill_binding_resolver(self):
+        return self._goal_skill_binding_resolver
+
+    @property
+    def tool_plan_runtime_executor(self):
+        return self._tool_plan_runtime_executor
+
+    @property
+    def internal_tool_registry(self):
+        return self._internal_tool_registry
+
+    @property
+    def rollout_resolver(self):
+        return self._rollout_resolver
+
+    @property
+    def rollout_observation_scheduler(self):
+        return self._rollout_observation_scheduler
+
+    @property
+    def task_attempt_repository(self):
+        return self._task_attempt_repository
+
     async def _sync_goal_state_after_plan(self, goal_id: str, plan_id: str, trigger_source: str) -> None:
         return None
 

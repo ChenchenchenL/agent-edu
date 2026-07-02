@@ -114,8 +114,29 @@ If you prefer to run the API locally without Docker:
 
 ## Documentation
 
+- **Local Development & Troubleshooting**: [`docs/LOCAL_DEV_RUNBOOK.md`](docs/LOCAL_DEV_RUNBOOK.md) - Complete guide for starting, verifying, and debugging the development environment
 - Architecture details: `ARCHITECTURE.md`
 - Project Agent Rules: `AGENTS.md`
 - Coding Conventions: `CONVENTIONS.md`
 - Historical System Design Document: `docs/SYSTEM_DESIGN.md`
+- Docker Validation: `docs/DOCKER_VALIDATION.md`
 - Additional documentation in the `docs/` folder.
+
+## Frontend Development
+
+The frontend is a separate Vite + React application located in `packages/frontend/`.
+
+**Quick start:**
+```bash
+# Start backend stack (if not already running)
+make dev-up
+
+# In a separate terminal, start frontend dev server
+cd packages/frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173` in your browser.
+
+See [`docs/LOCAL_DEV_RUNBOOK.md`](docs/LOCAL_DEV_RUNBOOK.md) for detailed frontend setup and troubleshooting.

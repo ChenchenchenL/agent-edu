@@ -2,84 +2,99 @@
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
-from datetime import datetime, date, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent_core.domain.entities.autonomy import ScheduledAutonomyJob, AUTONOMY_REPLAN_MODES
-from agent_core.domain.entities.planning import DailyTask
-from agent_core.domain.errors import ValidationError
+from agent_core.domain.entities.autonomy import ScheduledAutonomyJob
 
 if TYPE_CHECKING:
-    from agent_core.application.services.task import AutonomousTaskService
+    from agent_core.application.services.autonomy_jobs.processors import (
+        AutonomyJobHandler,
+        TaskJobProcessingFacade,
+    )
 
 
-logger = logging.getLogger(__name__)
+class _ProcessorBackedHandler:
+    """Handler that delegates to a processor backed by a facade."""
 
-
-class AutonomyJobHandler:
-    """Protocol for autonomy job handlers."""
-
-    async def execute(self, job: ScheduledAutonomyJob) -> str | None:
-        """Execute the job and return the result payload or None."""
-        ...
-
-
-class BaseAutonomyJobHandler:
-    """Base class providing common dependencies for job handlers.
-    
-    This temporarily depends on the legacy core to allow piecemeal migration.
-    """
-    
-    def __init__(
-        self,
-        *,
-        db_session: AsyncSession,
-        core: AutonomousTaskService,
-    ) -> None:
-        self._db_session = db_session
-        self._core = core
-
-
-class ReviewSchedulingJobHandler(BaseAutonomyJobHandler):
-    """Handler for review_scheduling autonomy jobs."""
+    def __init__(self, *, processor: object) -> None:
+        self._processor = processor
 
     async def execute(self, job: ScheduledAutonomyJob) -> str | None:
-        return await self._core._process_review_scheduling_job(job)  # noqa: SLF001
+        return await self._processor.process(job)
 
 
-class ReplanJobHandler(BaseAutonomyJobHandler):
-    """Handler for replan autonomy jobs."""
-
-    async def execute(self, job: ScheduledAutonomyJob) -> str | None:
-        return await self._core._process_replan_job(job)  # noqa: SLF001
+def review_scheduling_handler(facade: TaskJobProcessingFacade) -> _ProcessorBackedHandler:
+    from agent_core.application.services.autonomy_jobs.processors import ReviewSchedulingJobProcessor
+    return _ProcessorBackedHandler(processor=ReviewSchedulingJobProcessor(facade=facade))
 
 
-class AssessmentGenerationJobHandler(BaseAutonomyJobHandler):
-    """Handler for assessment_generation autonomy jobs."""
-
-    async def execute(self, job: ScheduledAutonomyJob) -> str | None:
-        return await self._core._process_assessment_generation_job(job)  # noqa: SLF001
+def replan_handler(facade: TaskJobProcessingFacade) -> _ProcessorBackedHandler:
+    from agent_core.application.services.autonomy_jobs.processors import ReplanJobProcessor
+    return _ProcessorBackedHandler(processor=ReplanJobProcessor(facade=facade))
 
 
-class DailyTaskMaterializationJobHandler(BaseAutonomyJobHandler):
-    """Handler for daily_task_materialization autonomy jobs."""
-
-    async def execute(self, job: ScheduledAutonomyJob) -> str | None:
-        return await self._core._process_daily_task_materialization_job(job)  # noqa: SLF001
+def assessment_generation_handler(facade: TaskJobProcessingFacade) -> _ProcessorBackedHandler:
+    from agent_core.application.services.autonomy_jobs.processors import AssessmentGenerationJobProcessor
+    return _ProcessorBackedHandler(processor=AssessmentGenerationJobProcessor(facade=facade))
 
 
-class ReflectionSkillEvolutionCuratorJobHandler(BaseAutonomyJobHandler):
-    """Handler for reflection_skill_evolution_curator autonomy jobs."""
-
-    async def execute(self, job: ScheduledAutonomyJob) -> str | None:
-        return await self._core._process_reflection_skill_evolution_curator_job(job)  # noqa: SLF001
+def daily_task_materialization_handler(facade: TaskJobProcessingFacade) -> _ProcessorBackedHandler:
+    from agent_core.application.services.autonomy_jobs.processors import DailyTaskMaterializationJobProcessor
+    return _ProcessorBackedHandler(processor=DailyTaskMaterializationJobProcessor(facade=facade))
 
 
-class SkillReplacementAutoExecutionJobHandler(BaseAutonomyJobHandler):
-    """Handler for skill_replacement_auto_execution autonomy jobs."""
+def reflection_skill_evolution_curator_handler(facade: TaskJobProcessingFacade) -> _ProcessorBackedHandler:
+    from agent_core.application.services.autonomy_jobs.processors import ReflectionSkillEvolutionCuratorJobProcessor
+    return _ProcessorBackedHandler(processor=ReflectionSkillEvolutionCuratorJobProcessor(facade=facade))
 
-    async def execute(self, job: ScheduledAutonomyJob) -> str | None:
-        return await self._core._process_skill_replacement_auto_execution_job(job)  # noqa: SLF001
+
+def skill_replacement_auto_execution_handler(facade: TaskJobProcessingFacade) -> _ProcessorBackedHandler:
+    from agent_core.application.services.autonomy_jobs.processors import SkillReplacementAutoExecutionJobProcessor
+    return _ProcessorBackedHandler(processor=SkillReplacementAutoExecutionJobProcessor(facade=facade))
+
+
+def long_term_memory_replay_handler(facade: TaskJobProcessingFacade) -> _ProcessorBackedHandler:
+    from agent_core.application.services.autonomy_jobs.processors import LongTermMemoryMaterializationReplayJobProcessor
+    return _ProcessorBackedHandler(processor=LongTermMemoryMaterializationReplayJobProcessor(facade=facade))
+
+
+def reflection_proposal_evaluation_handler(facade: TaskJobProcessingFacade) -> _ProcessorBackedHandler:
+    from agent_core.application.services.autonomy_jobs.processors import ReflectionProposalEvaluationJobProcessor
+    return _ProcessorBackedHandler(processor=ReflectionProposalEvaluationJobProcessor(facade=facade))
+
+
+def reflection_proposal_rollout_observation_handler(facade: TaskJobProcessingFacade) -> _ProcessorBackedHandler:
+    from agent_core.application.services.autonomy_jobs.processors import ReflectionProposalRolloutObservationJobProcessor
+    return _ProcessorBackedHandler(processor=ReflectionProposalRolloutObservationJobProcessor(facade=facade))
+
+
+def reflection_proposal_rollout_decision_handler(facade: TaskJobProcessingFacade) -> _ProcessorBackedHandler:
+    from agent_core.application.services.autonomy_jobs.processors import ReflectionProposalRolloutDecisionJobProcessor
+    return _ProcessorBackedHandler(processor=ReflectionProposalRolloutDecisionJobProcessor(facade=facade))
+
+
+def plan_extension_handler(facade: TaskJobProcessingFacade) -> _ProcessorBackedHandler:
+    from agent_core.application.services.autonomy_jobs.processors import PlanExtensionJobProcessor
+    return _ProcessorBackedHandler(processor=PlanExtensionJobProcessor(facade=facade))
+
+
+def milestone_generation_handler(facade: TaskJobProcessingFacade) -> _ProcessorBackedHandler:
+    from agent_core.application.services.autonomy_jobs.processors import MilestoneGenerationJobProcessor
+    return _ProcessorBackedHandler(processor=MilestoneGenerationJobProcessor(facade=facade))
+
+
+def mastery_refresh_handler(facade: TaskJobProcessingFacade) -> _ProcessorBackedHandler:
+    from agent_core.application.services.autonomy_jobs.processors import MasteryRefreshJobProcessor
+    return _ProcessorBackedHandler(processor=MasteryRefreshJobProcessor(facade=facade))
+
+
+def periodic_goal_reflection_handler(facade: TaskJobProcessingFacade) -> _ProcessorBackedHandler:
+    from agent_core.application.services.autonomy_jobs.processors import PeriodicGoalReflectionJobProcessor
+    return _ProcessorBackedHandler(processor=PeriodicGoalReflectionJobProcessor(facade=facade))
+
+
+def reflection_outcome_evaluation_handler(facade: TaskJobProcessingFacade) -> _ProcessorBackedHandler:
+    from agent_core.application.services.autonomy_jobs.processors import ReflectionOutcomeEvaluationJobProcessor
+    return _ProcessorBackedHandler(processor=ReflectionOutcomeEvaluationJobProcessor(facade=facade))

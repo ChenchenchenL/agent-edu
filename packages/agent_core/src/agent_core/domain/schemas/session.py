@@ -67,6 +67,10 @@ class UpdateSessionStatusRequest(BaseModel):
     status: str = Field(min_length=1, max_length=32)
 
 
+class BindGoalRequest(BaseModel):
+    learner_goal_id: str | None = Field(default=None, max_length=36)
+
+
 class MessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=4000)
     mode: Literal["chat", "hint"] = "chat"

@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { get, post } from "@/api/client";
+import { get, post, patch } from "@/api/client";
 import type {
   Session,
   CreateSessionRequest,
@@ -7,6 +7,7 @@ import type {
   MessageRequest,
   MessageResponse,
 } from "@/types/session";
+import type { LearnerGoal } from "@/types/goal";
 
 export function useSessions() {
   return useQuery<Session[]>({
@@ -55,5 +56,28 @@ export function useSendMessage(sessionId: string) {
         queryKey: ["sessions", sessionId],
       });
     },
+  });
+}
+
+export function useBindGoal(sessionId: string) {
+  const queryClient = useQueryClient();
+  return useMutation<Session, Error, string | null>({
+    mutationFn: (goalId) =>
+      patch<Session>(`/sessions/${sessionId}/goal`, {
+        learner_goal_id: goalId,
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["sessions", sessionId],
+      });
+    },
+  });
+}
+
+export function useGoalsForSelect(profileId: string | null) {
+  return useQuery<LearnerGoal[]>({
+    queryKey: ["goals", profileId],
+    queryFn: () => get<LearnerGoal[]>(`/learner-profiles/${profileId}/goals`),
+    enabled: !!profileId,
   });
 }

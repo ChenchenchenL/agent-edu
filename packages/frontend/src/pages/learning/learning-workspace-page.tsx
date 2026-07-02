@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { Loader2, MessageSquare, ClipboardList, Lightbulb } from "lucide-react";
+import { Loader2, MessageSquare, ClipboardList, Lightbulb, BookCheck } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -13,9 +13,10 @@ import { MessageThread } from "@/pages/learning/components/message-thread";
 import { ChatComposer } from "@/pages/learning/components/chat-composer";
 import { QuizPanel } from "@/pages/learning/components/quiz-panel";
 import { HintPanel } from "@/pages/learning/components/hint-panel";
+import { TaskPanel } from "@/pages/learning/components/task-panel";
 import type { MessageRequest } from "@/types/session";
 
-type SidePanel = "quiz" | "hint";
+type SidePanel = "quiz" | "hint" | "tasks";
 
 export function LearningWorkspacePage() {
   const { id: sessionId } = useParams<{ id: string }>();
@@ -129,6 +130,18 @@ export function LearningWorkspacePage() {
                 <Lightbulb className="h-3.5 w-3.5" />
                 提示
               </button>
+              <button
+                type="button"
+                onClick={() => setSidePanel("tasks")}
+                className={`flex flex-1 items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors ${
+                  sidePanel === "tasks"
+                    ? "border-b-2 border-primary text-primary"
+                    : "text-text-secondary hover:text-text-primary"
+                }`}
+              >
+                <BookCheck className="h-3.5 w-3.5" />
+                任务
+              </button>
             </div>
 
             <div className="min-h-0 flex-1 overflow-hidden">
@@ -140,11 +153,13 @@ export function LearningWorkspacePage() {
                   onDiscussAnswer={(content) => sendChat(content)}
                   isPending={sendMessage.isPending}
                 />
-              ) : (
+              ) : sidePanel === "hint" ? (
                 <HintPanel
                   onRequestHint={handleHintRequest}
                   isPending={sendMessage.isPending}
                 />
+              ) : (
+                <TaskPanel sessionId={session.id} goalId={session.learner_goal_id} />
               )}
             </div>
           </aside>

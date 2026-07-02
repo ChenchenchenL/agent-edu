@@ -7,7 +7,7 @@ migrated from AutonomousTaskService to reduce God Class complexity.
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,7 +15,7 @@ from agent_core.application.interfaces.memory import MemoryServiceProtocol
 from agent_core.application.interfaces.planner import PlannerServiceProtocol
 from agent_core.application.interfaces.workflow import WorkflowRunServiceProtocol
 from agent_core.application.services.task_status_update_support import TaskStatusUpdateSupportService
-from agent_core.domain.entities.planning import StudyPlan
+from agent_core.domain.entities.planning import StudyPlan, WorkflowRun
 from agent_core.domain.errors import NotFoundError, ValidationError
 from agent_core.domain.schemas.planning import (
     DailyTaskResponse,
@@ -37,10 +37,8 @@ if TYPE_CHECKING:
     from agent_core.application.services.reflection_proposal_rollout_observation_scheduler import (
         ReflectionProposalRolloutObservationScheduler,
     )
+    from agent_core.application.services.task_autonomy_state_coordinator import TaskAutonomyStateCoordinator
     from agent_core.domain.entities.goal import LearnerGoal
-
-
-GoalStateSyncCallback = Callable[[str, str, str], Awaitable[None]]
 
 
 class TaskPlanLifecycleService:
@@ -70,28 +68,10 @@ class TaskPlanLifecycleService:
         audit_service: AuditService | None = None,
         memory_service: MemoryServiceProtocol | None = None,
         status_update_support: TaskStatusUpdateSupportService | None = None,
-        sync_goal_state_after_plan: GoalStateSyncCallback | None = None,
+        autonomy_state_coordinator: TaskAutonomyStateCoordinator | None = None,
         rollout_observation_scheduler: ReflectionProposalRolloutObservationScheduler | None = None,
         reflection_service: ReflectionService | None = None,
     ) -> None:
-        """Initialize the lifecycle service with real dependencies.
-
-        Args:
-            db_session: Database session for transaction management.
-            goal_repository: Repository for learner goals.
-            study_plan_repository: Repository for study plans.
-            plan_stage_repository: Repository for plan stages.
-            daily_task_repository: Repository for daily tasks.
-            workflow_run_repository: Repository for workflow runs.
-            planner_service: Planner used to materialize study plans.
-            workflow_run_service: Workflow orchestration service.
-            audit_service: Optional audit service for standalone status updates.
-            memory_service: Optional memory interpretation provider for planning.
-            status_update_support: Shared support for attempts, mastery, and post-update side effects.
-            sync_goal_state_after_plan: Optional callback for autonomy state synchronization.
-            rollout_observation_scheduler: Optional scheduler for rollout observation tracking.
-            reflection_service: Optional reflection service for workflow failure reflection.
-        """
         self._db_session = db_session
         self._goal_repository = goal_repository
         self._study_plan_repository = study_plan_repository
@@ -103,7 +83,7 @@ class TaskPlanLifecycleService:
         self._audit_service = audit_service
         self._memory_service = memory_service
         self._status_update_support = status_update_support
-        self._sync_goal_state_after_plan_callback = sync_goal_state_after_plan
+        self._autonomy_state_coordinator = autonomy_state_coordinator
         self._rollout_observation_scheduler = rollout_observation_scheduler
         self._reflection_service = reflection_service
 
@@ -197,7 +177,9 @@ class TaskPlanLifecycleService:
                 await self._db_session.commit()
         except Exception as exc:
             await self._db_session.rollback()
-            await self._workflow_run_service.fail_run(run=run, error_code=type(exc).__name__)
+            failed_run = run.fail(error_code=type(exc).__name__)
+            await self._workflow_run_repository.create(failed_run)
+            await self._db_session.commit()
             await self._trigger_workflow_failure_reflection(
                 goal=goal,
                 workflow_run_id=run.id,
@@ -572,9 +554,13 @@ class TaskPlanLifecycleService:
         plan_id: str,
         trigger_source: str,
     ) -> None:
-        if self._sync_goal_state_after_plan_callback is None:
+        if self._autonomy_state_coordinator is None:
             return
-        await self._sync_goal_state_after_plan_callback(goal_id, plan_id, trigger_source)
+        await self._autonomy_state_coordinator.sync_after_plan_generation(
+            goal_id=goal_id,
+            plan_id=plan_id,
+            trigger_source=trigger_source,
+        )
 
     async def _schedule_surface_rollout_observation(
         self,

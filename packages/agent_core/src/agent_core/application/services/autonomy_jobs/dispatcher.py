@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from agent_core.domain.entities.autonomy import ScheduledAutonomyJob
-from agent_core.application.services.autonomy_jobs.handlers import AutonomyJobHandler
+from agent_core.application.services.autonomy_jobs.processors import AutonomyJobHandler
 from typing import Protocol
 
 logger = logging.getLogger(__name__)
@@ -25,10 +25,8 @@ class AutonomyJobDispatcherService:
         """Dispatch a job to its registered handler."""
         handler = self._handlers.get(job.job_type)
         if not handler:
-            logger.error(f"No handler registered for job type: {job.job_type}")
-            # We return None instead of failing to prevent blocking the worker loop completely
-            # for unknown job types during migrations.
-            return None
+            from agent_core.domain.errors import ValidationError
+            raise ValidationError(f"Unsupported autonomy job type: {job.job_type}")
             
         try:
             return await handler.execute(job)

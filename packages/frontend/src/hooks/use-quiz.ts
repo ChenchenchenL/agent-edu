@@ -23,11 +23,17 @@ export function useQuizDetail(sessionId: string, quizId: string | null) {
   });
 }
 
+const QUIZ_GENERATION_TIMEOUT_MS = 10 * 60 * 1000;
+
 export function useGenerateQuiz(sessionId: string) {
   const queryClient = useQueryClient();
   return useMutation<QuizDraft, Error, GenerateQuizRequest>({
     mutationFn: (data) =>
-      post<QuizDraft>(`/sessions/${sessionId}/quizzes/generate`, data),
+      post<QuizDraft>(
+        `/sessions/${sessionId}/quizzes/generate`,
+        data,
+        QUIZ_GENERATION_TIMEOUT_MS,
+      ),
     onSuccess: () => {
       void queryClient.invalidateQueries({
         queryKey: ["sessions", sessionId, "quizzes"],

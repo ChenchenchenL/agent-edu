@@ -40,9 +40,6 @@ if TYPE_CHECKING:
     from agent_core.application.services.autonomy_jobs.dispatcher import AutonomyJobDispatcherService
 
 
-ProcessAutonomyJobCallback = Any
-
-
 class TaskAutonomySchedulingService:
     """Manage autonomy state and scheduling operations.
 
@@ -68,7 +65,6 @@ class TaskAutonomySchedulingService:
         audit_service: AuditService | None = None,
         autonomy_job_service: AutonomyJobService | None = None,
         reflection_service: ReflectionService | None = None,
-        process_autonomy_job_callback: ProcessAutonomyJobCallback | None = None,
         autonomy_job_dispatcher: AutonomyJobDispatcherService | None = None,
     ) -> None:
         self._db_session = db_session
@@ -80,7 +76,6 @@ class TaskAutonomySchedulingService:
         self._audit_service = audit_service
         self._autonomy_job_service = autonomy_job_service
         self._reflection_service = reflection_service
-        self._process_autonomy_job_callback = process_autonomy_job_callback
         self._autonomy_job_dispatcher = autonomy_job_dispatcher
         self._autonomy_jobs_running = False
 
@@ -341,10 +336,10 @@ class TaskAutonomySchedulingService:
                     await self._db_session.commit()
                     try:
                         workflow_run_id = None
-                        if self._autonomy_job_dispatcher is not None and claimed.job_type in self._autonomy_job_dispatcher._handlers:
+                        if self._autonomy_job_dispatcher is not None:
                             workflow_run_id = await self._autonomy_job_dispatcher.dispatch(claimed)
-                        elif self._process_autonomy_job_callback is not None:
-                            workflow_run_id = await self._process_autonomy_job_callback(claimed)
+                        else:
+                            raise ValidationError("Unsupported autonomy job type.")
                         completed = claimed.complete(workflow_run_id=workflow_run_id)
                         await self._autonomy_job_repository.update(completed)
                         if self._audit_service is not None:

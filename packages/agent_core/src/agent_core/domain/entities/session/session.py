@@ -87,3 +87,20 @@ class LearningSession:
             created_at=self.created_at,
             updated_at=last_activity_at,
         )
+
+    def with_goal(self, learner_goal_id: str | None) -> "LearningSession":
+        now = datetime.now(timezone.utc)
+        return LearningSession(
+            id=self.id,
+            learner_profile_id=self.learner_profile_id,
+            learner_goal_id=learner_goal_id,
+            daily_task_id=self.daily_task_id,
+            title=self.title,
+            subject=self.subject,
+            status=self.status,
+            message_count=self.message_count,
+            last_activity_at=self.last_activity_at,
+            summary=self.summary,
+            created_at=self.created_at,
+            updated_at=now,
+        )
