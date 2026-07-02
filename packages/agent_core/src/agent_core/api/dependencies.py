@@ -70,6 +70,7 @@ from agent_core.application.services.skills import (
     SkillReplacementStagingService,
     SkillResolver,
     SkillUsageService,
+    RuntimeExplainService,
 )
 from agent_core.application.services.strategy_cards import StrategyCardService
 from agent_core.application.services.task import AutonomousTaskService
@@ -1071,6 +1072,12 @@ def get_dynamic_runtime_registry_service(session: AsyncSession) -> DynamicRuntim
     return DynamicRuntimeRegistryService(
         goal_skill_binding_resolver=get_goal_skill_binding_resolver(session),
         skill_usage_service=_build_skill_usage_service(session),
+    )
+
+
+def get_runtime_explain_service(session: AsyncSession = Depends(get_db_session)) -> RuntimeExplainService:
+    return RuntimeExplainService(
+        dynamic_runtime_registry=get_dynamic_runtime_registry_service(session),
     )
 
 

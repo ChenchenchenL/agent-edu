@@ -637,7 +637,7 @@ class AutonomousTaskService:
             topic_key=source_task.topic_focus,
             task_type="review",
             trigger_source=job.trigger_source,
-            include_staged=True,
+            include_staged=False,
         )
         skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_review_skill_for_runtime(
             goal=goal,
@@ -962,7 +962,7 @@ class AutonomousTaskService:
             topic_key=topic_key,
             task_type=None,
             trigger_source=job.trigger_source,
-            include_staged=True,
+            include_staged=False,
         )
         skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_replan_skill_for_runtime(
             goal=goal,
@@ -1077,7 +1077,7 @@ class AutonomousTaskService:
             topic_key=source_topic_key,
             task_type=source_task.task_type if source_task is not None else None,
             trigger_source=job.trigger_source,
-            include_staged=True,
+            include_staged=False,
         )
         if source_task is None:
             try:
@@ -1443,7 +1443,7 @@ class AutonomousTaskService:
             topic_key=topic_key,
             task_type="assessment",
             trigger_source=job.trigger_source,
-            include_staged=True,
+            include_staged=False,
         )
         skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_assessment_skill_for_runtime(
             goal=goal,
@@ -2155,7 +2155,7 @@ class AutonomousTaskService:
                 resource_id=task.id,
                 topic_key=task.topic_focus,
                 task_type=task.task_type,
-                include_staged=True,
+                include_staged=False,
             )
             effective_runtime_directives = self._effective_runtime_directives(task.learner_goal_id, "replan", runtime_plan)
         if effective_runtime_directives.get("replan_bias") in {"normal", "aggressive"}:
@@ -2189,7 +2189,7 @@ class AutonomousTaskService:
                 resource_id=task.id,
                 topic_key=task.topic_focus,
                 task_type=task.task_type,
-                include_staged=True,
+                include_staged=False,
             )
             effective_runtime_directives = self._effective_runtime_directives(
                 task.learner_goal_id,
@@ -2261,7 +2261,7 @@ class AutonomousTaskService:
                 resource_id=mastery.topic_key if mastery is not None else learner_goal_id,
                 topic_key=mastery.topic_key if mastery is not None else None,
                 task_type="review",
-                include_staged=True,
+                include_staged=False,
             )
             effective_runtime_directives = self._effective_runtime_directives(
                 learner_goal_id,
@@ -2291,7 +2291,7 @@ class AutonomousTaskService:
         overlay = await self._rollout_resolver.get_active_overlay(
             learner_goal_id=learner_goal_id,
             surface=surface,
-            include_staged=True,
+            include_staged=False,
         )
         if overlay is None:
             return None
@@ -2676,7 +2676,7 @@ class AutonomousTaskService:
             topic_key=source_task.topic_focus,
             task_type="review",
             trigger_source="task_completed",
-            include_staged=True,
+            include_staged=False,
         )
         skill_resolution = runtime_plan.resolution if runtime_plan is not None else await self._resolve_review_skill_for_runtime(
             goal=goal,

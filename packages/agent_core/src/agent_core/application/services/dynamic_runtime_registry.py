@@ -7,7 +7,7 @@ from agent_core.application.services.goal_skill_binding_resolver import (
     ActiveGoalSkillBinding,
     GoalSkillBindingResolver,
 )
-from agent_core.application.services.skills import SkillUsageService
+from agent_core.application.services.skill.usage import SkillUsageService
 from agent_core.domain.entities.skill import SkillExecutionPlan
 
 

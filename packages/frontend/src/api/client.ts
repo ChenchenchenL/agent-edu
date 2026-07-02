@@ -1,4 +1,5 @@
 import { getStoredProfile } from "@/lib/learner-auth";
+import { getStoredOperatorKey } from "@/lib/operator-auth";
 
 const DEFAULT_API_ORIGIN = "http://localhost:8000";
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -44,11 +45,13 @@ async function request<T>(
   const url = `${API_BASE}${path}`;
 
   const learnerProfile = getStoredProfile();
+  const operatorKey = getStoredOperatorKey();
   try {
     const res = await fetch(url, {
       headers: {
         "Content-Type": "application/json",
         ...(learnerProfile ? { "X-Learner-Key": learnerProfile.access_key } : {}),
+        ...(operatorKey ? { "X-Operator-Key": operatorKey } : {}),
         ...init.headers,
       },
       ...init,

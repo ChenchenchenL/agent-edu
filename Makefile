@@ -5,7 +5,7 @@ export HTTP_PROXY ?= $(VMWARE_NAT_PROXY)
 export HTTPS_PROXY ?= $(VMWARE_NAT_PROXY)
 export NO_PROXY ?= $(DEFAULT_NO_PROXY)
 
-.PHONY: dev-up dev-down logs logs-api logs-worker ps migrate test lint test-api docker-api-test mvp-check real-provider-regression observability-up observability-down install-local smoke-api smoke-stack frontend-dev-doc memory-check
+.PHONY: dev-up dev-down logs logs-api logs-worker ps migrate test lint test-api docker-api-test mvp-check real-provider-regression observability-up observability-down install-local smoke-api smoke-stack frontend-dev-doc memory-check reflection-check
 
 dev-up:
 	docker compose up --build
@@ -124,4 +124,10 @@ memory-check:
 		tests/test_memory_quality_regression.py \
 		tests/test_memory_fail_closed.py \
 		tests/test_memory_downstream_contracts.py \
+		-v
+
+reflection-check:
+	docker compose build api
+	docker compose run --rm api pytest \
+		tests/test_reflection_skill_evolution_regression.py \
 		-v

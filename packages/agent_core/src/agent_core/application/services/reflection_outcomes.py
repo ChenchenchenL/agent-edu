@@ -34,6 +34,8 @@ class ReflectionOutcomeService:
         return evaluation
 
     async def evaluate(self, *, reflection: ReflectionRecord, topic_key: str | None) -> ReflectionOutcomeEvaluation | None:
+        from agent_core.application.services.reflection_outcome_policy import evaluate_outcome
+        
         evaluation = await self._repository.get_by_reflection(reflection.id)
         if evaluation is None or self._task_attempt_repository is None:
             return evaluation
@@ -41,35 +43,19 @@ class ReflectionOutcomeService:
         topic_attempts = [item for item in attempts if topic_key is None or item.topic_focus == topic_key][:3]
         if not topic_attempts:
             return evaluation
-        success_count = len([item for item in topic_attempts if item.outcome_status == "completed"])
-        failure_count = len([item for item in topic_attempts if item.outcome_status in {"failed", "skipped"}])
-        status = "inconclusive"
-        score = 0.0
-        note = "insufficient evidence"
-        if len(topic_attempts) >= evaluation.window_size:
-            if success_count >= 2 and failure_count <= 1:
-                status = "effective"
-                score = 0.7
-                note = "follow-up attempts improved"
-            elif failure_count >= 2:
-                status = "ineffective"
-                score = -0.5
-                note = "follow-up attempts did not improve"
-            else:
-                status = "inconclusive"
-                score = 0.0
-                note = "mixed follow-up results"
+
+        result = evaluate_outcome(
+            topic_attempts=topic_attempts,
+            window_size=evaluation.window_size,
+        )
+
         updated = evaluation.with_result(
-            evaluation_status=status,
-            observed_attempt_count=len(topic_attempts),
-            outcome_snapshot={
-                "success_count": success_count,
-                "failure_count": failure_count,
-                "attempt_ids": [item.id for item in topic_attempts],
-            },
-            improvement_score=score,
-            evaluation_note=note,
-            evaluated=status != "pending",
+            evaluation_status=result.evaluation_status,
+            observed_attempt_count=result.observed_attempt_count,
+            outcome_snapshot=result.outcome_snapshot,
+            improvement_score=result.improvement_score,
+            evaluation_note=result.evaluation_note,
+            evaluated=result.evaluated,
         )
         await self._repository.update(updated)
         await self._audit_service.record(

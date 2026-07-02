@@ -67,7 +67,7 @@ class QuizService:
                 surface="quiz",
                 topic_key=payload.topic,
                 trigger_source="quiz_generation",
-                include_staged=True,
+                include_staged=False,
             )
         runtime_plan = await self._resolve_runtime_plan(
             learner_goal_id=session.learner_goal_id,
@@ -330,7 +330,7 @@ class QuizService:
             resource_id=resource_id,
             topic_key=topic_key,
             trigger_source=trigger_source,
-            include_staged=True,
+            include_staged=False,
         )
 
     async def _record_skill_usage(

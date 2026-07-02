@@ -59,6 +59,8 @@ from agent_core.application.services.skill.readiness import (
 from agent_core.application.services.skill.recommendations import SkillCuratorRecommendationService
 from agent_core.application.services.skill.replacement_staging import SkillReplacementStagingService
 from agent_core.application.services.skill.resolution import SkillResolver
+from agent_core.application.services.skill.runtime_explain import RuntimeExplainService
+from agent_core.application.services.skill.runtime_readiness import RuntimeBindingExplainResult, RuntimeBindingReadiness
 from agent_core.application.services.skill.usage import SkillUsageService
 
 __all__ = [
@@ -97,6 +99,9 @@ __all__ = [
     "SkillReplacementStagingService",
     "SkillResolver",
     "SkillUsageService",
+    "RuntimeExplainService",
+    "RuntimeBindingExplainResult",
+    "RuntimeBindingReadiness",
     "matches_rollout_metadata",
     "refresh_skill_observability_metrics",
 ]

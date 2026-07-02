@@ -1,0 +1,167 @@
+{
+  "description": "Reflection outcome evaluation cases: window_size, topic_attempts -> status/score/note/snapshot",
+  "window_size": 3,
+  "cases": [
+    {
+      "name": "no_attempts_inconclusive",
+      "description": "Zero topic attempts: always inconclusive, not evaluated",
+      "topic_attempts": [],
+      "expected": {
+        "evaluation_status": "inconclusive",
+        "improvement_score": 0.0,
+        "evaluation_note": "insufficient evidence",
+        "observed_attempt_count": 0,
+        "evaluated": false
+      }
+    },
+    {
+      "name": "below_window_one_attempt_inconclusive",
+      "description": "Only 1 attempt < window_size (3): insufficient evidence",
+      "topic_attempts": [
+        { "id": "a1", "outcome_status": "completed" }
+      ],
+      "expected": {
+        "evaluation_status": "inconclusive",
+        "improvement_score": 0.0,
+        "evaluation_note": "insufficient evidence",
+        "observed_attempt_count": 1,
+        "evaluated": false
+      }
+    },
+    {
+      "name": "below_window_two_attempts_inconclusive",
+      "description": "2 attempts < window_size (3): still insufficient evidence",
+      "topic_attempts": [
+        { "id": "a1", "outcome_status": "completed" },
+        { "id": "a2", "outcome_status": "failed" }
+      ],
+      "expected": {
+        "evaluation_status": "inconclusive",
+        "improvement_score": 0.0,
+        "evaluation_note": "insufficient evidence",
+        "observed_attempt_count": 2,
+        "evaluated": false
+      }
+    },
+    {
+      "name": "effective_all_success",
+      "description": "3 completed attempts: effective verdict",
+      "topic_attempts": [
+        { "id": "a1", "outcome_status": "completed" },
+        { "id": "a2", "outcome_status": "completed" },
+        { "id": "a3", "outcome_status": "completed" }
+      ],
+      "expected": {
+        "evaluation_status": "effective",
+        "improvement_score": 0.7,
+        "evaluation_note": "follow-up attempts improved",
+        "observed_attempt_count": 3,
+        "evaluated": true,
+        "outcome_snapshot": {
+          "success_count": 3,
+          "failure_count": 0
+        }
+      }
+    },
+    {
+      "name": "effective_two_success_one_failure",
+      "description": "2 successes, 1 failure: still effective (success>=2 and failure<=1)",
+      "topic_attempts": [
+        { "id": "a1", "outcome_status": "completed" },
+        { "id": "a2", "outcome_status": "failed" },
+        { "id": "a3", "outcome_status": "completed" }
+      ],
+      "expected": {
+        "evaluation_status": "effective",
+        "improvement_score": 0.7,
+        "evaluation_note": "follow-up attempts improved",
+        "observed_attempt_count": 3,
+        "evaluated": true,
+        "outcome_snapshot": {
+          "success_count": 2,
+          "failure_count": 1
+        }
+      }
+    },
+    {
+      "name": "ineffective_two_failures",
+      "description": "2 failures out of 3 attempts: ineffective",
+      "topic_attempts": [
+        { "id": "a1", "outcome_status": "completed" },
+        { "id": "a2", "outcome_status": "failed" },
+        { "id": "a3", "outcome_status": "skipped" }
+      ],
+      "expected": {
+        "evaluation_status": "ineffective",
+        "improvement_score": -0.5,
+        "evaluation_note": "follow-up attempts did not improve",
+        "observed_attempt_count": 3,
+        "evaluated": true,
+        "outcome_snapshot": {
+          "success_count": 1,
+          "failure_count": 2
+        }
+      }
+    },
+    {
+      "name": "ineffective_all_failures",
+      "description": "All 3 failed: ineffective",
+      "topic_attempts": [
+        { "id": "a1", "outcome_status": "failed" },
+        { "id": "a2", "outcome_status": "failed" },
+        { "id": "a3", "outcome_status": "failed" }
+      ],
+      "expected": {
+        "evaluation_status": "ineffective",
+        "improvement_score": -0.5,
+        "evaluation_note": "follow-up attempts did not improve",
+        "observed_attempt_count": 3,
+        "evaluated": true,
+        "outcome_snapshot": {
+          "success_count": 0,
+          "failure_count": 3
+        }
+      }
+    },
+    {
+      "name": "inconclusive_mixed_results",
+      "description": "1 success, 1 failure, 1 other: inconclusive (mixed)",
+      "topic_attempts": [
+        { "id": "a1", "outcome_status": "completed" },
+        { "id": "a2", "outcome_status": "failed" },
+        { "id": "a3", "outcome_status": "in_progress" }
+      ],
+      "expected": {
+        "evaluation_status": "inconclusive",
+        "improvement_score": 0.0,
+        "evaluation_note": "mixed follow-up results",
+        "observed_attempt_count": 3,
+        "evaluated": true,
+        "outcome_snapshot": {
+          "success_count": 1,
+          "failure_count": 1
+        }
+      }
+    },
+    {
+      "name": "skipped_counts_as_failure",
+      "description": "3 attempts, 2 skipped: skipped treated as failure -> ineffective",
+      "topic_attempts": [
+        { "id": "a1", "outcome_status": "completed" },
+        { "id": "a2", "outcome_status": "skipped" },
+        { "id": "a3", "outcome_status": "skipped" }
+      ],
+      "expected": {
+        "evaluation_status": "ineffective",
+        "improvement_score": -0.5,
+        "evaluation_note": "follow-up attempts did not improve",
+        "observed_attempt_count": 3,
+        "evaluated": true,
+        "outcome_snapshot": {
+          "success_count": 1,
+          "failure_count": 2
+        }
+      }
+    }
+  ]
+}

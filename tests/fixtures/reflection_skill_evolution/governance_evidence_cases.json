@@ -1,0 +1,110 @@
+{
+  "description": "Governance evidence snapshot contracts: expected fields and structure for each proposal source",
+  "note": "The curator's _proposal_event_data() reads: proposal_source (source), source_proposal_id (source_skill_patch_request_id), source_artifact_id, lineage_id (source_artifact_lineage_id), recommendation_id",
+  "proposal_sources": [
+    {
+      "source": "skill_patch_request_realization",
+      "trusted_for_auto_stage": true,
+      "minimum_required_keys": [
+        "source",
+        "source_skill_patch_request_id",
+        "skill_name",
+        "scope"
+      ],
+      "optional_keys": [
+        "recommendation_id",
+        "source_artifact_id",
+        "source_artifact_lineage_id"
+      ],
+      "example": {
+        "source": "skill_patch_request_realization",
+        "source_skill_patch_request_id": "patch-001",
+        "recommendation_id": "rec-001",
+        "source_artifact_id": "artifact-001",
+        "source_artifact_lineage_id": "lineage-001",
+        "skill_name": "matrix_multiplication_explainer",
+        "scope": "goal:goal-001"
+      }
+    },
+    {
+      "source": "skill_curator_merge_recommendation",
+      "trusted_for_auto_stage": true,
+      "minimum_required_keys": [
+        "source",
+        "recommendation_id",
+        "recommendation_reason_code",
+        "source_artifact_id",
+        "merge_artifact_ids",
+        "evidence_snapshot",
+        "metrics_snapshot"
+      ],
+      "example": {
+        "source": "skill_curator_merge_recommendation",
+        "recommendation_id": "rec-merge-001",
+        "recommendation_reason_code": "coverage_overlap",
+        "source_artifact_id": "artifact-001",
+        "source_artifact_lineage_id": "lineage-001",
+        "merge_artifact_ids": ["artifact-002", "artifact-003"],
+        "evidence_snapshot": {"conflict_count": 2},
+        "metrics_snapshot": {"coverage_score": 0.65}
+      }
+    },
+    {
+      "source": "skill_curator_recommendation",
+      "trusted_for_auto_stage": false,
+      "minimum_required_keys": [
+        "source",
+        "recommendation_id",
+        "recommendation_reason_code",
+        "evidence_snapshot",
+        "metrics_snapshot"
+      ],
+      "example": {
+        "source": "skill_curator_recommendation",
+        "recommendation_id": "rec-001",
+        "artifact_id": "artifact-001",
+        "skill_name": "matrix_multiplication_explainer",
+        "scope": "goal:goal-001",
+        "surface": "chat",
+        "recommendation_reason_code": "patch_needed",
+        "evidence_snapshot": {"ineffective_count": 3},
+        "metrics_snapshot": {"score_delta": -0.2}
+      }
+    },
+    {
+      "source": "reflection_direct",
+      "trusted_for_auto_stage": false,
+      "minimum_required_keys": [
+        "source",
+        "reflection_record_id",
+        "learner_goal_id"
+      ],
+      "example": {
+        "source": "reflection_direct",
+        "reflection_record_id": "reflect-001",
+        "learner_goal_id": "goal-001"
+      }
+    }
+  ],
+  "curator_event_data_fields": {
+    "description": "Fields the curator emits in audit events via _proposal_event_data()",
+    "fields": [
+      "proposal_id",
+      "proposal_status",
+      "proposal_type",
+      "learner_goal_id",
+      "source_proposal_id",
+      "proposal_source",
+      "evaluation_id",
+      "evaluation_status",
+      "sandbox_run_id",
+      "sandbox_run_status",
+      "score_delta",
+      "reason_code",
+      "reason_note",
+      "source_artifact_id",
+      "lineage_id",
+      "recommendation_id"
+    ]
+  }
+}

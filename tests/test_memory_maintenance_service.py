@@ -153,8 +153,6 @@ class StubMemoryService:
 
     async def _run(self, job_type: str, cursor: str | None, batch_size: int) -> MemoryMaintenanceBatchResult:
         self.calls.append((job_type, cursor, batch_size))
-        with open("/tmp/calls.txt", "a") as f:
-            f.write(job_type + "\n")
         if job_type in self.validation_fail_job_types:
             raise ValidationError(f"{job_type} invalid")
         if job_type in self.fail_job_types:

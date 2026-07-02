@@ -276,7 +276,7 @@ class TaskRuntimeSkillService:
         overlay = await self._rollout_resolver.get_active_overlay(
             learner_goal_id=learner_goal_id,
             surface=surface,
-            include_staged=True,
+            include_staged=False,
         )
         if overlay is not None:
             return dict(overlay.payload)
@@ -290,7 +290,7 @@ class TaskRuntimeSkillService:
         topic_key: str | None = None,
         task_type: str | None = None,
         trigger_source: str | None = None,
-        include_staged: bool = True,
+        include_staged: bool = False,
     ) -> ActiveGoalSkillBinding | None:
         """Resolve the active skill binding for a surface."""
         if self._goal_skill_binding_resolver is None:

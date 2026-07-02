@@ -333,7 +333,7 @@ async def test_get_rollout_overlay_payload(runtime_skill_service, mock_rollout_r
     mock_rollout_resolver.get_active_overlay.assert_called_once_with(
         learner_goal_id="g1",
         surface="s1",
-        include_staged=True,
+        include_staged=False,
     )
 
 
@@ -357,7 +357,7 @@ async def test_get_skill_binding(runtime_skill_service, mock_goal_skill_binding_
         topic_key=None,
         task_type=None,
         trigger_source=None,
-        include_staged=True,
+        include_staged=False,
     )
 
 

@@ -811,6 +811,42 @@ class MemoryService:
     def _behavior_promotion_readiness(self, memory: BehaviorMemory, quality_score: float) -> str:
         return _quality.behavior_promotion_readiness(memory, quality_score, self._governance_config)
 
+    def _quality_reasons(
+        self,
+        *,
+        memory: KnowledgeMemory | BehaviorMemory,
+        quality_score: float,
+        readiness: str,
+    ) -> list[str]:
+        """Return the list of reason codes for a memory's quality assessment."""
+        return _quality.quality_reasons(memory=memory, quality_score=quality_score, readiness=readiness)
+
+    def _is_knowledge_promotion_candidate(self, memory: KnowledgeMemory) -> bool:
+        """Return True if the knowledge memory is ready for promotion.
+
+        A memory is NOT a candidate if:
+        - Promotion readiness is not ``ready``.
+        - Validation status is ``contested``.
+        """
+        if getattr(memory, "validation_status", None) == "contested":
+            return False
+        quality_score = _quality.knowledge_quality_score(memory)
+        readiness = _quality.knowledge_promotion_readiness(memory, quality_score, self._governance_config)
+        return readiness == "ready"
+
+    def _is_behavior_promotion_candidate(self, memory: BehaviorMemory) -> bool:
+        """Return True if the behavior memory is ready for promotion.
+
+        A memory is NOT a candidate if:
+        - Promotion readiness is not ``ready``.
+        - Validation status is ``contested``.
+        """
+        if getattr(memory, "validation_status", None) == "contested":
+            return False
+        quality_score = _quality.behavior_quality_score(memory)
+        readiness = _quality.behavior_promotion_readiness(memory, quality_score, self._governance_config)
+        return readiness == "ready"
+
     async def _govern_knowledge_status(
         self,
         memory: KnowledgeMemory,

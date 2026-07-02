@@ -1,0 +1,140 @@
+{
+  "description": "Curator auto-governance gate matrix: each condition that can prevent auto-staging",
+  "trusted_sources": [
+    "skill_patch_request_realization",
+    "skill_curator_merge_recommendation"
+  ],
+  "untrusted_sources": [
+    "reflection_direct",
+    "skill_curator_recommendation",
+    null
+  ],
+  "config_defaults": {
+    "auto_staging_enabled": false,
+    "auto_stage_score_delta_min": 0.10,
+    "auto_stage_24h_limit": 3
+  },
+  "sandbox_phase_gates": [
+    {
+      "name": "high_risk_suspended",
+      "gate": "risk_level == high",
+      "expected_outcome": "suspended",
+      "reason_code": "risk_level_high",
+      "audit_event_type": "reflection.proposal.manual_review_required"
+    },
+    {
+      "name": "failed_sandbox_run_rejected",
+      "gate": "existing sandbox_run.status == failed",
+      "expected_outcome": "rejected",
+      "reason_code": "sandbox_failed",
+      "audit_event_type": "reflection.proposal.auto_rejected"
+    },
+    {
+      "name": "cancelled_sandbox_run_rejected",
+      "gate": "existing sandbox_run.status == cancelled",
+      "expected_outcome": "rejected",
+      "reason_code": "sandbox_failed",
+      "audit_event_type": "reflection.proposal.auto_rejected"
+    }
+  ],
+  "auto_stage_gates": [
+    {
+      "name": "high_risk_suspended",
+      "gate": "risk_level == high",
+      "expected_outcome": "suspended",
+      "reason_code": "risk_level_high",
+      "audit_event_type": "reflection.proposal.auto_staging_suspended"
+    },
+    {
+      "name": "approved_by_missing_suspended",
+      "gate": "approved_by is None (status=approved)",
+      "expected_outcome": "suspended",
+      "reason_code": "approved_by_missing",
+      "audit_event_type": "reflection.proposal.auto_staging_suspended"
+    },
+    {
+      "name": "approved_by_non_system_suspended",
+      "gate": "approved_by != 'system' (human operator approved)",
+      "expected_outcome": "suspended",
+      "reason_code": "approved_by_non_system",
+      "audit_event_type": "reflection.proposal.auto_staging_suspended"
+    },
+    {
+      "name": "non_trusted_source_suspended",
+      "gate": "evidence_snapshot source not in TRUSTED_AUTO_STAGE_SOURCES",
+      "expected_outcome": "suspended",
+      "reason_code": "non_replacement_source",
+      "audit_event_type": "reflection.proposal.auto_staging_suspended"
+    },
+    {
+      "name": "missing_sandbox_run_rejected",
+      "gate": "sandbox_run is None (auto-stage candidate)",
+      "expected_outcome": "rejected",
+      "reason_code": "missing_sandbox_run",
+      "audit_event_type": "reflection.proposal.auto_rejected"
+    },
+    {
+      "name": "sandbox_failed_rejected",
+      "gate": "sandbox_run.status in failed/cancelled",
+      "expected_outcome": "rejected",
+      "reason_code": "sandbox_failed",
+      "audit_event_type": "reflection.proposal.auto_rejected"
+    },
+    {
+      "name": "missing_evaluation_rejected",
+      "gate": "evaluation is None",
+      "expected_outcome": "rejected",
+      "reason_code": "missing_evaluation",
+      "audit_event_type": "reflection.proposal.auto_rejected"
+    },
+    {
+      "name": "evaluation_ineffective_rejected",
+      "gate": "evaluation.evaluation_status == ineffective",
+      "expected_outcome": "rejected",
+      "reason_code": "evaluation_ineffective",
+      "audit_event_type": "reflection.proposal.auto_rejected"
+    },
+    {
+      "name": "evaluation_inconclusive_rejected",
+      "gate": "evaluation.evaluation_status == inconclusive",
+      "expected_outcome": "rejected",
+      "reason_code": "evaluation_inconclusive",
+      "audit_event_type": "reflection.proposal.auto_rejected"
+    },
+    {
+      "name": "negative_score_delta_rejected",
+      "gate": "evaluation.score_delta < 0",
+      "expected_outcome": "rejected",
+      "reason_code": "negative_score_delta",
+      "audit_event_type": "reflection.proposal.auto_rejected"
+    },
+    {
+      "name": "score_delta_below_threshold_suspended",
+      "gate": "0 <= evaluation.score_delta < 0.10",
+      "expected_outcome": "suspended",
+      "reason_code": "score_delta_below_threshold",
+      "audit_event_type": "reflection.proposal.auto_staging_suspended"
+    },
+    {
+      "name": "auto_staging_disabled_suspended",
+      "gate": "config.auto_staging_enabled == False (default)",
+      "expected_outcome": "suspended",
+      "reason_code": "auto_staging_disabled",
+      "audit_event_type": "reflection.proposal.auto_staging_suspended"
+    },
+    {
+      "name": "savepoint_unavailable_suspended",
+      "gate": "db_session is None or no begin_nested",
+      "expected_outcome": "suspended",
+      "reason_code": "savepoint_unavailable",
+      "audit_event_type": "reflection.proposal.auto_staging_suspended"
+    },
+    {
+      "name": "rate_limit_reached_suspended",
+      "gate": "staged_count_24h >= auto_stage_24h_limit (3)",
+      "expected_outcome": "suspended",
+      "reason_code": "auto_stage_24h_limit_reached",
+      "audit_event_type": "reflection.proposal.auto_staging_suspended"
+    }
+  ]
+}

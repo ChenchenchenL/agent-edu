@@ -16,6 +16,7 @@ from agent_core.api.dependencies import (
     get_skill_replacement_staging_service,
     get_skill_resolver,
     get_skill_usage_service,
+    get_runtime_explain_service,
     require_operator_api_key,
 )
 from agent_core.application.services.audit import AuditService
@@ -28,6 +29,7 @@ from agent_core.application.services.skills import (
     SkillReplacementStagingService,
     SkillResolver,
     SkillUsageService,
+    RuntimeExplainService,
 )
 from agent_core.application.skills.registry import SkillRegistry
 from agent_core.domain.schemas.skill import (
@@ -49,6 +51,7 @@ from agent_core.domain.schemas.skill import (
     StabilizeSkillArtifactRequest,
     SuppressSkillArtifactRequest,
     SkillUsageEventResponse,
+    RuntimeBindingExplainResponse,
 )
 
 router = APIRouter(tags=["skills"])
@@ -448,6 +451,33 @@ async def list_skill_artifact_lineage(
 ) -> list[SkillArtifactResponse]:
     artifacts = await service.list_lineage(artifact_id, limit=limit)
     return [SkillArtifactResponse.model_validate(item) for item in artifacts]
+
+
+@router.get(
+    "/skill-runtime-binding/explain",
+    response_model=RuntimeBindingExplainResponse,
+    dependencies=[Depends(require_operator_api_key)],
+)
+async def explain_runtime_binding(
+    skill_name: str = Query(..., max_length=128),
+    surface: str = Query(..., max_length=64),
+    learner_goal_id: str | None = Query(default=None, max_length=36),
+    topic_key: str | None = Query(default=None, max_length=128),
+    task_type: str | None = Query(default=None, max_length=64),
+    trigger_source: str | None = Query(default=None, max_length=64),
+    include_staged: bool = Query(default=False),
+    service: RuntimeExplainService = Depends(get_runtime_explain_service),
+) -> RuntimeBindingExplainResponse:
+    result = await service.explain(
+        learner_goal_id=learner_goal_id,
+        skill_name=skill_name,
+        surface=surface,
+        topic_key=topic_key,
+        task_type=task_type,
+        trigger_source=trigger_source,
+        include_staged=include_staged,
+    )
+    return RuntimeBindingExplainResponse.model_validate(result)
 
 
 @router.get(

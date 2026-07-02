@@ -155,7 +155,7 @@ class ChatService:
                 surface=payload.mode or "chat",
                 topic_key=session.subject,
                 trigger_source=payload.mode,
-                include_staged=True,
+                include_staged=False,
             )
         runtime_plan = await self._resolve_runtime_plan(
             learner_goal_id=session.learner_goal_id,
@@ -308,7 +308,7 @@ class ChatService:
             rollout_overlay = await self._rollout_resolver.get_active_overlay(
                 learner_goal_id=session.learner_goal_id,
                 surface=payload.mode,
-                include_staged=True,
+                include_staged=False,
             )
         return _ChatRuntimeContext(
             session=session,
@@ -725,7 +725,7 @@ class ChatService:
             resource_id=resource_id,
             topic_key=topic_key,
             trigger_source=trigger_source,
-            include_staged=True,
+            include_staged=False,
         )
 
     async def _record_skill_usage(
@@ -1061,7 +1061,7 @@ class ChatService:
         overlay = await self._rollout_resolver.get_active_overlay(
             learner_goal_id=learner_goal_id,
             surface="hint",
-            include_staged=True,
+            include_staged=False,
         )
         if overlay is None:
             return None

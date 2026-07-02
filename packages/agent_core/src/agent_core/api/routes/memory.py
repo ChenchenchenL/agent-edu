@@ -265,6 +265,25 @@ async def build_memory_interpretation(
     return MemoryInterpretationResponse.model_validate(result)
 
 
+@router.get("/memory/{memory_type}/{memory_id}/conflicts", response_model=list[MemoryConflictSetResponse])
+async def list_conflicts_for_memory(
+    memory_type: str,
+    memory_id: str,
+    _: str = Depends(require_operator_api_key),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[MemoryConflictSetResponse]:
+    from agent_core.infrastructure.db.repositories.memory_conflict import MemoryConflictMemberRepository, MemoryConflictSetRepository
+    member_repo = MemoryConflictMemberRepository(session)
+    set_repo = MemoryConflictSetRepository(session)
+    members = await member_repo.find_by_memory_id(memory_id)
+    result = []
+    for m in members:
+        cset = await set_repo.get(m.conflict_set_id)
+        if cset:
+            result.append(MemoryConflictSetResponse.model_validate(cset))
+    return result
+
+
 @router.get("/memory/conflicts", response_model=list[MemoryConflictSetResponse])
 async def list_memory_conflicts(
     learner_profile_id: str = Query(min_length=1, max_length=36),

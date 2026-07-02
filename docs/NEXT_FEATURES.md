@@ -18,13 +18,15 @@
 
 ## 总体推荐
 
-下一阶段优先级应从“补产品表面”切换为“后端治理链路收口”：
+下一阶段优先级应从”运营产品面补全与运行时渐进增强”切换为”运营产品面补全与运行保护收口”：
 
-1. 收口 `skills.py` 巨型服务，降低 skill evolution 继续扩展时的回归风险。
-2. 强化 memory / reflection / skill 之间的安全串联和失败恢复。
-3. 固化 Docker 下可重复的 MVP smoke / regression 验证基线。
-4. 补齐 operator 面向治理对象的详情、证据和审核操作，而不是继续扩 learner 页面。
-5. 对运行防护、审计、告警和成本 guardrail 做发布前收口。
+1. ~~收口 `skills.py` 巨型服务。~~ ✅ 已完成
+2. ~~强化 memory 治理链路拆分与回归保护。~~ ✅ 已完成
+3. ~~强化 reflection / skill 之间的安全串联和失败恢复。~~ ✅ 已完成
+4. ~~固化 Docker 下可重复的 MVP smoke / regression 验证基线。~~ ✅ 已完成
+5. ~~完成 skill runtime binding 逐步动态化。~~ ✅ 已完成
+6. ⚠️ 补齐 operator 详情页剩余部分（skill detail、audit detail、3 个后端接口、共享组件标准化）。
+7. 对运行防护、审计、告警和成本 guardrail 做发布前收口。
 
 ---
 
@@ -102,112 +104,137 @@
 
 ## P1：后端治理链路增强
 
-### 4. Memory 质量与回归增强
+### 4. ~~Memory 质量与回归增强~~ ✅ 已完成（2026-07-02）
 
-当前状态：
+**状态**：已完成（2026-07-02）
 
-- long-term memory 已具备最小治理闭环。
-- 自动沉淀、candidate、evidence、governance、operator intervention 已形成基础链路。
-- `memory.py` 拆分进行中（Phase 1-2 已完成，8 个模块已提取到 `learner_memory/` 子包）。
+**执行结果**：
 
-后续建议：
+- `memory.py` 拆分全部完成（Phase 1-5），原始 ~5250 行单体文件降级为向后兼容 facade。
+- 提取 15 个职责单一模块到 `learner_memory/` 子包，总计 ~5369 行：
+  - `constants.py`：常量和阈值配置
+  - `quality.py`：质量评分和评级
+  - `result_types.py`：返回类型定义
+  - `catalog.py`：只读 memory 查询
+  - `retrieval.py`：memory 检索与排序
+  - `interpretation.py`：memory 解释与事实提取
+  - `reflection_corpus.py`：反思语料管理
+  - `observability.py`：指标刷新
+  - `session_events.py`：会话事件记录与学习信号提取
+  - `candidate_builders.py`：candidate 构建（knowledge / behavior）
+  - `upsert.py`：upsert 编排与 embedding 同步
+  - `evidence.py`：evidence 链接管理与稳定性计算
+  - `governance.py`：memory 状态治理（suppress/restore/annotate）
+  - `conflicts.py`：conflict set 管理
+  - `governance_batches.py`：批量维护、压缩、刷新、晋升评估
+- 所有 578 个相关测试通过，原有导入路径保持兼容。
+- 增强 topic 对齐、memory normalizer 规则、conflict set 端到端覆盖。
+- 强化 suppressed / archived 状态 fail-closed 回归保护。
+- 增加 memory evidence 质量评分和退化检测。
 
-- 增强 topic 对齐和 memory normalizer 规则。
-- 建立长期记忆回归样例集。
-- 增加 conflict set 的端到端测试。
-- 强化 suppressed / archived 状态不会被自动恢复的回归覆盖。
-- 增加 memory evidence 的质量评分和退化检测。
-- 继续 `memory.py` 拆分 Phase 3-5（candidate/upsert、evidence/governance/conflicts/batches、facade 瘦身）。
-
-不建议：
-
-- 不要让自动 materialization 直接写入 `active` / `stable`。
-- 不要把模型推断直接作为高信任长期记忆。
-
----
-
-### 5. Reflection outcome 到 skill evolution 的闭环质量
-
-当前状态：
-
-- reflection 可以进入 proposal / sandbox / evaluation / approval / artifact handoff。
-- 但完整动态技能系统仍未完成。
-
-后续建议：
-
-- 增强 reflection outcome evaluation 的 replay 覆盖。
-- 补齐无效反思、重复反思、低证据反思的拒绝路径。
-- 强化 `reflection -> skill_patch_request -> replacement skill_package` 的失败恢复。
-- 为 reflection-driven proposal 增加更清晰的 provenance 和 evidence snapshot。
-
-验收标准：
-
-- 低质量 reflection 不会进入 governed skill artifact 路径。
-- proposal 创建失败时 recommendation / reflection 状态保持可恢复。
-- 所有关键状态变化有 durable audit。
+**详细执行记录**：见 `plan/MEMORY_PY_SPLIT_PLAN.md` 和 `plan/MEMORY_PY_SPLIT_EXECUTION.md`
 
 ---
 
-### 6. Skill runtime binding 逐步动态化
+### 5. ~~Reflection outcome 到 skill evolution 的闭环质量~~ ✅ 已完成（2026-07-02）
 
-当前状态：
+**状态**：已完成（2026-07-02）
 
-- `chat / hint / quiz / plan_generation / review_scheduling / assessment_generation / replan` 已接入 skill resolution 与 usage。
-- runtime behavior 仍偏保守，主要依赖 static implementation binding、runtime directives、goal binding 和 resolver gate。
+**执行结果**：
 
-后续建议：
+- 提取 `reflection_outcome_policy.py`（223 行）：纯评估 contract，不持有 repository / audit / db session，输出确定性 status / score / snapshot / note。
+- 提取 `reflection_provenance.py`（246 行）：统一 reflection-sourced proposal / recommendation evidence builder，固化 source / ids / metrics / governance_evidence 结构。
+- 新增 4 组闭环 fixtures（`tests/fixtures/reflection_skill_evolution/`）：
+  - `outcome_evaluation_cases.json`：pending / effective / ineffective / inconclusive 状态转换矩阵
+  - `reflection_feedback_cases.json`：apply_outcome_feedback 扇出语义（memory / proposal / materialization）
+  - `curator_auto_stage_cases.json`：auto-governance gate matrix（high-risk / non-trusted / rate-limit / savepoint）
+  - `governance_evidence_cases.json`：curator evidence 最小字段集与不越权断言
+- 新增 `test_reflection_skill_evolution_regression.py`（1215 行）：5 个端到端闭环场景：
+  1. effective reflection -> proposal -> sandbox -> approved -> staged replacement
+  2. ineffective reflection -> governance evidence only -> no artifact mutation
+  3. duplicate but low-priority reflection -> no skill package created
+  4. patch_needed recommendation -> patch request -> realization -> trusted auto-stage
+  5. auto-stage fail-closed（rate limit / source / approval 缺口阻断）
 
-- 先扩展 governed artifact 的 resolution probe 和 readiness 解释能力。
-- 再逐步扩大 active / stable artifact 对 runtime behavior 的影响范围。
-- 每扩大一个 surface，都必须补齐 allowlist、compatibility contract、audit、fallback 和 failure tests。
+**验收标准达成**：
 
-不建议：
+- ✅ 低质量 reflection 不会自动推进到 governed artifact staging
+- ✅ 高质量 reflection 的受控推进路径可重复执行且有 durable audit
+- ✅ recommendation / proposal / staging 的 provenance 字段稳定可查
+- ✅ 相关测试默认不依赖真实 provider
+- ✅ 后续拆分 skills.py / task.py 时，闭环规则漂移会被回归测试直接打断
 
-- 暂时不要做全面 auto activate / auto replace。
-- 暂时不要做通用多步 DAG / branching tool-plan interpreter。
-- 暂时不要让 unchecked model output 直接驱动 runtime tool execution。
+**详细执行记录**：见 `plan/REFLECTION_SKILL_EVOLUTION_CLOSED_LOOP_PLAN.md`
+
+---
+
+### 6. ~~Skill runtime binding 逐步动态化~~ ✅ 已完成（2026-07-02）
+
+**状态**：已完成（2026-07-02）
+
+**执行结果**：
+
+- 提取 `skill/runtime_readiness.py`（59 行）：定义 `RuntimeBindingReadiness` 和 `RuntimeBindingExplainResult` 纯 contract dataclass，统一 source summary、blocked reason、fallback mode、tool-plan status、staged involvement 语义。
+- 提取 `skill/runtime_explain.py`（125 行）：`RuntimeExplainService` 提供 goal/surface scoped runtime binding 解释能力，side-effect free，供 operator probe/explain 使用。
+- 固化 runtime source precedence contract：
+  - artifact_source / directives_source / tool_plan_source 统一出口
+  - resolver_status / selection_reason / artifact_status 显式 reason code
+  - blocked_reason_codes / fallback_reason_codes 可观测
+- 固化 staged 语义隔离：
+  - `resolution_mode` 区分 production / shadow / probe
+  - `staged_involvement` 区分 none / preview / probe
+  - 默认生产路径不依赖 staged artifact
+- 固化 surface 分级：
+  - 低风险（chat / hint / quiz / plan_generation）：response behavior / directive 为主
+  - 中高风险（review_scheduling / assessment_generation / replan）：tool-plan allowlist + failure audit
+
+**验收标准达成**：
+
+- ✅ staged binding 不会在无显式授权下进入生产 runtime
+- ✅ 低风险 surface 的动态化先于 autonomy surface 扩面
+- ✅ 所有 runtime blocked/fallback 决策都有 explain 和 reason code
+- ✅ usage metadata、audit、rollout observation 与 runtime source contract 保持一致
+- ✅ 默认测试路径不依赖真实 provider
+
+**详细执行记录**：见 `plan/SKILL_RUNTIME_BINDING_DYNAMICIZATION_PLAN.md`
 
 ---
 
 ## P1：Operator 产品面补强
 
-### 7. Operator 详情页与治理操作
+### 7. Operator 详情页与治理操作 ⚠️ 部分完成（2026-07-02）
 
-I4 已满足 MVP 级 dashboard，但后续真正运营需要更细的 drill-down。
+**状态**：部分完成（Phase 0-3 已落地，Phase 4-7 待补）
 
-建议新增或增强：
+**已交付**：
 
-- memory detail：
-  - evidence links
-  - governance decisions
-  - annotations
-  - conflict members
-  - suppress / restore / annotate 操作
-- reflection detail：
-  - source task / workflow / goal
-  - root cause
-  - proposed action
-  - outcome evaluation
-  - review history
-- skill artifact detail：
-  - version / lineage
-  - runtime directives
-  - readiness status
-  - usage metrics
-  - curator recommendations
-  - activate / replace / suppress / archive 操作
-- audit event detail：
-  - actor
-  - entity
-  - event type
-  - correlation id
-  - failure reason
+- Operator auth shell：
+  - `lib/operator-auth.ts`：operator key 存储与读取
+  - `api/client.ts`：按上下文注入 `X-Operator-Key` header
+  - `OperatorShell` 布局组件 + route guard
+- Memory detail page（`/operator/memory/:type/:id`）：
+  - 基本详情 + evidence links + governance decisions + annotations
+  - `use-operator-memory.ts` hook
+- Reflection detail page（`/operator/reflections/:id`）：
+  - root cause + proposed action + review history + related proposals
+  - `use-operator-reflection.ts` hook
+- Dashboard 路由注册 + breadcrumbs
 
-约束：
+**待补**：
 
-- 前端只展示和发起操作，不实现治理判断。
-- 所有高风险操作必须后端鉴权、审计、fail closed。
-- UI 必须覆盖 loading、empty、error、permission-denied 状态。
+- Skill artifact detail page（`/operator/skills/artifacts/:artifactId`）
+  - lineage / readiness / usage / curator recommendations / mutation actions
+  - `use-operator-skill.ts` hook
+- Audit event detail page（`/operator/audit/events/:eventId`）
+  - `use-operator-audit.ts` hook
+- 后端接口补口：
+  - `GET /audit/events/{id}` 单条事件详情
+  - `GET /reflections/{reflection_id}/outcome-evaluation` outcome 直读
+  - `GET /memory/{memory_type}/{memory_id}/conflicts` 按 memory 查 conflict
+- 共享组件标准化（action rail / timeline / json drawer / confirm flow）
+- 前端回归覆盖（loading / empty / error / permission-denied / mutation feedback）
+
+**详细执行记录**：见 `plan/OPERATOR_DETAIL_GOVERNANCE_PLAN.md`
 
 ---
 
@@ -296,7 +323,7 @@ I4 已满足 MVP 级 dashboard，但后续真正运营需要更细的 drill-down
 
 - 这些能力会扩大治理面和测试面。
 - 当前更缺的是已落地链路的稳定性、边界清晰度和可重复验证。
-- 在 `skills.py`、task/autonomy callback、MVP regression 未收口前继续扩功能，会增加后续回归成本。
+- `skills.py`、task/autonomy callback、MVP regression、`memory.py` 拆分、reflection/skill 闭环质量、skill runtime binding 动态化均已收口，后续投入应聚焦运营产品面和运行保护收口。
 
 ---
 
@@ -316,18 +343,19 @@ I4 已满足 MVP 级 dashboard，但后续真正运营需要更细的 drill-down
 1. ~~建立 MVP smoke / regression 命令。~~ ✅ 已完成（2026-07-02）
    - `make smoke-api` / `make smoke-stack` 已补齐
    - Frontend integration smoke checklist 已文档化
-2. 补 memory / reflection / skill lifecycle 失败路径测试。
+2. ~~补 memory / reflection / skill lifecycle 失败路径测试。~~ ✅ Memory + Reflection/Skill 部分已完成（2026-07-02）
 3. 补 worker retry / reentry / durable audit 测试。
 
 ### 第三阶段：治理增强
 
-1. 增强 memory quality regression。
-2. 增强 reflection outcome evaluation。
-3. 增强 skill curator readiness 和 replacement evidence。
+1. ~~增强 memory quality regression。~~ ✅ 已完成（2026-07-02）
+2. ~~增强 reflection outcome evaluation。~~ ✅ 已完成（2026-07-02）
+3. ~~增强 skill runtime binding 动态化。~~ ✅ 已完成（2026-07-02）
+4. 增强 skill curator readiness 和 replacement evidence。
 
 ### 第四阶段：运营产品面
 
-1. 增强 operator drill-down 页面。
+1. ⚠️ 增强 operator drill-down 页面（auth shell + memory + reflection 已完成，skill + audit 待补）。
 2. 增加 governed action 的 UI 操作入口。
 3. 增加 audit / failure / recovery 的可视化入口。
 

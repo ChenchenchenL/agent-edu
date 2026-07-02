@@ -44,6 +44,9 @@ from agent_core.application.services.skill import (
     SkillReplacementStagingService,
     SkillResolver,
     SkillUsageService,
+    RuntimeExplainService,
+    RuntimeBindingExplainResult,
+    RuntimeBindingReadiness,
     matches_rollout_metadata,
     refresh_skill_observability_metrics,
 )
@@ -84,6 +87,9 @@ __all__ = [
     "SkillReplacementStagingService",
     "SkillResolver",
     "SkillUsageService",
+    "RuntimeExplainService",
+    "RuntimeBindingExplainResult",
+    "RuntimeBindingReadiness",
     "matches_rollout_metadata",
     "refresh_skill_observability_metrics",
 ]

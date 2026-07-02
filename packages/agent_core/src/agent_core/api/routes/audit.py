@@ -24,3 +24,16 @@ async def list_audit_events(
         limit=limit,
     )
     return [AuditEventResponse.model_validate(e) for e in events]
+
+
+@router.get("/audit/events/{event_id}", response_model=AuditEventResponse)
+async def get_audit_event(
+    event_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> AuditEventResponse:
+    from fastapi import HTTPException
+    repo = AuditRepository(session)
+    event = await repo.get(event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="Audit event not found")
+    return AuditEventResponse.model_validate(event)

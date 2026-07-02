@@ -303,3 +303,17 @@ class AcceptSkillCuratorRecommendationRequest(BaseModel):
 class DismissSkillCuratorRecommendationRequest(BaseModel):
     reason_code: str = Field(min_length=1, max_length=128)
     reason_note: str | None = Field(default=None, max_length=2000)
+
+
+class RuntimeBindingExplainResponse(BaseModel):
+    skill_name: str
+    surface: str
+    source_summary: dict[str, Any]
+    resolution_summary: dict[str, Any]
+    binding_summary: dict[str, Any] | None
+    rollout_summary: dict[str, Any] | None
+    tool_plan_summary: dict[str, Any] | None
+    blocked_reason_codes: list[str]
+    fallback_reason_codes: list[str]
+
+    model_config = {"from_attributes": True}

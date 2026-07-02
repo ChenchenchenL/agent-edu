@@ -107,6 +107,21 @@ async def get_reflection(
     return await service.get_reflection(reflection_id)
 
 
+@router.get("/reflections/{reflection_id}/outcome-evaluation")
+async def get_reflection_outcome_evaluation(
+    reflection_id: str,
+    session: AsyncSession = Depends(get_db_session),
+    context: AccessContext = Depends(get_access_context),
+):
+    from agent_core.infrastructure.db.repositories.reflection_outcome_evaluation import ReflectionOutcomeEvaluationRepository
+    await require_reflection_access(reflection_id, context, session)
+    repo = ReflectionOutcomeEvaluationRepository(session)
+    eval = await repo.find_by_reflection(reflection_id)
+    if not eval:
+        raise HTTPException(status_code=404, detail="Outcome evaluation not found")
+    return eval
+
+
 @router.get("/reflections/{reflection_id}/reviews", response_model=list[ReflectionReviewDecisionResponse])
 async def list_reflection_reviews(
     reflection_id: str,

@@ -1,0 +1,94 @@
+{
+  "description": "apply_outcome_feedback() fan-out matrix: which downstream actions are triggered for each evaluation_status",
+  "note": "inconclusive and pending are both no-ops in apply_outcome_feedback(). ineffective raises priority more than effective.",
+  "cases": [
+    {
+      "name": "pending_is_noop",
+      "description": "pending evaluation: apply_outcome_feedback returns immediately without any fan-out",
+      "evaluation_status": "pending",
+      "expected": {
+        "applies_feedback": false,
+        "strategy_card_refreshed": false,
+        "reflective_memory_promoted": false,
+        "memory_bridge_called": false,
+        "materialization_triggered": false,
+        "proposal_replay_triggered": false,
+        "skill_package_created": false,
+        "status_changed_to_needs_review": false
+      }
+    },
+    {
+      "name": "inconclusive_is_noop",
+      "description": "inconclusive evaluation: same as pending, apply_outcome_feedback returns without fan-out",
+      "evaluation_status": "inconclusive",
+      "expected": {
+        "applies_feedback": false,
+        "strategy_card_refreshed": false,
+        "reflective_memory_promoted": false,
+        "memory_bridge_called": false,
+        "materialization_triggered": false,
+        "proposal_replay_triggered": false,
+        "skill_package_created": false,
+        "status_changed_to_needs_review": false
+      }
+    },
+    {
+      "name": "effective_triggers_all_downstream",
+      "description": "effective evaluation: all downstream actions triggered (with services available)",
+      "evaluation_status": "effective",
+      "starting_priority_score": 0.5,
+      "starting_duplicate_count": 2,
+      "expected": {
+        "applies_feedback": true,
+        "priority_delta": 0.1,
+        "strategy_card_refreshed": true,
+        "reflective_memory_promoted": true,
+        "memory_bridge_called": true,
+        "materialization_triggered": true,
+        "proposal_replay_triggered": true,
+        "skill_package_created": true,
+        "status_changed_to_needs_review": false
+      }
+    },
+    {
+      "name": "effective_no_skill_package_below_threshold",
+      "description": "effective but priority_score < 0.7 after delta: no skill package created",
+      "evaluation_status": "effective",
+      "starting_priority_score": 0.4,
+      "starting_duplicate_count": 2,
+      "expected": {
+        "applies_feedback": true,
+        "priority_delta": 0.1,
+        "skill_package_created": false,
+        "comment": "0.4 + 0.1 = 0.5, still below 0.7 threshold"
+      }
+    },
+    {
+      "name": "effective_no_skill_package_no_duplicates",
+      "description": "effective with high priority_score but duplicate_count=0: no skill package created",
+      "evaluation_status": "effective",
+      "starting_priority_score": 0.9,
+      "starting_duplicate_count": 0,
+      "expected": {
+        "applies_feedback": true,
+        "skill_package_created": false,
+        "comment": "duplicate_count >= 1 is required"
+      }
+    },
+    {
+      "name": "ineffective_triggers_needs_review",
+      "description": "ineffective evaluation: priority raised more (+0.15), status set to needs_review",
+      "evaluation_status": "ineffective",
+      "starting_priority_score": 0.3,
+      "expected": {
+        "applies_feedback": true,
+        "priority_delta": 0.15,
+        "strategy_card_refreshed": false,
+        "skill_package_created": false,
+        "status_changed_to_needs_review": true,
+        "memory_bridge_called": true,
+        "reflective_memory_promoted": true
+      }
+    }
+  ]
+}
