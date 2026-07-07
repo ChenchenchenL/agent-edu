@@ -5,6 +5,7 @@ import {
   ArrowRight,
   PenLine,
 } from "lucide-react";
+import { MarkdownContent } from "@/components/markdown-content";
 import type { ExplanationPayload } from "@/types/session";
 
 interface ExplanationCardProps {
@@ -24,9 +25,7 @@ export function ExplanationCard({ payload }: ExplanationCardProps) {
           <BookOpen className="h-3 w-3" />
           定义
         </p>
-        <p className="text-xs leading-relaxed text-text-primary">
-          {payload.definition}
-        </p>
+        <MarkdownContent content={payload.definition} className="text-xs" />
       </section>
 
       {payload.core_principles.length > 0 && (
@@ -41,7 +40,7 @@ export function ExplanationCard({ payload }: ExplanationCardProps) {
                 className="flex gap-2 text-xs leading-relaxed text-text-primary"
               >
                 <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-accent-gold" />
-                {principle}
+                <MarkdownContent content={principle} className="text-xs" />
               </li>
             ))}
           </ul>
@@ -54,9 +53,7 @@ export function ExplanationCard({ payload }: ExplanationCardProps) {
             <PenLine className="h-3 w-3" />
             例题
           </p>
-          <p className="text-xs leading-relaxed text-text-primary">
-            {payload.worked_example}
-          </p>
+          <MarkdownContent content={payload.worked_example} className="text-xs" />
         </section>
       )}
 
@@ -66,19 +63,17 @@ export function ExplanationCard({ payload }: ExplanationCardProps) {
             <AlertTriangle className="h-3 w-3 text-error" />
             常见误区
           </p>
-          <p className="text-xs leading-relaxed text-text-secondary">
-            {payload.common_mistake}
-          </p>
+          <MarkdownContent content={payload.common_mistake} className="text-xs text-text-secondary" />
         </section>
       )}
 
       {payload.next_step && (
         <section className="flex items-start gap-2 rounded-md bg-primary-surface/50 px-2.5 py-2">
           <ArrowRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
-          <p className="text-xs leading-relaxed text-text-primary">
+          <div className="text-xs leading-relaxed text-text-primary">
             <span className="font-medium">下一步：</span>
-            {payload.next_step}
-          </p>
+            <MarkdownContent content={payload.next_step} className="inline text-xs" />
+          </div>
         </section>
       )}
     </div>

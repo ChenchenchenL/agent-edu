@@ -66,7 +66,7 @@ async def test_tool_plan_runtime_rejects_unsupported_template_variable() -> None
         audit_service=AuditService(StubAuditRepository()),
     )
 
-    with pytest.raises(ValidationError, match="unsupported template variable"):
+    with pytest.raises(ValidationError, match="fails template validation:.*unsupported_variable"):
         await executor.execute(
             surface="review_scheduling",
             tool_plan=[{"tool_name": "review_scheduling", "payload_template": {"source_task_id": "$learner_goal_id"}}],
@@ -203,7 +203,7 @@ async def test_tool_plan_runtime_rejects_future_step_reference() -> None:
         audit_service=AuditService(StubAuditRepository()),
     )
 
-    with pytest.raises(ValidationError, match="prior step outputs"):
+    with pytest.raises(ValidationError, match="fails template validation:.*forward_reference"):
         await executor.execute(
             surface="replan",
             tool_plan=[

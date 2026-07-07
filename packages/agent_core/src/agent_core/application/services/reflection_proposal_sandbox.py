@@ -15,6 +15,8 @@ from agent_core.application.services.tool_plan_runtime import (
     ToolPlanExecutionContext,
     ToolPlanRuntimeExecutor,
 )
+from agent_core.application.services.plan_template_validation import PlanTemplateValidator
+from agent_core.application.services.plan_template_selector import PlanTemplateSelector
 from agent_core.application.tools.registry import InternalToolRegistry
 from agent_core.domain.entities.message import SessionMessage
 from agent_core.domain.entities.reflection_closure import (
@@ -31,6 +33,7 @@ from agent_core.infrastructure.db.repositories import (
     TaskAttemptRepository,
     WorkflowRunRepository,
 )
+from agent_core.infrastructure.observability.metrics import observe_high_risk_auto_sandbox
 
 
 class ReflectionProposalSandboxService:
@@ -76,6 +79,22 @@ class ReflectionProposalSandboxService:
 
     async def execute(self, *, proposal_id: str) -> ReflectionProposalSandboxRun:
         proposal = await self._proposal_service.get(proposal_id)
+        if proposal.risk_level == "high":
+            # 1. evidence snapshot validation
+            evidence = proposal.evidence_snapshot or {}
+            has_sufficient_evidence = False
+            if len(evidence) >= 2:
+                metric_keys = {"fallback_burst_count", "router_mismatch_count", "sequence_mismatch_count", "mismatch_count", "contested_count", "severity_score"}
+                if any(k in evidence for k in metric_keys) or "usage_event_ids" in evidence or "details" in evidence:
+                    has_sufficient_evidence = True
+            if not has_sufficient_evidence:
+                raise ValidationError("High-risk proposals require higher-quality evidence snapshot containing specific metrics or event details.")
+            
+            # 2. summary detail validation
+            summary = proposal.change_summary or ""
+            if len(summary) < 30:
+                raise ValidationError("High-risk proposals require a detailed change summary (at least 30 characters).")
+
         baseline_snapshot = await self._build_baseline_snapshot(proposal)
         candidate_snapshot = self._build_candidate_snapshot(proposal, baseline_snapshot=baseline_snapshot)
         sample_source_type, sample_count = await self._sample_metadata(proposal)
@@ -106,14 +125,38 @@ class ReflectionProposalSandboxService:
             actor="system",
             event_data={"proposal_id": proposal.id, "sandbox_run_id": started.id},
         )
+        # Phase 6: emit counter for high-risk proposals entering auto-sandbox
+        if proposal.risk_level == "high":
+            observe_high_risk_auto_sandbox(proposal_type=proposal.proposal_type)
         try:
             tool_previews: list[dict[str, object]] = []
             tool_plan_contract_summary: dict[str, object] | None = None
             tool_plan_preview_summary: dict[str, object] | None = None
+            template_validation_summary: dict[str, object] | None = None
             if proposal.proposal_type == "skill_package" and proposal.target_scope in {"review_scheduling", "assessment_generation", "replan"}:
+                raw_tool_plan = [dict(item) for item in proposal.structured_patch_payload.get("tool_plan") or []]
+                validator = PlanTemplateValidator()
+                selector = PlanTemplateSelector()
+                template_candidates = selector.build_candidates_from_legacy_tool_plan(
+                    surface=proposal.target_scope,
+                    tool_plan=raw_tool_plan,
+                )
+                template_rejections: list[list[str]] = []
+                template_validated = False
+                for candidate in template_candidates:
+                    result = validator.validate_template(template=candidate, surface=proposal.target_scope)
+                    if result.valid:
+                        template_validated = True
+                    else:
+                        template_rejections.append(result.rejection_reason_codes)
+                template_validation_summary = {
+                    "validated": template_validated,
+                    "candidate_count": len(template_candidates),
+                    "rejections": template_rejections,
+                }
                 contract = build_tool_plan_sequence_contract(
                     surface=proposal.target_scope,
-                    tool_plan=[dict(item) for item in proposal.structured_patch_payload.get("tool_plan") or []],
+                    tool_plan=raw_tool_plan,
                 )
                 if contract is not None:
                     tool_plan_contract_summary = {
@@ -139,6 +182,7 @@ class ReflectionProposalSandboxService:
                 sandbox_context={
                     "tool_plan_contract_summary": dict(tool_plan_contract_summary or {}),
                     "tool_plan_preview_summary": dict(tool_plan_preview_summary or {}),
+                    "template_validation_summary": dict(template_validation_summary or {}),
                 },
             )
             summary = {
@@ -154,6 +198,7 @@ class ReflectionProposalSandboxService:
                 "tool_plan_step_count": len(tool_previews),
                 "tool_plan_contract_summary": dict(tool_plan_contract_summary or {}),
                 "tool_plan_preview_summary": dict(tool_plan_preview_summary or {}),
+                "template_validation_summary": dict(template_validation_summary or {}),
             }
             if sample_count < 2 and evaluation.evaluation_status == "effective":
                 evaluation = replace(evaluation, evaluation_status="inconclusive")
@@ -242,6 +287,23 @@ class ReflectionProposalSandboxService:
                 "skill_name": proposal.structured_patch_payload.get("skill_name"),
                 "skill_version": proposal.structured_patch_payload.get("skill_version"),
                 "strategy_summary": strategy_summary,
+            }
+        if proposal.proposal_type == "routing_policy":
+            return {
+                "routing_rules": {},
+                "fallback_chain": ["static_fallback"],
+                "trust_policy": "standard",
+                "ranking_policy": "confidence_first",
+                "strategy_summary": strategy_summary,
+                "target_scope": proposal.target_scope,
+            }
+        if proposal.proposal_type == "template_policy":
+            return {
+                "template_id": "default_tutor",
+                "sequence_contract": "1.0",
+                "template_rules": {},
+                "strategy_summary": strategy_summary,
+                "target_scope": proposal.target_scope,
             }
         raise ValidationError("Unsupported reflection proposal type.")
 

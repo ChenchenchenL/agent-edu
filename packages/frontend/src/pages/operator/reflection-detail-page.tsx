@@ -20,7 +20,7 @@ export function ReflectionDetailPage() {
   const { data: detail, isLoading, error } = useReflectionDetail(id!);
   const { data: evaluation } = useReflectionOutcomeEvaluation(id!);
   const { data: reviews } = useReflectionReviewHistory(id!);
-  const { data: proposals } = useReflectionRelatedProposals(id!);
+  useReflectionRelatedProposals(id!);
   const { resolve } = useReflectionAction();
 
   if (isLoading) {

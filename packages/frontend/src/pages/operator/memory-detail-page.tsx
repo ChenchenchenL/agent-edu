@@ -4,7 +4,6 @@ import {
   useMemoryDetail,
   useMemoryEvidenceLinks,
   useMemoryGovernanceDecisions,
-  useMemoryAnnotations,
   useMemoryAction
 } from "@/hooks/use-operator-memory";
 import { Badge } from "@/components/ui/badge";

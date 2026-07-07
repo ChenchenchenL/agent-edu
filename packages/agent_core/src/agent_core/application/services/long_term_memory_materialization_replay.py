@@ -21,11 +21,12 @@ from agent_core.infrastructure.db.repositories import (
     SessionMessageRepository,
     SessionRepository,
     TaskAttemptRepository,
+    SessionQuizAnswerAttemptRepository,
 )
 
 LONG_TERM_MEMORY_MATERIALIZATION_REPLAY_JOB_TYPE = "long_term_memory_materialization_replay"
 LONG_TERM_MEMORY_REPLAY_TRIGGER_SOURCE = "long_term_memory_materialization_failed"
-LONG_TERM_MEMORY_REPLAY_SOURCE_TYPES = {"chat_turn", "task_outcome", "reflection_outcome"}
+LONG_TERM_MEMORY_REPLAY_SOURCE_TYPES = {"chat_turn", "task_outcome", "reflection_outcome", "quiz_answer_attempt"}
 INITIAL_REPLAY_DELAY = timedelta(minutes=5)
 REPLAY_BACKOFF_STEPS = (
     timedelta(minutes=5),
@@ -127,6 +128,30 @@ class LongTermMemoryMaterializationReplayScheduler:
             },
         )
 
+    async def schedule_quiz_answer_attempt(
+        self,
+        *,
+        learner_goal_id: str | None,
+        attempt_id: str,
+    ) -> LongTermMemoryReplayScheduleResult:
+        idempotency_key = f"ltm-replay:quiz_answer_attempt:{attempt_id}"
+        if learner_goal_id is None:
+            return LongTermMemoryReplayScheduleResult(
+                enqueued=False,
+                job_id=None,
+                idempotency_key=idempotency_key,
+                due_at=None,
+                skip_reason="missing_learner_goal_id",
+            )
+        return await self._schedule(
+            learner_goal_id=learner_goal_id,
+            idempotency_key=idempotency_key,
+            payload={
+                "source_type": "quiz_answer_attempt",
+                "attempt_id": attempt_id,
+            },
+        )
+
     async def _schedule(
         self,
         *,
@@ -181,6 +206,7 @@ class LongTermMemoryMaterializationReplayExecutor:
         reflection_outcome_evaluation_repository: ReflectionOutcomeEvaluationRepository,
         materialization_service: LongTermMemoryMaterializationService,
         audit_service: AuditService,
+        quiz_answer_attempt_repository: SessionQuizAnswerAttemptRepository | None = None,
     ) -> None:
         self._session_repository = session_repository
         self._message_repository = message_repository
@@ -192,6 +218,7 @@ class LongTermMemoryMaterializationReplayExecutor:
         self._reflection_outcome_evaluation_repository = reflection_outcome_evaluation_repository
         self._materialization_service = materialization_service
         self._audit_service = audit_service
+        self._quiz_answer_attempt_repository = quiz_answer_attempt_repository
 
     async def replay(self, job: ScheduledAutonomyJob) -> None:
         source_type = str(job.payload.get("source_type") or "")
@@ -201,6 +228,8 @@ class LongTermMemoryMaterializationReplayExecutor:
             result = await self._replay_chat_turn(job)
         elif source_type == "task_outcome":
             result = await self._replay_task_outcome(job)
+        elif source_type == "quiz_answer_attempt":
+            result = await self._replay_quiz_answer_attempt(job)
         else:
             result = await self._replay_reflection_outcome(job)
         await self._audit_service.record(
@@ -292,5 +321,21 @@ class LongTermMemoryMaterializationReplayExecutor:
         return await self._materialization_service.materialize_from_reflection_outcome(
             reflection=reflection,
             evaluation=evaluation,
+            persist_embeddings=True,
+        )
+
+    async def _replay_quiz_answer_attempt(self, job: ScheduledAutonomyJob) -> LongTermMemoryMaterializationResult:
+        attempt_id = str(job.payload.get("attempt_id") or "")
+        if not attempt_id:
+            raise ValidationError("Missing attempt_id for quiz answer attempt long-term memory materialization replay.")
+        if self._quiz_answer_attempt_repository is None:
+            raise ValidationError("SessionQuizAnswerAttemptRepository is unconfigured for replay.")
+        attempt = await self._quiz_answer_attempt_repository.get_by_id(attempt_id)
+        if attempt is None:
+            raise ValidationError("Missing quiz answer attempt source record for long-term memory materialization replay.")
+        if attempt.learner_goal_id != job.learner_goal_id:
+            raise ValidationError("Quiz answer attempt replay job goal does not match the source records.")
+        return await self._materialization_service.materialize_from_answer_attempt(
+            attempt=attempt,
             persist_embeddings=True,
         )

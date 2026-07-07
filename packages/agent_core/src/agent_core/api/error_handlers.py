@@ -23,7 +23,11 @@ def register_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(ServiceError)
     async def handle_service(_: Request, exc: ServiceError) -> JSONResponse:
+        # ServiceError may carry a typed error_code (e.g. `circuit_open`,
+        # `provider_unavailable`). Fall back to `service_unavailable` when not
+        # provided, so clients always receive a stable machine-readable code.
+        code = getattr(exc, "error_code", None) or "service_unavailable"
         return JSONResponse(
             status_code=503,
-            content={"error": {"code": "service_unavailable", "message": str(exc)}},
+            content={"error": {"code": code, "message": str(exc)}},
         )

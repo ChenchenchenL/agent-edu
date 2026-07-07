@@ -364,6 +364,12 @@ class ReflectionActionRepository:
         model.executed_at = entity.executed_at
         await self._session.flush()
 
+    async def get_by_id(self, action_id: str) -> ReflectionAction | None:
+        model = await self._session.get(ReflectionActionModel, action_id)
+        if model is None:
+            return None
+        return self._to_entity(model)
+
     async def list_by_reflection(self, reflection_record_id: str) -> list[ReflectionAction]:
         result = await self._session.execute(
             select(ReflectionActionModel)

@@ -57,6 +57,7 @@ class LearnerGoalService:
             baseline_note=payload.baseline_note,
             deadline_date=payload.deadline_date,
             weekly_study_minutes=payload.weekly_study_minutes,
+            preferred_language=payload.preferred_language,
         )
         try:
             await self._repository.create(goal)

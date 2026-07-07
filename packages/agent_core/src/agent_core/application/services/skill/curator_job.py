@@ -64,7 +64,11 @@ from agent_core.infrastructure.db.repositories import (
     SkillCuratorRecommendationRepository,
     SkillUsageEventRepository,
 )
-from agent_core.infrastructure.observability.metrics import observe_skill_curator_job
+from agent_core.infrastructure.observability.metrics import (
+    observe_skill_curator_job,
+    observe_routing_regression,
+    observe_low_confidence_burst,
+)
 
 @dataclass(frozen=True)
 class SkillCuratorJobConfig:
@@ -266,6 +270,15 @@ class SkillCuratorJobService:
             )
             if negative is not None:
                 outcomes.append(negative)
+
+            outcome_gain = await self._maybe_recommend_learning_gain_review(
+                artifact=artifact,
+                now=now,
+                window_key=window_key,
+            )
+            if outcome_gain is not None:
+                outcomes.append(outcome_gain)
+
             rollback = await self._maybe_recommend_rollback_review(
                 artifact=artifact,
                 window_key=window_key,
@@ -367,6 +380,13 @@ class SkillCuratorJobService:
             return None
         if usage_metrics["negative_usage_rate"] > self._config.max_negative_usage_rate:
             return None
+        # Learning gain check is optional for backward compatibility.
+        # Artifacts without mastery data (has_learning_gain_evidence=False) can still be promoted
+        # based on runtime success metrics alone. This allows older artifacts deployed before
+        # mastery tracking was enabled to be promoted without requiring retrofitting mastery data.
+        if usage_metrics.get("has_learning_gain_evidence"):
+            if usage_metrics.get("learning_gain_rate", 0.0) < 0.01:
+                return None
         return await self._create_recommendation_once(
             artifact=artifact,
             window_key=window_key,
@@ -460,18 +480,85 @@ class SkillCuratorJobService:
         if governance_evidence:
             evidence_snapshot["governance_evidence"] = governance_evidence
             metrics_snapshot.update(self._governance_evidence_metrics(governance_evidence))
-        if not has_negative_signal and not has_resolver_signal and has_governance_signal:
+        if has_governance_signal:
+            routing_regression = governance_evidence.get("routing_regression") or {}
+            fallback_pressure = governance_evidence.get("fallback_pressure") or {}
+            low_conf = governance_evidence.get("low_confidence_selection_burst") or {}
+            retrieval_conflict = governance_evidence.get("retrieval_conflict_exposure") or {}
+
+            # 1. Routing regression:
+            if routing_regression.get("detected") or fallback_pressure.get("detected"):
+                observe_routing_regression(
+                    skill_name=artifact.name,
+                    surface=artifact.scope or "unknown",
+                )
+            if low_conf.get("detected"):
+                observe_low_confidence_burst(
+                    skill_name=artifact.name,
+                    surface=artifact.scope or "unknown",
+                )
+            if routing_regression.get("detected") or fallback_pressure.get("detected") or low_conf.get("detected"):
+                return await self._create_recommendation_once(
+                    artifact=artifact,
+                    window_key=window_key,
+                    recommendation_type="patch_routing_policy",
+                    recommended_action="none",
+                    reason_code="routing_regression",
+                    reason_note="Capability routing failure, fallback pressure, or selection burst detected.",
+                    evidence_snapshot=evidence_snapshot,
+                    metrics_snapshot=metrics_snapshot,
+                    source_discriminator=f"routing:{artifact.id}",
+                )
+
+            # 2. Template policy sequence mismatch:
+            tool_plan_sequence = governance_evidence.get("tool_plan_sequence")
+            if isinstance(tool_plan_sequence, dict):
+                summary = self._tool_plan_sequence_summary_from_payload(tool_plan_sequence)
+                if summary is not None and has_tool_plan_sequence_regression(
+                    summary=summary,
+                    mismatch_min=self._config.tool_plan_sequence_mismatch_min,
+                    missing_metadata_min=self._config.tool_plan_missing_metadata_min,
+                    required_output_missing_min=self._config.tool_plan_required_output_missing_min,
+                ):
+                    return await self._create_recommendation_once(
+                        artifact=artifact,
+                        window_key=window_key,
+                        recommendation_type="patch_template_policy",
+                        recommended_action="none",
+                        reason_code="template_sequence_mismatch",
+                        reason_note="Tool plan sequence contract mismatch or template mismatch detected.",
+                        evidence_snapshot=evidence_snapshot,
+                        metrics_snapshot=metrics_snapshot,
+                        source_discriminator=f"template:{artifact.id}",
+                    )
+
+            # 3. Retrieval conflict / memory conflicts:
+            if retrieval_conflict.get("detected"):
+                return await self._create_recommendation_once(
+                    artifact=artifact,
+                    window_key=window_key,
+                    recommendation_type="patch_skill_package",
+                    recommended_action="none",
+                    reason_code="memory_retrieval_conflict",
+                    reason_note="Memory or knowledge retrieval conflict detected.",
+                    evidence_snapshot=evidence_snapshot,
+                    metrics_snapshot=metrics_snapshot,
+                    source_discriminator=f"memory_conflict:{artifact.id}",
+                )
+
+            # 4. General governance outcomes (ineffective/inconclusive):
             return await self._create_recommendation_once(
                 artifact=artifact,
                 window_key=window_key,
-                recommendation_type="flag_for_review",
+                recommendation_type="select_replacement_skill_package",
                 recommended_action="none",
                 reason_code="governance_evidence_regression",
-                reason_note="Memory conflict or reflection outcome evidence requires operator review.",
+                reason_note="Governance evidence shows reflection outcome regressions requiring replacement selection.",
                 evidence_snapshot=evidence_snapshot,
                 metrics_snapshot=metrics_snapshot,
                 source_discriminator=self._governance_source_discriminator(governance_evidence),
             )
+
         return await self._create_recommendation_once(
             artifact=artifact,
             window_key=window_key,
@@ -482,6 +569,99 @@ class SkillCuratorJobService:
             evidence_snapshot=evidence_snapshot,
             metrics_snapshot=metrics_snapshot,
         )
+
+    async def _maybe_recommend_learning_gain_review(
+        self,
+        *,
+        artifact: SkillArtifact,
+        now: datetime,
+        window_key: str,
+    ) -> str | None:
+        started_at = now - timedelta(days=max(self._config.usage_lookback_days, 1))
+        events = await self._usage_repository.list_events(
+            skill_name=artifact.name,
+            surface=artifact.scope,
+            created_at_from=started_at,
+            limit=200,
+        )
+        matched = [item for item in events if item.skill_artifact_id == artifact.id]
+        if not matched:
+            return None
+
+        completed = sum(1 for e in matched if e.outcome_status == "completed")
+        total = len(matched)
+        completion_rate = completed / total if total > 0 else 0.0
+
+        valid_gain_events = []
+        for item in matched:
+            signals = item.outcome_signals or {}
+            delta = signals.get("mastery_delta")
+            before = signals.get("mastery_before")
+            after = signals.get("mastery_after")
+            if before is not None and after is not None:
+                try:
+                    before_val = float(before)
+                    after_val = float(after)
+                    # Validate mastery values are in [0, 1] range
+                    if 0.0 <= before_val <= 1.0 and 0.0 <= after_val <= 1.0:
+                        delta = after_val - before_val
+                except (ValueError, TypeError):
+                    pass
+            if delta is not None:
+                try:
+                    delta_val = float(delta)
+                    # Validate delta is reasonable (abs <= 1.0)
+                    if abs(delta_val) <= 1.0:
+                        valid_gain_events.append(delta_val)
+                except (ValueError, TypeError):
+                    pass
+
+        if not valid_gain_events:
+            return None
+
+        learning_gain_rate = sum(valid_gain_events) / len(valid_gain_events)
+
+        if completion_rate >= 0.7 and learning_gain_rate < 0.0:
+            return await self._create_recommendation_once(
+                artifact=artifact,
+                window_key=window_key,
+                recommendation_type="demote_candidate",
+                recommended_action="demote_active",
+                reason_code="poor_learning_outcome",
+                reason_note="High runtime success but poor/negative learning outcome detected.",
+                evidence_snapshot={
+                    "artifact_id": artifact.id,
+                    "artifact_status": artifact.status,
+                    "completion_rate": completion_rate,
+                    "learning_gain_rate": learning_gain_rate,
+                },
+                metrics_snapshot={
+                    "completion_rate": completion_rate,
+                    "learning_gain_rate": learning_gain_rate,
+                },
+                source_discriminator=f"demote:{artifact.id}",
+            )
+
+        if learning_gain_rate < 0.02:
+            return await self._create_recommendation_once(
+                artifact=artifact,
+                window_key=window_key,
+                recommendation_type="patch_needed",
+                recommended_action="none",
+                reason_code="low_learning_gain",
+                reason_note="Artifact has low learning gain rate, requiring a patch.",
+                evidence_snapshot={
+                    "artifact_id": artifact.id,
+                    "artifact_status": artifact.status,
+                    "learning_gain_rate": learning_gain_rate,
+                },
+                metrics_snapshot={
+                    "learning_gain_rate": learning_gain_rate,
+                },
+                source_discriminator=f"patch_needed:{artifact.id}",
+            )
+
+        return None
 
     async def _maybe_recommend_rollback_review(
         self,
@@ -556,36 +736,83 @@ class SkillCuratorJobService:
         )
         if tool_plan_sequence:
             evidence["tool_plan_sequence"] = tool_plan_sequence
-        if learner_goal_id is None or not topic_keys:
-            return {
-                key: value
-                for key, value in evidence.items()
-                if key in {"resolver_health", "tool_plan_sequence"}
-            }
+        memory_conflicts = None
+        if learner_goal_id is not None and topic_keys:
+            memory_conflicts = await self._memory_conflict_evidence(
+                learner_goal_id=learner_goal_id,
+                topic_keys=set(topic_keys),
+                updated_at_from=evidence_started_at,
+            )
+            if memory_conflicts:
+                evidence["memory_conflicts"] = memory_conflicts
 
-        memory_conflicts = await self._memory_conflict_evidence(
-            learner_goal_id=learner_goal_id,
-            topic_keys=set(topic_keys),
-            updated_at_from=evidence_started_at,
+            reflection_outcomes = await self._reflection_outcome_evidence(
+                learner_goal_id=learner_goal_id,
+                topic_keys=set(topic_keys),
+                updated_at_from=evidence_started_at,
+            )
+            if reflection_outcomes:
+                evidence["reflection_outcomes"] = reflection_outcomes
+
+        # Compute the new unified governance signals from usage_events and resolver_failures:
+        has_routing_mismatch = any(
+            (item.metadata or {}).get("routing_mismatch") is True 
+            or (item.metadata or {}).get("router_mismatch") is True
+            for item in usage_events
         )
-        if memory_conflicts:
-            evidence["memory_conflicts"] = memory_conflicts
-
-        reflection_outcomes = await self._reflection_outcome_evidence(
-            learner_goal_id=learner_goal_id,
-            topic_keys=set(topic_keys),
-            updated_at_from=evidence_started_at,
+        evidence["routing_regression"] = {
+            "detected": len(resolver_failures) >= 2 or has_routing_mismatch,
+            "mismatch_count": sum(1 for item in usage_events if (item.metadata or {}).get("routing_mismatch") is True or (item.metadata or {}).get("router_mismatch") is True),
+        }
+        
+        fallback_counts = sum(
+            1 for item in usage_events 
+            if item.resolver_status == "fallback" 
+            or (item.metadata or {}).get("fallback_used") is True
         )
-        if reflection_outcomes:
-            evidence["reflection_outcomes"] = reflection_outcomes
+        evidence["fallback_pressure"] = {
+            "detected": fallback_counts >= 2,
+            "fallback_count": fallback_counts,
+        }
+        
+        low_conf_counts = sum(
+            1 for item in usage_events 
+            if item.selection_reason == "low_confidence"
+            or "low_confidence" in ((item.metadata or {}).get("fallback_chain") or [])
+            or (item.metadata or {}).get("confidence", 1.0) < 0.6
+            or ((item.metadata or {}).get("capability") or {}).get("confidence", 1.0) < 0.6
+        )
+        evidence["low_confidence_selection_burst"] = {
+            "detected": low_conf_counts >= 2,
+            "low_confidence_count": low_conf_counts,
+        }
+        
+        # Check retrieval conflict exposure: memory conflicts or retrieval mismatches
+        memory_conflict_count = int(memory_conflicts.get("high_severity_count") or 0) if memory_conflicts else 0
+        has_retrieval_conflict = any(
+            (item.metadata or {}).get("retrieval_conflict") is True 
+            for item in usage_events
+        )
+        evidence["retrieval_conflict_exposure"] = {
+            "detected": memory_conflict_count > 0 or has_retrieval_conflict,
+            "conflict_count": memory_conflict_count + sum(1 for item in usage_events if (item.metadata or {}).get("retrieval_conflict") is True),
+        }
 
+        # Keep checking if we actually generated any evidence beyond the metadata
         if set(evidence) == {
             "learner_goal_id",
             "topic_keys",
             "evidence_started_at",
             "usage_evidence_started_at",
             "evidence_ended_at",
-        }:
+            "routing_regression",
+            "fallback_pressure",
+            "low_confidence_selection_burst",
+            "retrieval_conflict_exposure",
+        } and not evidence.get("routing_regression", {}).get("detected") \
+          and not evidence.get("fallback_pressure", {}).get("detected") \
+          and not evidence.get("low_confidence_selection_burst", {}).get("detected") \
+          and not evidence.get("retrieval_conflict_exposure", {}).get("detected"):
             return {}
         return evidence
 
@@ -733,6 +960,15 @@ class SkillCuratorJobService:
         return metrics
 
     def _has_governance_regression(self, evidence: dict[str, Any]) -> bool:
+        if (evidence.get("routing_regression") or {}).get("detected") is True:
+            return True
+        if (evidence.get("fallback_pressure") or {}).get("detected") is True:
+            return True
+        if (evidence.get("low_confidence_selection_burst") or {}).get("detected") is True:
+            return True
+        if (evidence.get("retrieval_conflict_exposure") or {}).get("detected") is True:
+            return True
+
         memory_conflicts = evidence.get("memory_conflicts")
         if isinstance(memory_conflicts, dict) and int(memory_conflicts.get("high_severity_count") or 0) > 0:
             return True
@@ -1493,6 +1729,31 @@ class SkillCuratorJobService:
             elif event.outcome_status in STABLE_NEGATIVE_USAGE_STATUSES:
                 negative.append(event)
         negative_usage_rate = len(negative) / len(matched) if matched else 0.0
+        valid_gain_events = []
+        for event in matched:
+            signals = event.outcome_signals or {}
+            delta = signals.get("mastery_delta")
+            before = signals.get("mastery_before")
+            after = signals.get("mastery_after")
+            if before is not None and after is not None:
+                try:
+                    before_val = float(before)
+                    after_val = float(after)
+                    # Validate mastery values are in [0, 1] range
+                    if 0.0 <= before_val <= 1.0 and 0.0 <= after_val <= 1.0:
+                        delta = after_val - before_val
+                except (ValueError, TypeError):
+                    pass
+            if delta is not None:
+                try:
+                    delta_val = float(delta)
+                    # Validate delta is reasonable (abs <= 1.0)
+                    if abs(delta_val) <= 1.0:
+                        valid_gain_events.append(delta_val)
+                except (ValueError, TypeError):
+                    pass
+        learning_gain_rate = sum(valid_gain_events) / len(valid_gain_events) if valid_gain_events else 0.0
+
         return {
             "matched_count": len(matched),
             "successful_count": len(successful),
@@ -1501,6 +1762,8 @@ class SkillCuratorJobService:
             "matched_usage_event_ids": [item.id for item in matched],
             "successful_usage_event_ids": [item.id for item in successful],
             "negative_usage_event_ids": [item.id for item in negative],
+            "learning_gain_rate": learning_gain_rate,
+            "has_learning_gain_evidence": len(valid_gain_events) > 0,
         }
 
 

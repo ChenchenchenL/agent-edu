@@ -30,6 +30,8 @@ from agent_core.application.services.reflection_skill_evolution_curator import (
     ReflectionSkillEvolutionCuratorConfig,
     ReflectionSkillEvolutionCuratorService,
 )
+from agent_core.application.services.reflection_sandbox_admission import SandboxAdmissionService, SandboxAdmissionRequest
+from agent_core.application.services.skill.activation_governance import ActivationGovernanceService, ActivationGovernanceRequest
 from agent_core.application.services.skills import SkillCandidateService
 from agent_core.application.services.skills import SkillArtifactLifecycleService, SkillReplacementStagingService
 from agent_core.application.services.strategy_cards import StrategyCardService
@@ -132,6 +134,9 @@ class StubReflectionActionRepository:
 
     async def update(self, entity: ReflectionAction):
         self.actions[entity.id] = entity
+
+    async def get_by_id(self, action_id: str):
+        return self.actions.get(action_id)
 
     async def list_by_reflection(self, reflection_record_id: str):
         return [item for item in self.actions.values() if item.reflection_record_id == reflection_record_id]
@@ -336,6 +341,8 @@ class StubSkillUsageEventRepository:
         outcome_status=None,
         resolver_status=None,
         created_at_from=None,
+        daily_task_id=None,
+        workflow_run_id=None,
         limit=50,
     ):
         events = list(self.events)
@@ -353,6 +360,10 @@ class StubSkillUsageEventRepository:
             events = [item for item in events if item.outcome_status == outcome_status]
         if resolver_status is not None:
             events = [item for item in events if item.resolver_status == resolver_status]
+        if daily_task_id is not None:
+            events = [item for item in events if item.daily_task_id == daily_task_id]
+        if workflow_run_id is not None:
+            events = [item for item in events if item.workflow_run_id == workflow_run_id]
         if created_at_from is not None:
             events = [item for item in events if item.created_at >= created_at_from]
         return events[:limit]
@@ -3173,17 +3184,11 @@ async def test_reflection_skill_evolution_curator_requires_manual_review_for_hig
     result = await harness.service.run_once(limit=10)
 
     stored = await harness.proposal_repository.get_by_id(proposal.id)
-    review_event = next(
-        item for item in harness.audit_repository.events if item.event_type == "reflection.proposal.manual_review_required"
-    )
 
-    assert result.suspended_count == 1
+    assert result.sandbox_enqueued_count == 1
     assert stored is not None
-    assert stored.status == "proposed"
-    assert harness.autonomy_job_repository.jobs == {}
-    assert review_event.actor == "system"
-    assert review_event.event_data["phase"] == "sandbox_enqueue"
-    assert review_event.event_data["reason_code"] == "risk_level_high"
+    assert stored.status == "sandbox_queued"
+    assert len(harness.autonomy_job_repository.jobs) == 1
 
 
 @pytest.mark.parametrize(
@@ -4810,3 +4815,1240 @@ async def test_rollout_auto_governance_skips_chat_rollback_when_auto_rollback_di
         "surface": "chat",
         "reason_code": "auto_rollback_surface_not_enabled",
     } in metric_calls
+
+
+class MockMemoryServiceWithCorpus:
+    def __init__(self, items):
+        self.items = items
+
+    async def build_reflection_corpus(self, *, learner_profile_id: str, learner_goal_id: str | None = None, limit_per_type: int = 24):
+        from agent_core.application.services.memory import ReflectionCorpusResult, ReflectionCorpusSummary
+        return ReflectionCorpusResult(
+            learner_profile_id=learner_profile_id,
+            learner_goal_id=learner_goal_id,
+            generated_at=datetime.now(timezone.utc),
+            items=self.items,
+            summary=ReflectionCorpusSummary(
+                total_items=len(self.items),
+                knowledge_items=len([i for i in self.items if i.memory_type == "knowledge"]),
+                behavior_items=len([i for i in self.items if i.memory_type == "behavior"]),
+                candidate_items=0,
+                stable_items=0,
+                contradiction_focus_items=0,
+                stale_focus_items=0,
+                validate_items=0,
+                reinforce_items=0,
+            ),
+        )
+
+    async def build_interpretation(self, **kwargs):
+        from agent_core.application.services.memory import MemoryInterpretationResult
+        return MemoryInterpretationResult(
+            learner_profile_id="profile-1",
+            learner_goal_id="goal-1",
+            generated_at=datetime.now(timezone.utc),
+            facts=[],
+            behavior_patterns=[],
+            contested_items=[],
+            recommended_constraints=[],
+            conflict_count=0,
+        )
+
+
+def _build_corpus_item(memory_key: str, recommended_action: str, contested: bool = False, priority_score: float = 0.5):
+    from agent_core.application.services.learner_memory.result_types import ReflectionCorpusMemoryItem
+    return ReflectionCorpusMemoryItem(
+        memory_type="behavior",
+        memory_id=f"mem-{memory_key}",
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+        memory_key=memory_key,
+        memory_level="surface",
+        title="Test item",
+        summary="Test item summary",
+        status="candidate",
+        time_horizon="short",
+        importance_score=0.5,
+        confidence_score=0.5,
+        freshness_score=0.5,
+        stability_score=0.5,
+        goal_relevance_score=0.5,
+        support_score=0.5,
+        contradiction_score=0.8 if contested else 0.0,
+        evidence_count=2,
+        contradiction_count=1 if contested else 0,
+        reflection_priority_score=priority_score,
+        recommended_action=recommended_action,
+        rationale="test",
+        recommended_action_reason="test",
+        topic_alignment_score=0.5,
+        governance_pressure=0.5,
+        review_recommended=False,
+        quality_score=0.5,
+        quality_tier="medium",
+        promotion_readiness="ready",
+        quality_reasons=[],
+        evidence_mix={},
+        semantic_category="strategy",
+        validation_status="contested" if contested else "unverified",
+        provenance_type="system_inference",
+        provenance_source_id=None,
+        scope_ref={},
+        promotion_rationale=None,
+        contested=contested,
+        source_event_ids=[],
+        source_memory_ids=[],
+        tags=[],
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+
+@pytest.mark.asyncio
+async def test_proactive_reflection_triggers_review_threshold():
+    items = [
+        _build_corpus_item("topic-1", "review"),
+        _build_corpus_item("topic-2", "review"),
+        _build_corpus_item("topic-3", "review"),
+    ]
+    memory_service = MockMemoryServiceWithCorpus(items)
+    record_repository = StubReflectionRecordRepository()
+    audit_service = AuditService(StubAuditRepository())
+    job_repository = StubScheduledAutonomyJobRepository()
+    autonomy_job_service = AutonomyJobService(repository=job_repository, audit_service=audit_service)
+    
+    goal_state_repo = StubGoalAutonomyStateRepository()
+    await goal_state_repo.create(
+        GoalAutonomyState.build(learner_goal_id="goal-1")
+    )
+
+    reflection_service = ReflectionService(
+        reflection_record_repository=record_repository,
+        reflection_action_repository=StubReflectionActionRepository(),
+        goal_repository=None,
+        daily_task_repository=None,
+        workflow_run_repository=None,
+        study_plan_repository=None,
+        task_attempt_repository=None,
+        learner_topic_mastery_repository=None,
+        goal_autonomy_state_repository=goal_state_repo,
+        session_repository=None,
+        memory_service=memory_service,
+        autonomy_job_service=autonomy_job_service,
+        audit_service=audit_service,
+        llm_provider=MockLLMProvider("mock-tutor-v1"),
+    )
+    
+    triggered = await reflection_service.evaluate_and_trigger_proactive_reflections(
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+    )
+    
+    assert len(triggered) == 1
+    assert triggered[0].scope == "goal"
+    assert triggered[0].trigger_source == "corpus_review_threshold"
+
+
+@pytest.mark.asyncio
+async def test_proactive_reflection_triggers_backlog_threshold():
+    items = [
+        _build_corpus_item("topic-1", "validate"),
+        _build_corpus_item("topic-2", "reinforce"),
+        _build_corpus_item("topic-3", "validate"),
+    ]
+    memory_service = MockMemoryServiceWithCorpus(items)
+    record_repository = StubReflectionRecordRepository()
+    audit_service = AuditService(StubAuditRepository())
+    job_repository = StubScheduledAutonomyJobRepository()
+    autonomy_job_service = AutonomyJobService(repository=job_repository, audit_service=audit_service)
+    
+    goal_state_repo = StubGoalAutonomyStateRepository()
+    await goal_state_repo.create(
+        GoalAutonomyState.build(learner_goal_id="goal-1")
+    )
+
+    reflection_service = ReflectionService(
+        reflection_record_repository=record_repository,
+        reflection_action_repository=StubReflectionActionRepository(),
+        goal_repository=None,
+        daily_task_repository=None,
+        workflow_run_repository=None,
+        study_plan_repository=None,
+        task_attempt_repository=None,
+        learner_topic_mastery_repository=None,
+        goal_autonomy_state_repository=goal_state_repo,
+        session_repository=None,
+        memory_service=memory_service,
+        autonomy_job_service=autonomy_job_service,
+        audit_service=audit_service,
+        llm_provider=MockLLMProvider("mock-tutor-v1"),
+    )
+    
+    triggered = await reflection_service.evaluate_and_trigger_proactive_reflections(
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+    )
+    
+    assert len(triggered) == 1
+    assert triggered[0].scope == "goal"
+    assert triggered[0].trigger_source == "corpus_backlog_threshold"
+
+
+@pytest.mark.asyncio
+async def test_proactive_reflection_triggers_contested_high_priority():
+    items = [
+        _build_corpus_item("contested-topic", "validate", contested=True, priority_score=0.75),
+    ]
+    memory_service = MockMemoryServiceWithCorpus(items)
+    record_repository = StubReflectionRecordRepository()
+    audit_service = AuditService(StubAuditRepository())
+    job_repository = StubScheduledAutonomyJobRepository()
+    autonomy_job_service = AutonomyJobService(repository=job_repository, audit_service=audit_service)
+    
+    goal_state_repo = StubGoalAutonomyStateRepository()
+    await goal_state_repo.create(
+        GoalAutonomyState.build(learner_goal_id="goal-1")
+    )
+
+    reflection_service = ReflectionService(
+        reflection_record_repository=record_repository,
+        reflection_action_repository=StubReflectionActionRepository(),
+        goal_repository=None,
+        daily_task_repository=None,
+        workflow_run_repository=None,
+        study_plan_repository=None,
+        task_attempt_repository=None,
+        learner_topic_mastery_repository=None,
+        goal_autonomy_state_repository=goal_state_repo,
+        session_repository=None,
+        memory_service=memory_service,
+        autonomy_job_service=autonomy_job_service,
+        audit_service=audit_service,
+        llm_provider=MockLLMProvider("mock-tutor-v1"),
+    )
+    
+    triggered = await reflection_service.evaluate_and_trigger_proactive_reflections(
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+    )
+    
+    assert len(triggered) == 1
+    assert triggered[0].scope == "task"
+    assert triggered[0].trigger_source == "corpus_contested_high_priority"
+    assert triggered[0].evidence_payload["topic_focus"] == "contested-topic"
+
+
+@pytest.mark.asyncio
+async def test_proactive_reflection_deduplication_and_cooldown():
+    items = [
+        _build_corpus_item("contested-topic", "validate", contested=True, priority_score=0.75),
+        _build_corpus_item("topic-1", "review"),
+        _build_corpus_item("topic-2", "review"),
+        _build_corpus_item("topic-3", "review"),
+    ]
+    memory_service = MockMemoryServiceWithCorpus(items)
+    record_repository = StubReflectionRecordRepository()
+    audit_service = AuditService(StubAuditRepository())
+    job_repository = StubScheduledAutonomyJobRepository()
+    autonomy_job_service = AutonomyJobService(repository=job_repository, audit_service=audit_service)
+    
+    goal_state_repo = StubGoalAutonomyStateRepository()
+    await goal_state_repo.create(
+        GoalAutonomyState.build(learner_goal_id="goal-1")
+    )
+
+    reflection_service = ReflectionService(
+        reflection_record_repository=record_repository,
+        reflection_action_repository=StubReflectionActionRepository(),
+        goal_repository=None,
+        daily_task_repository=None,
+        workflow_run_repository=None,
+        study_plan_repository=None,
+        task_attempt_repository=None,
+        learner_topic_mastery_repository=None,
+        goal_autonomy_state_repository=goal_state_repo,
+        session_repository=None,
+        memory_service=memory_service,
+        autonomy_job_service=autonomy_job_service,
+        audit_service=audit_service,
+        llm_provider=MockLLMProvider("mock-tutor-v1"),
+    )
+    
+    triggered = await reflection_service.evaluate_and_trigger_proactive_reflections(
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+    )
+    assert len(triggered) == 2
+    
+    triggered_again = await reflection_service.evaluate_and_trigger_proactive_reflections(
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+    )
+    assert len(triggered_again) == 0
+
+
+@pytest.mark.asyncio
+async def test_proactive_reflection_observability_only_exclusions():
+    items = [
+        _build_corpus_item("stale-topic", "refresh", priority_score=0.8),
+        _build_corpus_item("low-priority-contested", "validate", contested=True, priority_score=0.65),
+    ]
+    memory_service = MockMemoryServiceWithCorpus(items)
+    record_repository = StubReflectionRecordRepository()
+    audit_service = AuditService(StubAuditRepository())
+    job_repository = StubScheduledAutonomyJobRepository()
+    autonomy_job_service = AutonomyJobService(repository=job_repository, audit_service=audit_service)
+    
+    goal_state_repo = StubGoalAutonomyStateRepository()
+    await goal_state_repo.create(
+        GoalAutonomyState.build(learner_goal_id="goal-1")
+    )
+
+    reflection_service = ReflectionService(
+        reflection_record_repository=record_repository,
+        reflection_action_repository=StubReflectionActionRepository(),
+        goal_repository=None,
+        daily_task_repository=None,
+        workflow_run_repository=None,
+        study_plan_repository=None,
+        task_attempt_repository=None,
+        learner_topic_mastery_repository=None,
+        goal_autonomy_state_repository=goal_state_repo,
+        session_repository=None,
+        memory_service=memory_service,
+        autonomy_job_service=autonomy_job_service,
+        audit_service=audit_service,
+        llm_provider=MockLLMProvider("mock-tutor-v1"),
+    )
+    
+    triggered = await reflection_service.evaluate_and_trigger_proactive_reflections(
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+    )
+    assert len(triggered) == 0
+
+
+@pytest.mark.asyncio
+async def test_proactive_reflection_gated_by_goal_phase_non_active():
+    # If goal phase is not active, return []
+    items = [
+        _build_corpus_item("topic-1", "review"),
+        _build_corpus_item("topic-2", "review"),
+        _build_corpus_item("topic-3", "review"),
+    ]
+    memory_service = MockMemoryServiceWithCorpus(items)
+    record_repository = StubReflectionRecordRepository()
+    audit_service = AuditService(StubAuditRepository())
+    job_repository = StubScheduledAutonomyJobRepository()
+    autonomy_job_service = AutonomyJobService(repository=job_repository, audit_service=audit_service)
+    
+    # 1. Non-active state in repo
+    goal_state_repo = StubGoalAutonomyStateRepository()
+    await goal_state_repo.create(
+        GoalAutonomyState.build(learner_goal_id="goal-1").with_transition(phase="paused", reason="test")
+    )
+
+    reflection_service = ReflectionService(
+        reflection_record_repository=record_repository,
+        reflection_action_repository=StubReflectionActionRepository(),
+        goal_repository=None,
+        daily_task_repository=None,
+        workflow_run_repository=None,
+        study_plan_repository=None,
+        task_attempt_repository=None,
+        learner_topic_mastery_repository=None,
+        goal_autonomy_state_repository=goal_state_repo,
+        session_repository=None,
+        memory_service=memory_service,
+        autonomy_job_service=autonomy_job_service,
+        audit_service=audit_service,
+        llm_provider=MockLLMProvider("mock-tutor-v1"),
+    )
+    
+    triggered = await reflection_service.evaluate_and_trigger_proactive_reflections(
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+    )
+    assert len(triggered) == 0
+
+    # 2. Repo is None
+    reflection_service_no_repo = ReflectionService(
+        reflection_record_repository=record_repository,
+        reflection_action_repository=StubReflectionActionRepository(),
+        goal_repository=None,
+        daily_task_repository=None,
+        workflow_run_repository=None,
+        study_plan_repository=None,
+        task_attempt_repository=None,
+        learner_topic_mastery_repository=None,
+        goal_autonomy_state_repository=None,
+        session_repository=None,
+        memory_service=memory_service,
+        autonomy_job_service=autonomy_job_service,
+        audit_service=audit_service,
+        llm_provider=MockLLMProvider("mock-tutor-v1"),
+    )
+    triggered_no_repo = await reflection_service_no_repo.evaluate_and_trigger_proactive_reflections(
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+    )
+    assert len(triggered_no_repo) == 0
+
+
+@pytest.mark.asyncio
+async def test_proactive_reflection_current_task_topic_exclusion():
+    items = [
+        # Excluded because exact topic focus matches task topic "matrices"
+        _build_corpus_item("matrices", "review"),
+        # NOT excluded because it has a different topic key
+        _build_corpus_item("matrix-advanced", "review"),
+        _build_corpus_item("linear-matrices", "review"),
+    ]
+    memory_service = MockMemoryServiceWithCorpus(items)
+    record_repository = StubReflectionRecordRepository()
+    audit_service = AuditService(StubAuditRepository())
+    job_repository = StubScheduledAutonomyJobRepository()
+    autonomy_job_service = AutonomyJobService(repository=job_repository, audit_service=audit_service)
+    
+    goal_state_repo = StubGoalAutonomyStateRepository()
+    await goal_state_repo.create(
+        GoalAutonomyState.build(learner_goal_id="goal-1")
+    )
+
+    reflection_service = ReflectionService(
+        reflection_record_repository=record_repository,
+        reflection_action_repository=StubReflectionActionRepository(),
+        goal_repository=None,
+        daily_task_repository=None,
+        workflow_run_repository=None,
+        study_plan_repository=None,
+        task_attempt_repository=None,
+        learner_topic_mastery_repository=None,
+        goal_autonomy_state_repository=goal_state_repo,
+        session_repository=None,
+        memory_service=memory_service,
+        autonomy_job_service=autonomy_job_service,
+        audit_service=audit_service,
+        llm_provider=MockLLMProvider("mock-tutor-v1"),
+    )
+
+    # 1. No task -> no exclusion, all 3 active, triggers review since count >= 3
+    triggered_no_task = await reflection_service.evaluate_and_trigger_proactive_reflections(
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+        task=None,
+    )
+    assert len(triggered_no_task) == 1
+
+    # 2. Task with topic "matrices" -> "matrices" is excluded, leaving 2 review items (which is < 3 review threshold, so doesn't trigger)
+    from agent_core.domain.entities.planning import DailyTask
+    from datetime import date
+    task = DailyTask.build(
+        learner_goal_id="goal-1",
+        study_plan_id="plan-1",
+        plan_stage_id=None,
+        task_origin="planner",
+        task_type="lesson",
+        execution_mode="chat",
+        title="Study Matrices",
+        instructions="Learn matrix basics.",
+        topic_focus="matrices",
+        difficulty="medium",
+        question_count=None,
+        estimated_minutes=30,
+        scheduled_for=date.today(),
+        due_on=date.today(),
+    )
+    
+    triggered_with_task = await reflection_service.evaluate_and_trigger_proactive_reflections(
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+        task=task,
+    )
+    assert len(triggered_with_task) == 0
+
+
+@pytest.mark.asyncio
+async def test_proactive_reflection_rule1_rule2_mutex():
+    # If both Rule 1 (review >= 3) and Rule 2 (backlog >= 3) are met:
+    # Rule 1 should trigger first, set has_active_goal_reflection=True, and Rule 2 should be skipped/blocked.
+    items = [
+        _build_corpus_item("topic-1", "review"),
+        _build_corpus_item("topic-2", "review"),
+        _build_corpus_item("topic-3", "review"),
+        _build_corpus_item("topic-4", "validate"),
+        _build_corpus_item("topic-5", "reinforce"),
+        _build_corpus_item("topic-6", "validate"),
+    ]
+    memory_service = MockMemoryServiceWithCorpus(items)
+    record_repository = StubReflectionRecordRepository()
+    audit_service = AuditService(StubAuditRepository())
+    job_repository = StubScheduledAutonomyJobRepository()
+    autonomy_job_service = AutonomyJobService(repository=job_repository, audit_service=audit_service)
+    
+    goal_state_repo = StubGoalAutonomyStateRepository()
+    await goal_state_repo.create(
+        GoalAutonomyState.build(learner_goal_id="goal-1")
+    )
+
+    reflection_service = ReflectionService(
+        reflection_record_repository=record_repository,
+        reflection_action_repository=StubReflectionActionRepository(),
+        goal_repository=None,
+        daily_task_repository=None,
+        workflow_run_repository=None,
+        study_plan_repository=None,
+        task_attempt_repository=None,
+        learner_topic_mastery_repository=None,
+        goal_autonomy_state_repository=goal_state_repo,
+        session_repository=None,
+        memory_service=memory_service,
+        autonomy_job_service=autonomy_job_service,
+        audit_service=audit_service,
+        llm_provider=MockLLMProvider("mock-tutor-v1"),
+    )
+
+    triggered = await reflection_service.evaluate_and_trigger_proactive_reflections(
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+    )
+    
+    # Should only trigger 1 goal reflection (from review threshold, since it runs first)
+    assert len(triggered) == 1
+    assert triggered[0].trigger_source == "corpus_review_threshold"
+
+
+@pytest.mark.asyncio
+async def test_proactive_reflection_rule3_total_limit():
+    # If there are 5 contested high priority items, Rule 3 should only trigger at most 3 reflections.
+    items = [
+        _build_corpus_item("topic-1", "observe", contested=True, priority_score=0.9),
+        _build_corpus_item("topic-2", "observe", contested=True, priority_score=0.85),
+        _build_corpus_item("topic-3", "observe", contested=True, priority_score=0.8),
+        _build_corpus_item("topic-4", "observe", contested=True, priority_score=0.75),
+        _build_corpus_item("topic-5", "observe", contested=True, priority_score=0.7),
+    ]
+    memory_service = MockMemoryServiceWithCorpus(items)
+    record_repository = StubReflectionRecordRepository()
+    audit_service = AuditService(StubAuditRepository())
+    job_repository = StubScheduledAutonomyJobRepository()
+    autonomy_job_service = AutonomyJobService(repository=job_repository, audit_service=audit_service)
+    
+    goal_state_repo = StubGoalAutonomyStateRepository()
+    await goal_state_repo.create(
+        GoalAutonomyState.build(learner_goal_id="goal-1")
+    )
+
+    reflection_service = ReflectionService(
+        reflection_record_repository=record_repository,
+        reflection_action_repository=StubReflectionActionRepository(),
+        goal_repository=None,
+        daily_task_repository=None,
+        workflow_run_repository=None,
+        study_plan_repository=None,
+        task_attempt_repository=None,
+        learner_topic_mastery_repository=None,
+        goal_autonomy_state_repository=goal_state_repo,
+        session_repository=None,
+        memory_service=memory_service,
+        autonomy_job_service=autonomy_job_service,
+        audit_service=audit_service,
+        llm_provider=MockLLMProvider("mock-tutor-v1"),
+    )
+
+    triggered = await reflection_service.evaluate_and_trigger_proactive_reflections(
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+    )
+    
+    # Cap of 3
+    assert len(triggered) == 3
+    triggered_topics = {t.evidence_payload["topic_focus"] for t in triggered}
+    # Should be the 3 highest priority ones
+    assert triggered_topics == {"topic-1", "topic-2", "topic-3"}
+
+
+@pytest.mark.asyncio
+async def test_proactive_reflection_runtime_governance_triggers():
+    fallback_events = [
+        SkillUsageEvent.build(
+            skill_artifact_id=None,
+            skill_name="skill-a",
+            skill_version=None,
+            learner_goal_id="goal-1",
+            surface="chat",
+            outcome_status="completed",
+            selection_reason="artifact_missing_static_fallback",
+            metadata={},
+        )
+        for _ in range(3)
+    ]
+    low_conf_events = [
+        SkillUsageEvent.build(
+            skill_artifact_id=None,
+            skill_name="skill-b",
+            skill_version=None,
+            learner_goal_id="goal-1",
+            surface="hint",
+            outcome_status="completed",
+            metadata={"confidence": 0.3},
+        )
+        for _ in range(3)
+    ]
+    mismatch_events = [
+        SkillUsageEvent.build(
+            skill_artifact_id=None,
+            skill_name="skill-c",
+            skill_version=None,
+            learner_goal_id="goal-1",
+            surface="replan",
+            outcome_status="completed",
+            metadata={"sequence_mismatch": True},
+        )
+        for _ in range(2)
+    ]
+    all_events = fallback_events + low_conf_events + mismatch_events
+    usage_repo = StubSkillUsageEventRepository(all_events)
+
+    memory_service = MockMemoryServiceWithCorpus([])
+    record_repository = StubReflectionRecordRepository()
+    audit_service = AuditService(StubAuditRepository())
+    job_repository = StubScheduledAutonomyJobRepository()
+    autonomy_job_service = AutonomyJobService(repository=job_repository, audit_service=audit_service)
+
+    goal_state_repo = StubGoalAutonomyStateRepository()
+    await goal_state_repo.create(
+        GoalAutonomyState.build(learner_goal_id="goal-1")
+    )
+
+    reflection_service = ReflectionService(
+        reflection_record_repository=record_repository,
+        reflection_action_repository=StubReflectionActionRepository(),
+        goal_repository=None,
+        daily_task_repository=None,
+        workflow_run_repository=None,
+        study_plan_repository=None,
+        task_attempt_repository=None,
+        learner_topic_mastery_repository=None,
+        goal_autonomy_state_repository=goal_state_repo,
+        session_repository=None,
+        memory_service=memory_service,
+        autonomy_job_service=autonomy_job_service,
+        audit_service=audit_service,
+        llm_provider=MockLLMProvider("mock-tutor-v1"),
+        usage_repository=usage_repo,
+    )
+
+    triggered = await reflection_service.evaluate_and_trigger_proactive_reflections(
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+    )
+
+    # At least one runtime governance trigger should fire
+    assert len(triggered) >= 1
+    trigger_sources = {t.trigger_source for t in triggered}
+    runtime_sources = {"fallback_to_baseline_burst", "low_confidence_burst", "repeated_sequence_mismatch"}
+    assert trigger_sources & runtime_sources, "At least one runtime governance trigger should fire"
+    for record in triggered:
+        assert record.scope == "goal"
+
+
+@pytest.mark.asyncio
+async def test_reflection_evidence_contract_runtime_payload():
+    # 1. Setup Goal and daily task
+    goal = LearnerGoal.build(
+        learner_profile_id="profile-123",
+        title="Master matrices",
+        subject="Linear Algebra",
+        target_outcome="Solve matrix exercises independently",
+        baseline_note=None,
+        deadline_date=date.today() + timedelta(days=21),
+        weekly_study_minutes=180,
+    )
+    # Ensure goal.id is set correctly for testing
+    object.__setattr__(goal, "id", "goal-123")
+
+    # Setup SkillUsageEvent with complete routing/capability metadata
+    usage_event = SkillUsageEvent.build(
+        skill_name="test_capability",
+        surface="chat",
+        outcome_status="failed",
+        daily_task_id="task-123",
+        workflow_run_id="workflow-123",
+        trigger_source="user",
+        skill_artifact_id="artifact-winner-123",
+        skill_version="1.0.0",
+        skill_status_at_use="active",
+        resolver_status="resolved",
+        selection_reason="production_default",
+        outcome_signals={"confidence": 0.85},
+        metadata={
+            "capability": {
+                "requested_capability": "request_cap",
+                "selected_capability": "select_cap",
+                "bridge_version": "v2",
+                "resolution_mode": "resolver",
+                "reason_codes": ["ok"],
+                "task_type": "exam",
+            },
+            "fallback_chain": ["static_fallback"],
+            "loser_reason_map": {"candidate-1": ["suppressed"]},
+            "router_decision": {
+                "ranked_candidates": [
+                    {
+                        "candidate_id": "candidate-1",
+                        "skill_name": "test_candidate",
+                        "artifact_id": "artifact-loser-123",
+                        "artifact_status": "suppressed"
+                    }
+                ]
+            },
+            "selected_template_id": "template-123",
+            "selected_template_source": "custom",
+            "sequence_contract_version": "seq-v1",
+            "tool_plan": [{}, {}],
+        }
+    )
+
+    # 2. Setup rollout and observation
+    rollout = ReflectionProposalRollout.build(
+        proposal_id="proposal-123",
+        learner_goal_id="goal-123",
+        surface="chat",
+        baseline_snapshot={},
+        runtime_overlay_payload={},
+        activated_by="operator:admin",
+    )
+    rollout = rollout.with_status("rolled_out")
+
+    observation = ReflectionProposalRolloutObservation.build(
+        rollout_id=rollout.id,
+        proposal_id="proposal-123",
+        learner_goal_id="goal-123",
+        surface="chat",
+        recommendation="promote",
+        observed_sample_count=5,
+        positive_score=0.9,
+        negative_score=0.1,
+        signal_summary={},
+        reason_codes=[],
+    )
+
+    # 3. Setup repositories
+    record_repository = StubReflectionRecordRepository()
+    usage_repo = StubSkillUsageEventRepository([usage_event])
+    rollout_repo = StubProposalRolloutRepository()
+    await rollout_repo.create(rollout)
+    rollout_obs_repo = StubProposalRolloutObservationRepository()
+    await rollout_obs_repo.create(observation)
+
+    memory_service = MockMemoryServiceWithCorpus([])
+    audit_service = AuditService(StubAuditRepository())
+    job_repository = StubScheduledAutonomyJobRepository()
+    autonomy_job_service = AutonomyJobService(repository=job_repository, audit_service=audit_service)
+
+    # 4. Instantiate service with rollout repos
+    reflection_service = ReflectionService(
+        reflection_record_repository=record_repository,
+        reflection_action_repository=StubReflectionActionRepository(),
+        goal_repository=StubGoalRepository(goal),
+        daily_task_repository=StubDailyTaskRepository([]),
+        workflow_run_repository=StubWorkflowRunRepository([]),
+        study_plan_repository=StubStudyPlanRepository([]),
+        task_attempt_repository=None,
+        learner_topic_mastery_repository=None,
+        goal_autonomy_state_repository=StubGoalAutonomyStateRepository(),
+        session_repository=None,
+        memory_service=memory_service,
+        autonomy_job_service=autonomy_job_service,
+        audit_service=audit_service,
+        llm_provider=MockLLMProvider("mock-tutor-v1"),
+        usage_repository=usage_repo,
+        rollout_repository=rollout_repo,
+        rollout_observation_repository=rollout_obs_repo,
+    )
+
+    # 5. Trigger reflection using trigger_reflection
+    req = ReflectionTriggerRequest(
+        learner_profile_id="profile-123",
+        learner_goal_id="goal-123",
+        scope="task",
+        target_type="daily_task",
+        target_id="task-123",
+        trigger_source="task_failed",
+        reflection_depth=1,
+        daily_task_id="task-123",
+    )
+    record = await reflection_service.trigger_reflection(req)
+    assert record is not None
+
+    # 6. Verify evidence_payload structure
+    evidence = record.evidence_payload
+    assert "runtime_evidence" in evidence
+    runtime = evidence["runtime_evidence"]
+
+    # capability_request check
+    cap_req = runtime["capability_request"]
+    assert cap_req["requested_capability"] == "request_cap"
+    assert cap_req["surface"] == "chat"
+    assert cap_req["task_type"] == "exam"
+
+    # capability_selection check
+    cap_sel = runtime["capability_selection"]
+    assert cap_sel["selected_capability"] == "select_cap"
+    assert cap_sel["winner_artifact_id"] == "artifact-winner-123"
+    assert cap_sel["fallback_chain"] == ["static_fallback"]
+    assert cap_sel["loser_reason_codes"] == ["candidate-1"]
+    assert cap_sel["confidence"] == 0.85
+
+    # candidates check
+    candidates = runtime["candidates"]
+    assert len(candidates) == 1
+    assert candidates[0]["candidate_id"] == "candidate-1"
+    assert candidates[0]["skill_name"] == "test_candidate"
+
+    # template_summary check
+    tpl = runtime["template_summary"]
+    assert tpl["template_id"] == "template-123"
+    assert tpl["template_source"] == "custom"
+    assert tpl["sequence_contract_version"] == "seq-v1"
+    assert tpl["steps_count"] == 2
+
+    # rollout_governance check
+    gov = runtime["rollout_governance"]
+    assert gov["rollout_status"] == "rolled_out"
+    assert gov["staged"] is False
+    assert gov["approved_by"] == "operator:admin"
+    assert gov["recent_observation_recommendation"] == "promote"
+
+
+@pytest.mark.asyncio
+async def test_reflection_evidence_contract_runtime_degradation():
+    # Verify graceful degradation to None when usage and rollout data are absent
+    goal = LearnerGoal.build(
+        learner_profile_id="profile-123",
+        title="Master matrices",
+        subject="Linear Algebra",
+        target_outcome="Solve matrix exercises independently",
+        baseline_note=None,
+        deadline_date=date.today() + timedelta(days=21),
+        weekly_study_minutes=180,
+    )
+    object.__setattr__(goal, "id", "goal-123")
+
+    record_repository = StubReflectionRecordRepository()
+    memory_service = MockMemoryServiceWithCorpus([])
+    audit_service = AuditService(StubAuditRepository())
+    job_repository = StubScheduledAutonomyJobRepository()
+    autonomy_job_service = AutonomyJobService(repository=job_repository, audit_service=audit_service)
+
+    reflection_service = ReflectionService(
+        reflection_record_repository=record_repository,
+        reflection_action_repository=StubReflectionActionRepository(),
+        goal_repository=StubGoalRepository(goal),
+        daily_task_repository=StubDailyTaskRepository([]),
+        workflow_run_repository=StubWorkflowRunRepository([]),
+        study_plan_repository=StubStudyPlanRepository([]),
+        task_attempt_repository=None,
+        learner_topic_mastery_repository=None,
+        goal_autonomy_state_repository=StubGoalAutonomyStateRepository(),
+        session_repository=None,
+        memory_service=memory_service,
+        autonomy_job_service=autonomy_job_service,
+        audit_service=audit_service,
+        llm_provider=MockLLMProvider("mock-tutor-v1"),
+        usage_repository=StubSkillUsageEventRepository([]),
+        rollout_repository=StubProposalRolloutRepository(),
+        rollout_observation_repository=StubProposalRolloutObservationRepository(),
+    )
+
+    req = ReflectionTriggerRequest(
+        learner_profile_id="profile-123",
+        learner_goal_id="goal-123",
+        scope="task",
+        target_type="daily_task",
+        target_id="task-123",
+        trigger_source="task_failed",
+        reflection_depth=1,
+        daily_task_id="task-123",
+    )
+    record = await reflection_service.trigger_reflection(req)
+    assert record is not None
+
+    evidence = record.evidence_payload
+    assert "runtime_evidence" in evidence
+    runtime = evidence["runtime_evidence"]
+    assert runtime["capability_request"] is None
+    assert runtime["capability_selection"] is None
+    assert runtime["candidates"] == []
+    assert runtime["template_summary"] is None
+    assert runtime["rollout_governance"] is None
+
+
+async def test_reflection_governance_action_taxonomy_and_activation():
+    profile = LearnerProfile.build()
+    goal = LearnerGoal.build(
+        learner_profile_id=profile.id,
+        title="Master matrices",
+        subject="Linear Algebra",
+        target_outcome="Solve matrix exercises independently",
+        baseline_note=None,
+        deadline_date=date.today() + timedelta(days=21),
+        weekly_study_minutes=180,
+    )
+    object.__setattr__(goal, "id", "goal-123")
+
+    record_repository = StubReflectionRecordRepository()
+    action_repository = StubReflectionActionRepository()
+    review_decision_repository = StubReviewDecisionRepository()
+    memory_service = MockMemoryServiceWithCorpus([])
+    
+    audit_repository = StubAuditRepository()
+    audit_service = AuditService(audit_repository)
+    
+    job_repository = StubScheduledAutonomyJobRepository()
+    autonomy_job_service = AutonomyJobService(repository=job_repository, audit_service=audit_service)
+
+    governance_service = ReflectionGovernanceService(
+        reflection_record_repository=record_repository,
+        reflection_action_repository=action_repository,
+        review_decision_repository=review_decision_repository,
+        audit_service=audit_service,
+        autonomy_job_service=autonomy_job_service,
+    )
+
+    service = ReflectionService(
+        reflection_record_repository=record_repository,
+        reflection_action_repository=action_repository,
+        goal_repository=StubGoalRepository(goal),
+        daily_task_repository=StubDailyTaskRepository([]),
+        workflow_run_repository=StubWorkflowRunRepository([]),
+        study_plan_repository=StubStudyPlanRepository([]),
+        task_attempt_repository=None,
+        learner_topic_mastery_repository=None,
+        goal_autonomy_state_repository=StubGoalAutonomyStateRepository(),
+        session_repository=None,
+        memory_service=memory_service,
+        autonomy_job_service=autonomy_job_service,
+        audit_service=audit_service,
+        llm_provider=MockLLMProvider("mock-tutor-v1"),
+        usage_repository=StubSkillUsageEventRepository([]),
+        rollout_repository=StubProposalRolloutRepository(),
+        rollout_observation_repository=StubProposalRolloutObservationRepository(),
+    )
+
+    # 1. Test auto-sandbox action for fallback_to_baseline_burst
+    req1 = ReflectionTriggerRequest(
+        learner_profile_id=profile.id,
+        learner_goal_id=goal.id,
+        scope="task",
+        target_type="daily_task",
+        target_id="task-1",
+        trigger_source="fallback_to_baseline_burst",
+        reflection_depth=1,
+        daily_task_id="task-1",
+    )
+    record1 = await service.trigger_reflection(req1)
+    assert record1 is not None
+    assert record1.primary_root_cause == "router_issue"
+    assert record1.status == "actioned"
+
+    actions1 = await action_repository.list_by_reflection(record1.id)
+    assert len(actions1) == 1
+    assert actions1[0].action_type == "enqueue_router_review"
+    assert actions1[0].status == "executed"
+    assert actions1[0].risk_level == "medium"
+    assert not actions1[0].approval_required
+
+    # Verify that a curator job was scheduled in job_repository
+    jobs = list(job_repository.jobs.values())
+    assert len(jobs) == 1
+    assert jobs[0].job_type == "reflection_skill_evolution_curator"
+
+    # 2. Test manual-activation action for corpus_contested_high_priority
+    job_repository.jobs.clear()
+    req2 = ReflectionTriggerRequest(
+        learner_profile_id=profile.id,
+        learner_goal_id=goal.id,
+        scope="task",
+        target_type="daily_task",
+        target_id="task-2",
+        trigger_source="corpus_contested_high_priority",
+        reflection_depth=1,
+        daily_task_id="task-2",
+    )
+    record2 = await service.trigger_reflection(req2)
+    assert record2 is not None
+    assert record2.primary_root_cause == "memory_governance_issue"
+    assert record2.status == "needs_review"
+
+    actions2 = await action_repository.list_by_reflection(record2.id)
+    assert len(actions2) == 1
+    assert actions2[0].action_type == "enqueue_memory_governance_review"
+    assert actions2[0].status == "blocked"
+    assert actions2[0].risk_level == "high"
+    assert actions2[0].approval_required
+    assert len(job_repository.jobs) == 0
+
+    # Now manually activate the action
+    activated = await governance_service.activate_action(
+        reflection_id=record2.id,
+        action_id=actions2[0].id,
+        operator_id="operator-123",
+        reason_code="approve_and_run",
+    )
+    assert activated.status == "executed"
+    jobs = list(job_repository.jobs.values())
+    assert len(jobs) == 1
+    assert jobs[0].job_type == "reflection_skill_evolution_curator"
+
+    # Verify reflection status updated to actioned
+    ref_updated = await record_repository.get_by_id(record2.id)
+    assert ref_updated.status == "actioned"
+
+    # Verify audit event for activation is logged
+    assert any(
+        evt.event_type == "reflection.action.activated"
+        for evt in audit_repository.events
+    )
+
+    # 3. Test operator review only action for sandbox_admission_issue
+    record3 = ReflectionRecord.build(
+        learner_profile_id=profile.id,
+        learner_goal_id=goal.id,
+        daily_task_id="task-3",
+        workflow_run_id=None,
+        study_plan_id=None,
+        scope="task",
+        target_type="daily_task",
+        target_id="task-3",
+        trigger_source="task_failed",
+        reflection_depth=1,
+        dedupe_key="dedupe-3",
+        aggregation_key="agg-3",
+        duplicate_count=1,
+        priority_score=0.5,
+        last_duplicate_at=datetime.now(timezone.utc),
+        cooldown_until=datetime.now(timezone.utc),
+        evidence_payload={"sandbox_failed": True},
+        primary_root_cause="sandbox_admission_issue",
+        secondary_root_causes=[],
+        severity="high",
+        confidence_score=0.9,
+        summary="sandbox failed",
+        evidence_summary="sandbox failed evidence",
+        recommended_next_step="operator review",
+    )
+    record3 = record3.with_status("needs_review")
+    await record_repository.create(record3)
+    
+    action3 = ReflectionAction.build(
+        reflection_record_id=record3.id,
+        action_type="enqueue_sandbox_admission_review",
+        risk_level="high",
+        approval_required=True,
+        payload={"reason": "sandbox_admission_issue"},
+    )
+    # Force block status
+    action3 = action3.with_status("blocked", execution_result={"reason_code": "approval_required"})
+    await action_repository.create(action3)
+    
+    # Attempting to activate sandbox admission review should raise ValidationError
+    with pytest.raises(ValidationError, match="This action type can only be reviewed by an operator"):
+        await governance_service.activate_action(
+            reflection_id=record3.id,
+            action_id=action3.id,
+            operator_id="operator-123",
+            reason_code="attempt_activate",
+        )
+
+
+async def test_reflection_proposal_sandbox_governance_model():
+    # Setup test components
+    profile = LearnerProfile.build()
+    goal = LearnerGoal.build(
+        learner_profile_id=profile.id,
+        title="Test Goal",
+        subject="Testing",
+        target_outcome="Achieve verification success",
+        baseline_note=None,
+        deadline_date=date.today() + timedelta(days=21),
+        weekly_study_minutes=180,
+    )
+    object.__setattr__(goal, "id", "goal-123")
+
+    harness = _build_reflection_skill_evolution_curator_harness()
+    proposal_repository = harness.proposal_repository
+    evaluation_repository = harness.evaluation_repository
+    sandbox_run_repository = harness.sandbox_run_repository
+    proposal_service = harness.service._proposal_service
+    
+    audit_service = AuditService(harness.audit_repository)
+    replay_service = ReflectionReplayService(
+        repository=evaluation_repository,
+        audit_service=audit_service,
+    )
+    
+    sandbox_service = ReflectionProposalSandboxService(
+        sandbox_run_repository=sandbox_run_repository,
+        proposal_service=proposal_service,
+        replay_service=replay_service,
+        audit_service=audit_service,
+    )
+
+    admission_service = SandboxAdmissionService()
+    activation_governance_service = ActivationGovernanceService()
+
+    curator_service = ReflectionSkillEvolutionCuratorService(
+        proposal_repository=proposal_repository,
+        evaluation_repository=evaluation_repository,
+        sandbox_run_repository=sandbox_run_repository,
+        artifact_repository=harness.artifact_repository,
+        proposal_service=proposal_service,
+        staging_service=harness.service._staging_service,
+        audit_service=audit_service,
+        sandbox_admission_service=admission_service,
+        activation_governance_service=activation_governance_service,
+        sandbox_service=sandbox_service,
+    )
+
+    # 1. Payload validation check for routing_policy
+    # Build a bad proposal (missing trust_policy)
+    with pytest.raises(ValidationError, match="routing_policy payload must contain non-empty 'trust_policy'"):
+        bad_prop = ReflectionProposal.build(
+            reflection_record_id="ref-123",
+            learner_goal_id=goal.id,
+            proposal_type="routing_policy",
+            target_scope="chat",
+            priority_score=0.9,
+            hypothesis="bad routing",
+            change_summary="test summary",
+            structured_patch_payload={
+                "routing_rules": {},
+                "fallback_chain": ["static_fallback"],
+                "ranking_policy": "confidence_first",
+            },
+            expected_improvement="none",
+            risk_level="high",
+            evidence_snapshot={},
+        )
+        ReflectionProposalService._validate_patch_payload(bad_prop)
+
+    # Build a valid high-risk routing_policy proposal with low-quality summary (too short)
+    prop_short_summary = ReflectionProposal.build(
+        reflection_record_id="ref-123",
+        learner_goal_id=goal.id,
+        proposal_type="routing_policy",
+        target_scope="chat",
+        priority_score=0.9,
+        hypothesis="Valid routing",
+        change_summary="Too short",
+        structured_patch_payload={
+            "routing_rules": {"fallback_on_incompatible": True},
+            "fallback_chain": ["dynamic_resolver", "static_fallback"],
+            "trust_policy": "guided",
+            "ranking_policy": "confidence_first",
+        },
+        expected_improvement="none",
+        risk_level="high",
+        evidence_snapshot={"fallback_burst_count": 5, "severity_score": 0.8},
+    )
+    await proposal_repository.create(prop_short_summary)
+    # Executing sandbox on this should fail validation due to summary length
+    with pytest.raises(ValidationError, match="High-risk proposals require a detailed change summary"):
+        await sandbox_service.execute(proposal_id=prop_short_summary.id)
+
+    # Build a valid high-risk routing_policy proposal with insufficient evidence snapshot
+    prop_insufficient_evidence = ReflectionProposal.build(
+        reflection_record_id="ref-123",
+        learner_goal_id=goal.id,
+        proposal_type="routing_policy",
+        target_scope="chat",
+        priority_score=0.9,
+        hypothesis="Valid routing",
+        change_summary="This summary is long enough to satisfy the character length constraint.",
+        structured_patch_payload={
+            "routing_rules": {"fallback_on_incompatible": True},
+            "fallback_chain": ["dynamic_resolver", "static_fallback"],
+            "trust_policy": "guided",
+            "ranking_policy": "confidence_first",
+        },
+        expected_improvement="none",
+        risk_level="high",
+        evidence_snapshot={},  # empty evidence snapshot
+    )
+    await proposal_repository.create(prop_insufficient_evidence)
+    with pytest.raises(ValidationError, match="High-risk proposals require higher-quality evidence snapshot"):
+        await sandbox_service.execute(proposal_id=prop_insufficient_evidence.id)
+
+    # Build a valid high-risk routing_policy proposal with sufficient summary and evidence
+    prop_valid = ReflectionProposal.build(
+        reflection_record_id="ref-123",
+        learner_goal_id=goal.id,
+        proposal_type="routing_policy",
+        target_scope="chat",
+        priority_score=0.9,
+        hypothesis="Valid routing",
+        change_summary="This summary is long enough to satisfy the character length constraint.",
+        structured_patch_payload={
+            "routing_rules": {"fallback_on_incompatible": True},
+            "fallback_chain": ["dynamic_resolver", "static_fallback"],
+            "trust_policy": "guided",
+            "ranking_policy": "confidence_first",
+        },
+        expected_improvement="none",
+        risk_level="high",
+        evidence_snapshot={"fallback_burst_count": 5, "severity_score": 0.8},
+    )
+    await proposal_repository.create(prop_valid)
+
+    # Verify Auto-Sandbox Admission via SandboxAdmissionService
+    admission = admission_service.decide(SandboxAdmissionRequest(proposal=prop_valid))
+    assert admission.allowed
+    assert admission.profile.name == "stricter_high_risk_profile"
+    assert admission.profile.allowed_tools == frozenset({"Read"})
+    assert admission.profile.sample_count_cap == 2
+    
+    # Describe API correctly marks high-risk auto_sandbox_eligible
+    desc = await proposal_service.describe(prop_valid)
+    assert desc["auto_sandbox_eligible"] is True
+    assert desc["admission_mode"] == "auto"
+
+    # Simulate sandbox queueing and execution by Curator (Curator processes sandbox candidates)
+    res = await curator_service._process_sandbox_candidate(prop_valid)
+    # The curator enqueues and runs the sandbox execution, which completes successfully!
+    assert res == "enqueued"
+    
+    # Check that evaluation result was created
+    eval_res = await evaluation_repository.get_by_proposal(prop_valid.id)
+    assert eval_res is not None
+    # Dynamic routing evaluation: delta is calculated as:
+    # 0.05 * len(rules) [0.05*1] + min(0.12, 0.02 * mismatches) [0.10] + dynamic_resolver [0.05] + ranking_policy [0.05] = 0.25
+    assert eval_res.score_delta == pytest.approx(0.25)
+    assert eval_res.evaluation_status == "effective"
+
+    # Verify that the sandbox run status is completed
+    runs = await sandbox_run_repository.list_by_proposal(prop_valid.id)
+    assert len(runs) == 1
+    assert runs[0].status == "completed"
+
+    # 4. Curator processes auto-staging candidates
+    # Update proposal status to approved to simulate operator approval of sandbox result
+    prop_completed = await proposal_repository.get_by_id(prop_valid.id)
+    prop_approved = prop_completed.with_status(
+        "approved",
+        evaluation_status="effective",
+        evaluation_summary="sandbox:0.25",
+        latest_sandbox_run_id=runs[0].id,
+        approved_at=datetime.now(timezone.utc),
+        approved_by="operator-1",
+        approval_reason_code="effective",
+    )
+    await proposal_repository.update(prop_approved)
+    
+    # Curator runs staging check: ActivationGovernanceService blocks high-risk auto-staging!
+    stage_res = await curator_service._process_auto_stage_candidate(prop_approved, now=datetime.now(timezone.utc))
+    assert stage_res == "suspended"  # blocked from staging!
+
+
+

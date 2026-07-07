@@ -29,6 +29,7 @@ from agent_core.domain.entities.memory import (
 from agent_core.domain.errors import NotFoundError, ValidationError
 from agent_core.domain.entities.reflection import ReflectionRecord
 from agent_core.domain.entities.reflection_v2 import ReflectionOutcomeEvaluation
+from agent_core.domain.entities.session.quiz import SessionQuizAnswerAttempt
 from agent_core.infrastructure.db.repositories import (
     BehaviorMemoryEmbeddingRepository,
     BehaviorMemoryRepository,
@@ -143,6 +144,8 @@ class MemoryService:
             behavior_memory_embedding_repository=behavior_memory_embedding_repository,
             promotion_eligibility_repository=promotion_eligibility_repository,
             governance_config=self._governance_config,
+            knowledge_memory_repository=knowledge_memory_repository,
+            behavior_memory_repository=behavior_memory_repository,
         )
         self._interpretation_service = InterpretationService(
             knowledge_memory_repository=knowledge_memory_repository,
@@ -430,19 +433,29 @@ class MemoryService:
     async def retrieve_relevant_knowledge_memories(
         self, *, learner_profile_id: str, query_text: str, limit: int = 3,
         candidate_limit: int = 24, min_score: float = 0.15,
+        surface: str = "default",
+        learner_facing: bool | None = None,
     ) -> KnowledgeMemoryRetrievalResult:
+        if learner_facing is not None and surface == "default":
+            surface = "chat" if learner_facing else "default"
         return await self._retrieval_service.retrieve_relevant_knowledge_memories(
             learner_profile_id=learner_profile_id, query_text=query_text, limit=limit,
             candidate_limit=candidate_limit, min_score=min_score,
+            surface=surface,
         )
 
     async def retrieve_relevant_behavior_memories(
         self, *, learner_profile_id: str, query_text: str, limit: int = 3,
         candidate_limit: int = 24, min_score: float = 0.15,
+        surface: str = "default",
+        learner_facing: bool | None = None,
     ) -> BehaviorMemoryRetrievalResult:
+        if learner_facing is not None and surface == "default":
+            surface = "chat" if learner_facing else "default"
         return await self._retrieval_service.retrieve_relevant_behavior_memories(
             learner_profile_id=learner_profile_id, query_text=query_text, limit=limit,
             candidate_limit=candidate_limit, min_score=min_score,
+            surface=surface,
         )
 
     # ── Catalog (browse / detail / read) ─────────────────────────────────────
@@ -645,6 +658,19 @@ class MemoryService:
         attempt: TaskAttempt,
     ) -> None:
         await self._evidence_service.upsert_task_attempt_evidence(
+            memory=memory,
+            memory_type=memory_type,
+            attempt=attempt,
+        )
+
+    async def upsert_quiz_answer_attempt_evidence(
+        self,
+        *,
+        memory: KnowledgeMemory | BehaviorMemory,
+        memory_type: str,
+        attempt: SessionQuizAnswerAttempt,
+    ) -> None:
+        await self._evidence_service.upsert_quiz_answer_attempt_evidence(
             memory=memory,
             memory_type=memory_type,
             attempt=attempt,

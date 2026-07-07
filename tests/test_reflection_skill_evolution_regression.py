@@ -271,6 +271,7 @@ def _make_curator(
     audit_service: _StubAuditService | None = None,
     proposal_service: _StubProposalService | None = None,
     staging_service: _StubStagingService | None = None,
+    sandbox_service: Any | None = None,
 ) -> tuple[ReflectionSkillEvolutionCuratorService, _StubAuditService, _StubProposalService, _StubStagingService]:
     audit = audit_service or _StubAuditService()
     proposals = proposal_service or _StubProposalService()
@@ -295,6 +296,7 @@ def _make_curator(
         audit_service=audit,
         db_session=db_session,
         config=config,
+        sandbox_service=sandbox_service,
     )
     return service, audit, proposals, staging
 
@@ -799,9 +801,8 @@ class TestCuratorAutoGovernanceGates:
         proposal.risk_level = "high"
         service, audit, _, _ = _make_curator(sandbox_candidates=[proposal])
         result = await service.run_once()
-        assert result.suspended_count == 1
-        reason_codes = [e["reason_code"] for e in audit.events]
-        assert "risk_level_high" in reason_codes
+        # Phase 4: high-risk proposals auto-admit to stricter sandbox
+        assert result.sandbox_enqueued_count == 1
 
     @pytest.mark.asyncio
     async def test_failed_sandbox_run_rejected_in_sandbox_phase(self) -> None:
@@ -1167,6 +1168,36 @@ class TestEndToEndClosedLoopScenarios:
         result = await service.run_once()
         assert result.staged_count == 0
         assert any(e["reason_code"] == "non_replacement_source" for e in audit.events)
+
+    @pytest.mark.asyncio
+    async def test_curator_auto_runs_sandbox_execution(self) -> None:
+        """Verify curator executes the sandbox run when a proposal is enqueued."""
+        class MockSandboxService:
+            def __init__(self) -> None:
+                self.executed_proposals: list[str] = []
+
+            async def execute(self, *, proposal_id: str) -> Any:
+                self.executed_proposals.append(proposal_id)
+                return _FakeSandboxRun(status="completed")
+
+        sandbox_svc = MockSandboxService()
+        proposal = _FakeProposal()
+        proposal.status = "proposed"
+        proposal.risk_level = "low"
+        proposal.proposal_type = "skill_package"
+        proposal.target_scope = "chat"
+
+        service, audit, proposals, _ = _make_curator(
+            sandbox_candidates=[proposal],
+            auto_staging_enabled=True,
+            db_session=_FakeDbSession(),
+            sandbox_service=sandbox_svc,
+        )
+        result = await service.run_once()
+        # Sandbox must be enqueued
+        assert result.sandbox_enqueued_count == 1
+        # sandbox_service.execute must have been triggered
+        assert proposal.id in sandbox_svc.executed_proposals
 
 
 # ===========================================================================

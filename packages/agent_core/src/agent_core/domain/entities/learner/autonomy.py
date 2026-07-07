@@ -7,6 +7,12 @@ from uuid import uuid4
 
 from agent_core.domain.errors import ValidationError
 
+
+def _validate_score(name: str, value: float) -> None:
+    if value < 0.0 or value > 1.0:
+        raise ValidationError(f"{name} must be between 0 and 1.")
+
+
 AUTONOMY_PHASES = {
     "active",
     "assessment_due",
@@ -338,15 +344,27 @@ class LearnerTopicMastery:
     updated_at: datetime
 
     @classmethod
-    def build(cls, *, learner_goal_id: str, topic_key: str) -> "LearnerTopicMastery":
+    def build(
+        cls,
+        *,
+        learner_goal_id: str,
+        topic_key: str,
+        mastery_score: float = 0.5,
+        confidence: float = 0.2,
+        evidence_count: int = 0,
+    ) -> "LearnerTopicMastery":
+        _validate_score("mastery_score", mastery_score)
+        _validate_score("confidence", confidence)
+        if evidence_count < 0:
+            raise ValidationError("evidence_count must be non-negative.")
         now = _utcnow()
         return cls(
             id=str(uuid4()),
             learner_goal_id=learner_goal_id,
             topic_key=topic_key,
-            mastery_score=0.5,
-            confidence=0.2,
-            evidence_count=0,
+            mastery_score=mastery_score,
+            confidence=confidence,
+            evidence_count=evidence_count,
             last_attempt_status=None,
             last_assessed_at=None,
             created_at=now,

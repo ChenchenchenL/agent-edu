@@ -135,6 +135,7 @@ class SkillArtifactRepository:
                 definition=entity.definition,
                 runtime_directives=entity.runtime_directives,
                 tool_plan=entity.tool_plan,
+                plan_templates=entity.plan_templates,
                 compatibility_contract=entity.compatibility_contract,
                 source_reflection_ids=entity.source_reflection_ids,
                 source_memory_ids=entity.source_memory_ids,
@@ -172,6 +173,7 @@ class SkillArtifactRepository:
         model.definition = dict(entity.definition)
         model.runtime_directives = dict(entity.runtime_directives)
         model.tool_plan = [dict(item) for item in entity.tool_plan]
+        model.plan_templates = [dict(item) for item in entity.plan_templates]
         model.compatibility_contract = dict(entity.compatibility_contract)
         model.source_reflection_ids = list(entity.source_reflection_ids)
         model.source_memory_ids = list(entity.source_memory_ids)
@@ -374,6 +376,7 @@ class SkillArtifactRepository:
             definition=dict(model.definition or {}),
             runtime_directives=dict(model.runtime_directives or {}),
             tool_plan=[dict(item) for item in model.tool_plan or []],
+            plan_templates=[dict(item) for item in getattr(model, 'plan_templates', None) or []],
             compatibility_contract=dict(model.compatibility_contract or {}),
             source_reflection_ids=list(model.source_reflection_ids or []),
             source_memory_ids=list(model.source_memory_ids or []),
@@ -451,6 +454,8 @@ class SkillUsageEventRepository:
         outcome_status: str | None = None,
         resolver_status: str | None = None,
         created_at_from: datetime | None = None,
+        daily_task_id: str | None = None,
+        workflow_run_id: str | None = None,
         limit: int = 50,
     ) -> list[SkillUsageEvent]:
         query = select(SkillUsageEventModel)
@@ -470,6 +475,10 @@ class SkillUsageEventRepository:
             query = query.where(SkillUsageEventModel.resolver_status == resolver_status)
         if created_at_from is not None:
             query = query.where(SkillUsageEventModel.created_at >= created_at_from)
+        if daily_task_id is not None:
+            query = query.where(SkillUsageEventModel.daily_task_id == daily_task_id)
+        if workflow_run_id is not None:
+            query = query.where(SkillUsageEventModel.workflow_run_id == workflow_run_id)
         result = await self._session.execute(
             query.order_by(desc(SkillUsageEventModel.created_at), desc(SkillUsageEventModel.id)).limit(limit)
         )

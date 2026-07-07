@@ -3,28 +3,23 @@ import {
   ClipboardList,
   Loader2,
   Sparkles,
-  Lightbulb,
   CheckCircle2,
   RotateCcw,
-  MessageSquareText,
-  Eye,
-  Circle,
   AlertCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { Textarea } from "@/components/ui/textarea";
 import {
   useSessionQuizzes,
   useQuizDetail,
   useGenerateQuiz,
 } from "@/hooks/use-quiz";
+import { useQuizAttempts } from "@/hooks/use-quiz-attempts";
+import { QuestionCard } from "@/pages/learning/components/question-card";
 import { difficultyLabel } from "@/pages/learning/lib/labels";
 import type { MessageRequest } from "@/types/session";
-
-type PracticeFlags = Record<number, boolean>;
 
 interface QuizPanelProps {
   sessionId: string;
@@ -32,6 +27,17 @@ interface QuizPanelProps {
   onRequestHint: (payload: MessageRequest) => void;
   onDiscussAnswer: (content: string) => void;
   isPending: boolean;
+}
+
+function formatDateTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }
 
 export function QuizPanel({
@@ -45,10 +51,6 @@ export function QuizPanel({
   const [difficulty, setDifficulty] = useState("medium");
   const [questionCount, setQuestionCount] = useState(3);
   const [activeQuizId, setActiveQuizId] = useState<string | null>(null);
-  const [answers, setAnswers] = useState<Record<number, string>>({});
-  const [revealed, setRevealed] = useState<PracticeFlags>({});
-  const [hinted, setHinted] = useState<PracticeFlags>({});
-  const [discussed, setDiscussed] = useState<PracticeFlags>({});
 
   const {
     data: quizList,
@@ -62,25 +64,37 @@ export function QuizPanel({
   } = useQuizDetail(sessionId, activeQuizId);
   const generateQuiz = useGenerateQuiz(sessionId);
 
+  const { state, actions, derived } = useQuizAttempts({
+    sessionId,
+    activeQuiz: activeQuiz ?? null,
+    activeQuizId,
+  });
+
   useEffect(() => {
     if (activeQuizId || !quizList || quizList.length === 0) return;
     setActiveQuizId(quizList[0].quiz_id);
   }, [activeQuizId, quizList]);
+
+  function regenerateQuiz(difficultyOverride?: string) {
+    if (!activeQuiz) return;
+    setTopic(activeQuiz.topic);
+    generateQuiz.mutate({
+      topic: activeQuiz.topic,
+      difficulty: difficultyOverride ?? activeQuiz.difficulty,
+      question_count: activeQuiz.questions.length,
+    });
+  }
 
   function handleGenerate(e: React.FormEvent) {
     e.preventDefault();
     const trimmedTopic = topic.trim();
     if (!trimmedTopic) return;
     generateQuiz.mutate(
-      {
-        topic: trimmedTopic,
-        difficulty,
-        question_count: questionCount,
-      },
+      { topic: trimmedTopic, difficulty, question_count: questionCount },
       {
         onSuccess: (quiz) => {
           setActiveQuizId(quiz.quiz_id);
-          resetPracticeState();
+          actions.resetAll();
         },
       },
     );
@@ -88,48 +102,7 @@ export function QuizPanel({
 
   function handleSelectQuiz(quizId: string) {
     setActiveQuizId(quizId);
-    resetPracticeState();
-  }
-
-  function resetPracticeState() {
-    setAnswers({});
-    setRevealed({});
-    setHinted({});
-    setDiscussed({});
-  }
-
-  function handleRequestHint(questionIndex: number) {
-    if (!activeQuiz) return;
-    const question = activeQuiz.questions[questionIndex];
-    if (!question) return;
-    const learnerAnswer = answers[questionIndex]?.trim();
-    onRequestHint({
-      content: learnerAnswer
-        ? "请针对我的答案给出提示，不要直接告诉我正确答案"
-        : "请给我这道题的提示，不要直接告诉我答案",
-      mode: "hint",
-      related_quiz_id: activeQuiz.quiz_id,
-      question_prompt: question.prompt,
-      learner_answer: learnerAnswer || undefined,
-    });
-    setHinted((prev) => ({ ...prev, [questionIndex]: true }));
-  }
-
-  function handleDiscuss(questionIndex: number) {
-    const question = activeQuiz?.questions[questionIndex];
-    const learnerAnswer = answers[questionIndex]?.trim();
-    if (!question || !learnerAnswer) return;
-    onDiscussAnswer(
-      `关于练习题「${question.prompt}」，我的答案是：${learnerAnswer}。请帮我分析是否正确并讲解。`,
-    );
-    setDiscussed((prev) => ({ ...prev, [questionIndex]: true }));
-  }
-
-  function handleReveal(questionIndex: number) {
-    setRevealed((prev) => ({
-      ...prev,
-      [questionIndex]: !prev[questionIndex],
-    }));
+    actions.resetAll();
   }
 
   function handleQuestionCountChange(value: string) {
@@ -141,31 +114,11 @@ export function QuizPanel({
     setQuestionCount(Math.min(10, Math.max(1, parsed)));
   }
 
-  function formatDateTime(value: string) {
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return "";
-    return new Intl.DateTimeFormat("zh-CN", {
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    }).format(date);
-  }
-
   const quizListItems = quizList ?? [];
-  const totalQuestions = activeQuiz?.questions.length ?? 0;
-  const answeredCount =
-    activeQuiz?.questions.filter((_, index) => answers[index]?.trim()).length ??
-    0;
-  const checkedCount =
-    activeQuiz?.questions.filter((_, index) => revealed[index]).length ?? 0;
   const progressPercent =
-    totalQuestions === 0 ? 0 : Math.round((checkedCount / totalQuestions) * 100);
-  const canResetPractice =
-    Object.keys(answers).length > 0 ||
-    Object.keys(revealed).length > 0 ||
-    Object.keys(hinted).length > 0 ||
-    Object.keys(discussed).length > 0;
+    derived.totalQuestions === 0
+      ? 0
+      : Math.round((derived.checkedCount / derived.totalQuestions) * 100);
 
   return (
     <div className="flex h-full flex-col">
@@ -341,8 +294,8 @@ export function QuizPanel({
                         {activeQuiz.topic}
                       </p>
                       <p className="mt-1 text-xs text-text-secondary">
-                        已作答 {answeredCount}/{totalQuestions}，已核对{" "}
-                        {checkedCount}/{totalQuestions}
+                        已作答 {derived.answeredCount}/{derived.totalQuestions}，已核对{" "}
+                        {derived.checkedCount}/{derived.totalQuestions}
                       </p>
                     </div>
                     <Badge variant="outline" className="shrink-0 text-[10px]">
@@ -367,108 +320,53 @@ export function QuizPanel({
                       type="button"
                       variant="outline"
                       size="sm"
-                      disabled={!canResetPractice}
-                      onClick={resetPracticeState}
+                      disabled={!derived.canReset}
+                      onClick={actions.resetAll}
                     >
                       <RotateCcw className="h-3.5 w-3.5" />
                       重置本轮
                     </Button>
-                    {checkedCount === totalQuestions && totalQuestions > 0 && (
-                      <span className="inline-flex items-center gap-1 rounded-md bg-success/10 px-2.5 py-1.5 text-xs font-medium text-success">
-                        <CheckCircle2 className="h-3.5 w-3.5" />
-                        本轮已完成
-                      </span>
-                    )}
+                    {derived.checkedCount === derived.totalQuestions &&
+                      derived.totalQuestions > 0 && (
+                        <span className="inline-flex items-center gap-1 rounded-md bg-success/10 px-2.5 py-1.5 text-xs font-medium text-success">
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          本轮已完成
+                        </span>
+                      )}
                   </div>
                 </div>
 
                 {activeQuiz.questions.map((question, index) => (
-                  <div
-                    key={question.prompt}
-                    className="notebook-margin rounded-lg border border-border-subtle bg-surface p-3"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex items-center gap-1.5 text-xs font-medium text-text-secondary">
-                        {revealed[index] ? (
-                          <CheckCircle2 className="h-3.5 w-3.5 text-success" />
-                        ) : answers[index]?.trim() ? (
-                          <Circle className="h-3.5 w-3.5 fill-accent-gold text-accent-gold" />
-                        ) : (
-                          <Circle className="h-3.5 w-3.5 text-text-secondary" />
-                        )}
-                        第 {index + 1} 题
-                      </div>
-                      <div className="flex shrink-0 gap-1">
-                        {hinted[index] && (
-                          <Badge variant="secondary" className="text-[10px]">
-                            已要提示
-                          </Badge>
-                        )}
-                        {discussed[index] && (
-                          <Badge variant="secondary" className="text-[10px]">
-                            已讨论
-                          </Badge>
-                        )}
-                      </div>
-                    </div>
-                    <p className="mt-1 text-sm leading-relaxed text-text-primary">
-                      {question.prompt}
-                    </p>
-
-                    <Textarea
-                      placeholder="写下你的答案..."
-                      value={answers[index] ?? ""}
-                      onChange={(e) =>
-                        setAnswers((prev) => ({
-                          ...prev,
-                          [index]: e.target.value,
-                        }))
-                      }
-                      className="mt-3 min-h-[64px] text-sm"
-                      disabled={isPending}
-                      maxLength={4000}
-                    />
-
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        disabled={isPending}
-                        onClick={() => handleRequestHint(index)}
-                      >
-                        <Lightbulb className="h-3.5 w-3.5" />
-                        获取提示
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        size="sm"
-                        disabled={isPending || !answers[index]?.trim()}
-                        onClick={() => handleDiscuss(index)}
-                      >
-                        <MessageSquareText className="h-3.5 w-3.5" />
-                        提交讨论
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        disabled={!answers[index]?.trim()}
-                        onClick={() => handleReveal(index)}
-                      >
-                        <Eye className="h-3.5 w-3.5" />
-                        {revealed[index] ? "隐藏参考" : "查看参考"}
-                      </Button>
-                    </div>
-
-                    {revealed[index] && (
-                      <div className="mt-2 flex items-start gap-2 rounded-md bg-success/5 px-2.5 py-2 text-xs text-success">
-                        <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                        <span>{question.answer}</span>
-                      </div>
-                    )}
-                  </div>
+                  <QuestionCard
+                    key={question.id ?? `${question.prompt}-${index}`}
+                    index={index}
+                    question={question}
+                    answer={state.answers[index] ?? ""}
+                    onAnswerChange={(value) => actions.setAnswer(index, value)}
+                    isRevealed={!!state.revealed[index]}
+                    isHinted={!!state.hinted[index]}
+                    isDiscussed={!!state.discussed[index]}
+                    isSubmitting={!!state.submitting[index]}
+                    attempt={
+                      question.id ? state.attempts[question.id] : undefined
+                    }
+                    attemptError={
+                      question.id ? state.attemptErrors[question.id] : undefined
+                    }
+                    isPending={isPending}
+                    onToggleReveal={() => actions.toggleReveal(index)}
+                    onSubmitAttempt={() => actions.submitAttempt(index)}
+                    onRequestHint={() => actions.requestHint(index, onRequestHint)}
+                    onDiscuss={() => actions.discuss(index, onDiscussAnswer)}
+                    onFollowUp={(action) =>
+                      actions.followUp(
+                        index,
+                        action,
+                        regenerateQuiz,
+                        onRequestHint,
+                      )
+                    }
+                  />
                 ))}
               </>
             ) : detailError ? (

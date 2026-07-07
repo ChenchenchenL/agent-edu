@@ -172,6 +172,10 @@ class BehaviorMemory:
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
 
+    @property
+    def is_positive_behavior(self) -> bool:
+        return "success_pattern" in (self.tags or []) or "positive" in (self.tags or [])
+
     @classmethod
     def build(
         cls,

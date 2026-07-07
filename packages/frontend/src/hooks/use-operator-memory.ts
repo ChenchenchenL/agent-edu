@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { get, post, patch } from "@/api/client";
+import { get, post } from "@/api/client";
 
 export function useMemoryDetail(memoryType: "knowledge" | "behavior", memoryId: string) {
   return useQuery({

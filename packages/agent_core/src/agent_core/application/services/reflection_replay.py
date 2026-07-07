@@ -126,8 +126,56 @@ class ReflectionReplayService:
                 delta += 0.1
             if isinstance(negative_rate, (int, float)) and float(negative_rate) >= 0.4:
                 delta += 0.05
+        if proposal.proposal_type == "routing_policy":
+            delta += ReflectionReplayService._evaluate_routing_policy_delta(proposal, candidate_policy_snapshot)
+        if proposal.proposal_type == "template_policy":
+            delta += ReflectionReplayService._evaluate_template_policy_delta(proposal, candidate_policy_snapshot)
         if baseline_policy_snapshot == candidate_policy_snapshot:
             delta -= 0.05
+        return delta
+
+    @staticmethod
+    def _evaluate_routing_policy_delta(
+        proposal: ReflectionProposal,
+        candidate_policy_snapshot: dict[str, object],
+    ) -> float:
+        delta = 0.0
+        evidence = proposal.evidence_snapshot or {}
+        mismatches = evidence.get("router_mismatch_count") or evidence.get("fallback_burst_count", 0)
+        rules = candidate_policy_snapshot.get("routing_rules") or {}
+        
+        if rules:
+            delta += 0.05 * len(rules)
+            if mismatches > 0:
+                delta += min(0.12, 0.02 * mismatches)
+        
+        fallback = candidate_policy_snapshot.get("fallback_chain") or []
+        if "dynamic_resolver" in fallback:
+            delta += 0.05
+        if candidate_policy_snapshot.get("ranking_policy") == "confidence_first":
+            delta += 0.05
+            
+        return delta
+
+    @staticmethod
+    def _evaluate_template_policy_delta(
+        proposal: ReflectionProposal,
+        candidate_policy_snapshot: dict[str, object],
+    ) -> float:
+        delta = 0.0
+        evidence = proposal.evidence_snapshot or {}
+        mismatches = evidence.get("sequence_mismatch_count") or evidence.get("mismatch_count", 0)
+        rules = candidate_policy_snapshot.get("template_rules") or {}
+        
+        if rules:
+            delta += 0.05 * len(rules)
+            if mismatches > 0:
+                delta += min(0.12, 0.02 * mismatches)
+                
+        contract_version = candidate_policy_snapshot.get("sequence_contract")
+        if contract_version and float(contract_version) >= 1.0:
+            delta += 0.05
+            
         return delta
 
     @staticmethod

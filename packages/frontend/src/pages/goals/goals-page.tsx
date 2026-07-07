@@ -5,7 +5,6 @@ import {
   Compass,
   Calendar,
   Clock,
-  Loader2,
   Target,
   AlertCircle,
 } from "lucide-react";

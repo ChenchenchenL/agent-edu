@@ -17,6 +17,7 @@ SKILL_ARTIFACT_STATUSES = {
     "archived",
     "rejected",
     "suppressed",
+    "baseline",
 }
 SKILL_SELECTABLE_ARTIFACT_STATUSES = {"active", "stable"}
 SKILL_TYPES = {"baseline", "learned", "curated", "operator_defined"}
@@ -54,6 +55,12 @@ SKILL_OUTCOME_SIGNAL_KEYS = {
     "validation_error",
     "score_delta",
     "confidence",
+    "mastery_before",
+    "mastery_after",
+    "mastery_delta",
+    "answer_correctness_delta",
+    "hint_dependency_delta",
+    "misconception_reduction",
 }
 SKILL_CURATOR_RECOMMENDATION_TYPES = {
     "activate_candidate",
@@ -65,6 +72,11 @@ SKILL_CURATOR_RECOMMENDATION_TYPES = {
     "rollback_review",
     "flag_for_review",
     "restore_candidate",
+    "patch_routing_policy",
+    "patch_template_policy",
+    "patch_skill_package",
+    "select_replacement_skill_package",
+    "demote_candidate",
 }
 SKILL_CURATOR_RECOMMENDED_ACTIONS = {
     "none",
@@ -75,6 +87,7 @@ SKILL_CURATOR_RECOMMENDED_ACTIONS = {
     "restore_suppressed",
     "replace_selectable",
     "archive_deprecated",
+    "demote_active",
 }
 SKILL_CURATOR_RECOMMENDATION_STATUSES = {
     "pending",
@@ -103,6 +116,11 @@ class SkillResolution:
     resolver_status: str
     selection_reason: str
     implementation_binding: str
+    winner_candidate: dict[str, Any] | None = None
+    loser_reason_summary: dict[str, Any] | None = None
+    confidence: float | None = None
+    fallback_chain: list[str] | None = None
+    template_id: str | None = None
 
     @classmethod
     def build(
@@ -116,6 +134,11 @@ class SkillResolution:
         artifact_status: str | None = None,
         resolver_status: str = "resolved",
         selection_reason: str = "production_default",
+        winner_candidate: dict[str, Any] | None = None,
+        loser_reason_summary: dict[str, Any] | None = None,
+        confidence: float | None = None,
+        fallback_chain: list[str] | None = None,
+        template_id: str | None = None,
     ) -> "SkillResolution":
         if not skill_name.strip():
             raise ValidationError("skill_name is required.")
@@ -127,6 +150,8 @@ class SkillResolution:
             raise ValidationError("Unsupported skill resolver_status.")
         if selection_reason not in SKILL_SELECTION_REASONS:
             raise ValidationError("Unsupported skill selection_reason.")
+        if confidence is not None and not (0.0 <= confidence <= 1.0):
+            raise ValidationError("confidence must be between 0.0 and 1.0.")
         return cls(
             skill_name=skill_name,
             surface=surface,
@@ -136,6 +161,11 @@ class SkillResolution:
             resolver_status=resolver_status,
             selection_reason=selection_reason,
             implementation_binding=implementation_binding,
+            winner_candidate=winner_candidate,
+            loser_reason_summary=loser_reason_summary,
+            confidence=confidence,
+            fallback_chain=fallback_chain,
+            template_id=template_id,
         )
 
 

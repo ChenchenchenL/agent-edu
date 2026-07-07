@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 from agent_core.application.services.audit import AuditService
 from agent_core.domain.entities.autonomy import TaskAttempt
@@ -8,6 +9,7 @@ from agent_core.domain.entities.memory import MemoryEvent
 from agent_core.domain.entities.message import SessionMessage
 from agent_core.domain.entities.planning import DailyTask, WorkflowRun
 from agent_core.domain.entities.reflection_v2 import ReflectionEvidenceSignal
+from agent_core.domain.entities.session.quiz import SessionQuizAnswerAttempt
 from agent_core.infrastructure.db.repositories import (
     DailyTaskRepository,
     LearnerTopicMasteryRepository,
@@ -16,6 +18,7 @@ from agent_core.infrastructure.db.repositories import (
     SessionMessageRepository,
     WorkflowRunRepository,
 )
+from agent_core.infrastructure.db.repositories.quiz_answer_attempt import SessionQuizAnswerAttemptRepository
 
 
 class ReflectionEvidenceService:
@@ -29,6 +32,7 @@ class ReflectionEvidenceService:
         workflow_run_repository: WorkflowRunRepository,
         learner_topic_mastery_repository: LearnerTopicMasteryRepository | None,
         audit_service: AuditService,
+        quiz_answer_attempt_repository: SessionQuizAnswerAttemptRepository | None = None,
     ) -> None:
         self._repository = repository
         self._message_repository = message_repository
@@ -37,6 +41,7 @@ class ReflectionEvidenceService:
         self._workflow_run_repository = workflow_run_repository
         self._learner_topic_mastery_repository = learner_topic_mastery_repository
         self._audit_service = audit_service
+        self._quiz_answer_attempt_repository = quiz_answer_attempt_repository
 
     async def derive_from_task(
         self,
@@ -246,3 +251,151 @@ class ReflectionEvidenceService:
                 },
             )
         return signals
+
+    async def derive_from_answer_attempt(
+        self,
+        *,
+        attempt: SessionQuizAnswerAttempt,
+    ) -> list[ReflectionEvidenceSignal]:
+        signals: list[ReflectionEvidenceSignal] = []
+        if self._quiz_answer_attempt_repository is None or attempt.learner_goal_id is None:
+            return signals
+
+        # Fetch recent attempts on the same topic
+        recent_attempts = await self._quiz_answer_attempt_repository.list_recent_by_goal_topic(
+            learner_goal_id=attempt.learner_goal_id,
+            topic_key=attempt.topic_key,
+            limit=10,
+        )
+
+        # 1. repeated_misconception
+        if attempt.misconception_codes:
+            previous_misconceptions = []
+            for prev in recent_attempts:
+                if prev.id != attempt.id:
+                    previous_misconceptions.extend(prev.misconception_codes)
+            
+            has_repeated = any(code in previous_misconceptions for code in attempt.misconception_codes)
+            if has_repeated:
+                signals.append(
+                    ReflectionEvidenceSignal.build(
+                        learner_profile_id=attempt.learner_profile_id,
+                        learner_goal_id=attempt.learner_goal_id,
+                        session_id=attempt.session_id,
+                        daily_task_id=attempt.daily_task_id,
+                        workflow_run_id=None,
+                        source_type="quiz_answer_attempt",
+                        signal_code="repeated_misconception",
+                        topic_key=attempt.topic_key,
+                        severity_score=0.75,
+                        confidence_score=0.85,
+                        payload={"misconception_codes": list(attempt.misconception_codes)},
+                    )
+                )
+
+        # 2. hint_after_wrong_answer
+        if attempt.hint_used and attempt.attempt_number > 1:
+            prev_for_question = [
+                a for a in recent_attempts
+                if a.question_id == attempt.question_id and a.attempt_number < attempt.attempt_number
+            ]
+            if prev_for_question and not any(a.is_correct for a in prev_for_question):
+                signals.append(
+                    ReflectionEvidenceSignal.build(
+                        learner_profile_id=attempt.learner_profile_id,
+                        learner_goal_id=attempt.learner_goal_id,
+                        session_id=attempt.session_id,
+                        daily_task_id=attempt.daily_task_id,
+                        workflow_run_id=None,
+                        source_type="quiz_answer_attempt",
+                        signal_code="hint_after_wrong_answer",
+                        topic_key=attempt.topic_key,
+                        severity_score=0.6,
+                        confidence_score=0.8,
+                        payload={"hint_count": attempt.hint_count, "attempt_number": attempt.attempt_number},
+                    )
+                )
+
+        # Load current mastery
+        mastery = None
+        if self._learner_topic_mastery_repository is not None:
+            mastery = await self._learner_topic_mastery_repository.get_by_goal_and_topic(
+                learner_goal_id=attempt.learner_goal_id,
+                topic_key=attempt.topic_key,
+            )
+
+        # 3. low_mastery_high_difficulty_mismatch
+        difficulty = attempt.metadata.get("difficulty", "medium") if attempt.metadata else "medium"
+        if mastery is not None and mastery.mastery_score < 0.45 and difficulty == "hard":
+            signals.append(
+                ReflectionEvidenceSignal.build(
+                    learner_profile_id=attempt.learner_profile_id,
+                    learner_goal_id=attempt.learner_goal_id,
+                    session_id=attempt.session_id,
+                    daily_task_id=attempt.daily_task_id,
+                    workflow_run_id=None,
+                    source_type="quiz_answer_attempt",
+                    signal_code="low_mastery_high_difficulty_mismatch",
+                    topic_key=attempt.topic_key,
+                    severity_score=0.7,
+                    confidence_score=0.9,
+                    payload={"mastery_score": mastery.mastery_score, "difficulty": difficulty},
+                )
+            )
+
+        # 4. assessment_regression_from_quiz
+        if attempt.is_correct is False and mastery is not None and mastery.mastery_score >= 0.75:
+            signals.append(
+                ReflectionEvidenceSignal.build(
+                    learner_profile_id=attempt.learner_profile_id,
+                    learner_goal_id=attempt.learner_goal_id,
+                    session_id=attempt.session_id,
+                    daily_task_id=attempt.daily_task_id,
+                    workflow_run_id=None,
+                    source_type="quiz_answer_attempt",
+                    signal_code="assessment_regression_from_quiz",
+                    topic_key=attempt.topic_key,
+                    severity_score=0.8,
+                    confidence_score=0.85,
+                    payload={"mastery_score": mastery.mastery_score, "attempt_score": attempt.score},
+                )
+            )
+
+        # 5. short_guess_answer
+        if attempt.learner_answer and len(attempt.learner_answer.strip()) < 3:
+            signals.append(
+                ReflectionEvidenceSignal.build(
+                    learner_profile_id=attempt.learner_profile_id,
+                    learner_goal_id=attempt.learner_goal_id,
+                    session_id=attempt.session_id,
+                    daily_task_id=attempt.daily_task_id,
+                    workflow_run_id=None,
+                    source_type="quiz_answer_attempt",
+                    signal_code="short_guess_answer",
+                    topic_key=attempt.topic_key,
+                    severity_score=0.5,
+                    confidence_score=0.7,
+                    payload={"answer_length": len(attempt.learner_answer.strip())},
+                )
+            )
+
+        # 6. quiz_strategy_failure
+        wrong_count = sum(1 for prev in recent_attempts if prev.is_correct is False)
+        if wrong_count >= 3:
+            signals.append(
+                ReflectionEvidenceSignal.build(
+                    learner_profile_id=attempt.learner_profile_id,
+                    learner_goal_id=attempt.learner_goal_id,
+                    session_id=attempt.session_id,
+                    daily_task_id=attempt.daily_task_id,
+                    workflow_run_id=None,
+                    source_type="quiz_answer_attempt",
+                    signal_code="quiz_strategy_failure",
+                    topic_key=attempt.topic_key,
+                    severity_score=0.85,
+                    confidence_score=0.9,
+                    payload={"failure_count": wrong_count, "window_size": len(recent_attempts)},
+                )
+            )
+
+        return await self._persist(signals)

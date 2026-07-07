@@ -105,3 +105,10 @@ class AuditService:
             duration_seconds=perf_counter() - started_at,
         )
         return event
+
+    async def list_recent(
+        self,
+        *,
+        limit: int = 50,
+    ) -> list[AuditEvent]:
+        return await self._repository.list_recent(limit=limit)

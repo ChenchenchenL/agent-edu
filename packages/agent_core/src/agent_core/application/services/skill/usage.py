@@ -67,6 +67,24 @@ class SkillUsageService:
             skill_binding=skill_binding,
         )
 
+    async def build_execution_plan_from_resolution(
+        self,
+        *,
+        resolution: SkillResolution,
+        skill_binding: ActiveGoalSkillBinding | None = None,
+        tool_plan_override: list[dict[str, Any]] | None = None,
+    ) -> SkillExecutionPlan:
+        """Build an execution plan from an already-governed resolution.
+
+        This avoids a second resolver pass so router-selected baseline or
+        governed artifact decisions remain the effective runtime input.
+        """
+        return await self._skill_resolver.build_execution_plan(
+            resolution=resolution,
+            skill_binding=skill_binding,
+            tool_plan_override=tool_plan_override,
+        )
+
     async def record_usage(
         self,
         *,
@@ -113,6 +131,24 @@ class SkillUsageService:
                 resolution_error_code = "SkillResolutionValidationError"
         elif resolution.skill_name != skill_name or resolution.surface != surface:
             raise ValidationError("Skill resolution does not match usage context.")
+
+        # Merge router explainability fields into usage metadata (backward-compatible).
+        # These fields are populated when the SkillRouter is wired; otherwise they are None
+        # and omitted from the metadata dict to keep the payload minimal.
+        explain_extras: dict[str, Any] = {}
+        if resolution.winner_candidate is not None:
+            explain_extras["winner_candidate"] = resolution.winner_candidate
+        if resolution.loser_reason_summary is not None:
+            explain_extras["loser_reason_summary"] = resolution.loser_reason_summary
+        if resolution.confidence is not None:
+            explain_extras["confidence"] = resolution.confidence
+        if resolution.fallback_chain is not None:
+            explain_extras["fallback_chain"] = resolution.fallback_chain
+        if resolution.template_id is not None:
+            explain_extras["template_id"] = resolution.template_id
+        if explain_extras:
+            metadata = {**(metadata or {}), **explain_extras}
+
         event = SkillUsageEvent.build(
             skill_artifact_id=resolution.artifact_id,
             skill_name=resolution.skill_name,

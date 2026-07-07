@@ -33,7 +33,7 @@ from agent_core.domain.entities.reflection_closure import (
     ReflectionProposalRolloutObservation,
 )
 from agent_core.domain.entities.reflection_v2 import ReflectionOutcomeEvaluation
-from agent_core.domain.entities.skill import SkillArtifact, SkillCuratorRecommendation, SkillUsageEvent
+from agent_core.domain.entities.skill import SkillArtifact, SkillCuratorRecommendation, SkillResolution, SkillUsageEvent
 from agent_core.domain.errors import NotFoundError, ValidationError
 from agent_core.domain.schemas.skill import (
     DeactivateSkillArtifactRequest,
@@ -728,6 +728,7 @@ def _legacy_skill_artifact_with_contract(
         definition={},
         runtime_directives={},
         tool_plan=[],
+        plan_templates=[],
         compatibility_contract=compatibility_contract,
         source_reflection_ids=[],
         source_memory_ids=[],
@@ -2577,9 +2578,9 @@ async def test_skill_curator_job_flags_high_severity_memory_conflict_without_lif
     assert second.existing_count == 1
     assert lifecycle_service.calls == []
     recommendation = recommendation_repository.recommendations[0]
-    assert recommendation.recommendation_type == "flag_for_review"
+    assert recommendation.recommendation_type == "patch_skill_package"
     assert recommendation.recommended_action == "none"
-    assert recommendation.reason_code == "governance_evidence_regression"
+    assert recommendation.reason_code == "memory_retrieval_conflict"
     governance_evidence = recommendation.evidence_snapshot["governance_evidence"]
     assert governance_evidence["memory_conflicts"]["conflict_set_ids"] == [conflict.id]
     assert governance_evidence["memory_conflicts"]["high_severity_count"] == 1
@@ -2590,6 +2591,7 @@ async def test_skill_curator_job_flags_high_severity_memory_conflict_without_lif
         artifact_repository=StubSkillArtifactRepository(artifact),
         lifecycle_service=lifecycle_service,
         audit_repository=audit_repository,
+        proposal_service=StubSkillPatchProposalService(source_proposal=proposal),
     )
     accepted = await review_service.accept_recommendation(
         recommendation_id=recommendation.id,
@@ -2598,7 +2600,8 @@ async def test_skill_curator_job_flags_high_severity_memory_conflict_without_lif
         reason_note="Reviewed governance evidence.",
     )
     assert accepted.status == "accepted"
-    assert accepted.action_result == {"executed": False, "recommended_action": "none"}
+    assert accepted.action_result["executed"] is True
+    assert accepted.action_result["recommended_action"] == "create_skill_patch_proposal"
     assert lifecycle_service.calls == []
 
 
@@ -2757,7 +2760,8 @@ async def test_skill_curator_job_attaches_governance_evidence_to_quality_regress
 
     assert result.created_count == 1
     recommendation = recommendation_repository.recommendations[0]
-    assert recommendation.reason_code == "quality_regression"
+    assert recommendation.recommendation_type == "patch_skill_package"
+    assert recommendation.reason_code == "memory_retrieval_conflict"
     assert recommendation.evidence_snapshot["governance_evidence"]["memory_conflicts"]["conflict_set_ids"] == [
         conflict.id
     ]
@@ -2842,8 +2846,8 @@ async def test_skill_curator_job_flags_tool_plan_sequence_regression() -> None:
 
     assert result.created_count == 1
     recommendation = recommendation_repository.recommendations[0]
-    assert recommendation.recommendation_type == "flag_for_review"
-    assert recommendation.reason_code == "governance_evidence_regression"
+    assert recommendation.recommendation_type == "patch_template_policy"
+    assert recommendation.reason_code == "template_sequence_mismatch"
     sequence_evidence = recommendation.evidence_snapshot["governance_evidence"]["tool_plan_sequence"]
     assert sequence_evidence["sequence_mismatch_count"] == 1
     assert sequence_evidence["step_count_mismatch_count"] == 1
@@ -6123,3 +6127,130 @@ async def test_skill_usage_service_fingerprints_empty_strings_distinct_from_miss
     assert missing_event is not None
     assert missing_event.input_fingerprint is None
     assert missing_event.output_fingerprint is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: Runtime Explainability – SkillResolution & usage metadata merging
+# ---------------------------------------------------------------------------
+
+def test_skill_resolution_build_stores_explainability_fields():
+    """SkillResolution.build accepts and stores Phase 6 explainability fields."""
+    resolution = SkillResolution.build(
+        skill_name="explain_concept",
+        surface="chat",
+        implementation_binding="explain_concept",
+        winner_candidate={"candidate_id": "c-1", "source_type": "artifact"},
+        loser_reason_summary={"c-2": ["low_trust"]},
+        confidence=0.87,
+        fallback_chain=["explain_concept_v1"],
+        template_id="tpl-abc",
+    )
+    assert resolution.winner_candidate == {"candidate_id": "c-1", "source_type": "artifact"}
+    assert resolution.loser_reason_summary == {"c-2": ["low_trust"]}
+    assert resolution.confidence == 0.87
+    assert resolution.fallback_chain == ["explain_concept_v1"]
+    assert resolution.template_id == "tpl-abc"
+
+
+def test_skill_resolution_build_defaults_explainability_to_none():
+    """SkillResolution.build defaults new explainability fields to None for backward compat."""
+    resolution = SkillResolution.build(
+        skill_name="explain_concept",
+        surface="chat",
+        implementation_binding="explain_concept",
+    )
+    assert resolution.winner_candidate is None
+    assert resolution.loser_reason_summary is None
+    assert resolution.confidence is None
+    assert resolution.fallback_chain is None
+    assert resolution.template_id is None
+
+
+@pytest.mark.asyncio
+async def test_record_usage_merges_resolution_explainability_into_metadata():
+    """record_usage propagates router explainability fields into persisted metadata."""
+    artifact = SkillArtifact.build(
+        name="explain_concept",
+        version="1.0.0",
+        skill_type="baseline",
+        scope="chat",
+        status="active",
+        description="Explain concepts.",
+        quality_score=1.0,
+    )
+    audit_repository = StubAuditRepository()
+    usage_repository = StubSkillUsageEventRepository()
+    service = SkillUsageService(
+        usage_repository=usage_repository,
+        skill_resolver=_skill_resolver(artifact, audit_repository),
+        audit_service=AuditService(audit_repository),
+    )
+    winner_candidate = {"candidate_id": "c-1", "source_type": "artifact"}
+    resolution = SkillResolution.build(
+        skill_name="explain_concept",
+        surface="chat",
+        implementation_binding="explain_concept",
+        artifact_id=artifact.id,
+        artifact_status="active",
+        resolver_status="resolved",
+        selection_reason="production_default",
+        winner_candidate=winner_candidate,
+        loser_reason_summary={"c-2": ["low_trust"]},
+        confidence=0.91,
+        fallback_chain=["fallback_skill"],
+        template_id="tpl-xyz",
+    )
+
+    event = await service.record_usage(
+        skill_name="explain_concept",
+        surface="chat",
+        outcome_status="completed",
+        resolution=resolution,
+        metadata={"custom_key": "custom_val"},
+    )
+
+    assert event is not None
+    meta = event.metadata or {}
+    assert meta.get("winner_candidate") == winner_candidate
+    assert meta.get("loser_reason_summary") == {"c-2": ["low_trust"]}
+    assert meta.get("confidence") == 0.91
+    assert meta.get("fallback_chain") == ["fallback_skill"]
+    assert meta.get("template_id") == "tpl-xyz"
+    # Caller-provided metadata is preserved
+    assert meta.get("custom_key") == "custom_val"
+
+
+@pytest.mark.asyncio
+async def test_record_usage_omits_explainability_when_resolution_lacks_them():
+    """record_usage omits router explainability keys when resolution has no router fields (backward compat)."""
+    artifact = SkillArtifact.build(
+        name="explain_concept",
+        version="1.0.0",
+        skill_type="baseline",
+        scope="chat",
+        status="active",
+        description="Explain concepts.",
+        quality_score=1.0,
+    )
+    audit_repository = StubAuditRepository()
+    usage_repository = StubSkillUsageEventRepository()
+    service = SkillUsageService(
+        usage_repository=usage_repository,
+        skill_resolver=_skill_resolver(artifact, audit_repository),
+        audit_service=AuditService(audit_repository),
+    )
+
+    event = await service.record_usage(
+        skill_name="explain_concept",
+        surface="chat",
+        outcome_status="completed",
+    )
+
+    assert event is not None
+    meta = event.metadata or {}
+    # None of the Phase 6 explainability keys should appear
+    assert "winner_candidate" not in meta
+    assert "loser_reason_summary" not in meta
+    assert "confidence" not in meta
+    assert "fallback_chain" not in meta
+    assert "template_id" not in meta

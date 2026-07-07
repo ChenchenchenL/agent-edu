@@ -16,6 +16,19 @@ REFLECTION_TRIGGER_SOURCES = {
     "workflow_failed",
     "plan_replanned",
     "consecutive_failure_pattern",
+    "corpus_review_threshold",
+    "corpus_backlog_threshold",
+    "corpus_contested_high_priority",
+    "fallback_to_baseline_burst",
+    "low_confidence_burst",
+    "repeated_sequence_mismatch",
+    "consecutive_wrong_answers",
+    "repeated_misconception",
+    "low_mastery_high_difficulty_mismatch",
+    "hint_dependency_failure",
+    "high_failure_rate_artifact",
+    "assessment_regression_from_quiz",
+    "short_guess_answer",
 }
 REFLECTION_STATUSES = {"pending", "completed", "actioned", "needs_review", "failed"}
 REFLECTION_ROOT_CAUSES = {
@@ -26,12 +39,22 @@ REFLECTION_ROOT_CAUSES = {
     "engagement_constraint",
     "workflow_issue",
     "assessment_regression",
+    "router_issue",
+    "template_issue",
+    "memory_governance_issue",
+    "sandbox_admission_issue",
 }
 REFLECTION_SEVERITIES = {"low", "medium", "high"}
 REFLECTION_ACTION_TYPES = {
     "enqueue_replan_job",
     "enqueue_review_job",
     "enqueue_assessment_job",
+    "enqueue_router_review",
+    "enqueue_template_review",
+    "enqueue_memory_governance_review",
+    "enqueue_sandbox_admission_review",
+    "update_strategy_card_candidate",
+    "enqueue_skill_curator_review",
 }
 REFLECTION_ACTION_STATUSES = {"proposed", "executed", "blocked", "failed", "skipped"}
 

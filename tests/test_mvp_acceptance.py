@@ -233,3 +233,68 @@ def test_mvp_end_to_end_main_path(app_client_factory) -> None:
         assert any(
             event_type.startswith(prefix) for event_type in audit_types
         ), f"Expected audit event with prefix '{prefix}', got: {audit_types}"
+
+    # ── F1: Answer attempt → grading + mastery + next-action (P0 chain) ──
+    quiz_detail = client.get(
+        f"/api/v1/sessions/{session_id}/quizzes/{quiz_payload['quiz_id']}",
+    )
+    assert quiz_detail.status_code == 200
+    first_question_id = quiz_detail.json()["questions"][0]["id"]
+
+    attempt_resp = client.post(
+        f"/api/v1/sessions/{session_id}/quizzes/{quiz_payload['quiz_id']}"
+        f"/questions/{first_question_id}/attempts",
+        json={
+            "learner_answer": "the rows of the left matrix dotted with the columns of the right matrix",
+            "hint_used": False,
+            "hint_count": 0,
+            "grading_strategy": "hybrid",
+        },
+    )
+    assert attempt_resp.status_code == 201, attempt_resp.text
+    attempt = attempt_resp.json()
+    assert attempt["session_id"] == session_id
+    assert attempt["quiz_id"] == quiz_payload["quiz_id"]
+    assert attempt["question_id"] == first_question_id
+    assert attempt["attempt_number"] >= 1
+    assert attempt["grading"]["grading_status"] in {"graded", "needs_review", "rejected"}
+    assert isinstance(attempt["grading"]["misconception_codes"], list)
+    assert "needs_human_review" in attempt["grading"]
+    # mastery_snapshot may be null on the very first attempt; when present it
+    # must carry the full typed shape.
+    if attempt["mastery_snapshot"] is not None:
+        snap = attempt["mastery_snapshot"]
+        assert "topic_key" in snap
+        assert isinstance(snap["mastery_score"], (int, float))
+        assert isinstance(snap["confidence"], (int, float))
+        assert isinstance(snap["evidence_count"], int)
+    assert isinstance(attempt["recommended_next_action"], str)
+    assert attempt["recommended_next_action"]
+
+    # ── F2: Operator observability (P1 chain) ──
+    operator_headers = {"X-Operator-Key": "secret-operator"}
+    browse_resp = client.get(
+        "/api/v1/operator/quizzes/attempts",
+        headers=operator_headers,
+        params={"limit": 10, "offset": 0},
+    )
+    assert browse_resp.status_code == 200, browse_resp.text
+    browse = browse_resp.json()
+    assert browse["total_count"] >= 1
+    assert any(a["id"] == attempt["attempt_id"] for a in browse["attempts"])
+
+    trend_resp = client.get(
+        "/api/v1/operator/quizzes/misconceptions/trend",
+        headers=operator_headers,
+        params={"limit": 100},
+    )
+    assert trend_resp.status_code == 200
+    assert "trends" in trend_resp.json()
+
+    gain_resp = client.get(
+        "/api/v1/operator/skills/learning-gain",
+        headers=operator_headers,
+        params={"limit": 100},
+    )
+    assert gain_resp.status_code == 200
+    assert "learning_gains" in gain_resp.json()

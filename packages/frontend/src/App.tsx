@@ -11,6 +11,9 @@ import { MemoryDetailPage } from "@/pages/operator/memory-detail-page";
 import { ReflectionDetailPage } from "@/pages/operator/reflection-detail-page";
 import { SkillDetailPage } from "@/pages/operator/skill-detail-page";
 import { AuditDetailPage } from "@/pages/operator/audit-detail-page";
+import { QuizAttemptsPage } from "@/pages/operator/quiz-attempts-page";
+import { MisconceptionsPage } from "@/pages/operator/misconceptions-page";
+import { LearningGainsPage } from "@/pages/operator/learning-gains-page";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -38,6 +41,9 @@ function App() {
               <Route path="reflections/:id" element={<ReflectionDetailPage />} />
               <Route path="skills/artifacts/:id" element={<SkillDetailPage />} />
               <Route path="audit/events/:id" element={<AuditDetailPage />} />
+              <Route path="quiz/attempts" element={<QuizAttemptsPage />} />
+              <Route path="quiz/misconceptions" element={<MisconceptionsPage />} />
+              <Route path="quiz/learning-gains" element={<LearningGainsPage />} />
             </Route>
           </Routes>
         </Layout>

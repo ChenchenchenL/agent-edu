@@ -142,4 +142,61 @@ class AuditRepository:
             for row in result.scalars().all()
         ]
 
+    async def list_quiz_adaptive_policy_trail(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[AuditEvent]:
+        bounded = max(1, min(limit, 1000))
+        stmt = (
+            select(AuditEventModel)
+            .where(
+                (AuditEventModel.event_type.like("quiz.adaptive_policy%"))
+                | (AuditEventModel.event_type == "quiz.generated")
+            )
+            .order_by(desc(AuditEventModel.created_at))
+            .limit(bounded)
+            .offset(offset)
+        )
+        result = await self._session.execute(stmt)
+        return [
+            AuditEvent(
+                id=row.id,
+                event_type=row.event_type,
+                resource_type=row.resource_type,
+                resource_id=row.resource_id,
+                actor=row.actor,
+                event_data=row.event_data,
+                created_at=row.created_at,
+            )
+            for row in result.scalars().all()
+        ]
+
+    async def get_by_resource(
+        self,
+        *,
+        resource_id: str,
+        event_type: str | None = None,
+    ) -> AuditEvent | None:
+        stmt = select(AuditEventModel).where(
+            AuditEventModel.resource_id == resource_id
+        )
+        if event_type:
+            stmt = stmt.where(AuditEventModel.event_type == event_type)
+        stmt = stmt.order_by(desc(AuditEventModel.created_at)).limit(1)
+        result = await self._session.execute(stmt)
+        row = result.scalars().first()
+        if row is None:
+            return None
+        return AuditEvent(
+            id=row.id,
+            event_type=row.event_type,
+            resource_type=row.resource_type,
+            resource_id=row.resource_id,
+            actor=row.actor,
+            event_data=row.event_data,
+            created_at=row.created_at,
+        )
+
 

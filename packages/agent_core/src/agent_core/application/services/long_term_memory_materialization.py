@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 
 from agent_core.application.services.audit import AuditService
 from agent_core.application.services.memory_extraction import (
@@ -16,6 +17,7 @@ from agent_core.domain.entities.memory import MemoryEvent
 from agent_core.domain.entities.planning import DailyTask
 from agent_core.domain.entities.reflection import ReflectionRecord
 from agent_core.domain.entities.reflection_v2 import ReflectionOutcomeEvaluation
+from agent_core.domain.entities.session.quiz import SessionQuizAnswerAttempt
 from agent_core.infrastructure.observability.metrics import observe_long_term_memory_materialization
 
 
@@ -154,6 +156,69 @@ class LongTermMemoryMaterializationService:
                 provenance_type="task_attempt",
                 provenance_source_id=attempt.id,
             )
+        elif attempt.outcome_status == "completed":
+            if attempt.result_note:
+                note_lower = attempt.result_note.casefold()
+                # Enhanced negative context detection using regex
+                hint_negation_patterns = [
+                    r"no hint", r"without hint", r"didn't need hint", r"don't need hint",
+                    r"didn't use hint", r"skip.*hint", r"avoid.*hint", r"no need.*hint",
+                    r"didn't require hint", r"no hint.*needed"
+                ]
+                is_hint = "hint" in note_lower and not any(
+                    re.search(pattern, note_lower) for pattern in hint_negation_patterns
+                )
+                # Step-by-step detection (less prone to false positives)
+                is_step = any(kw in note_lower for kw in ["step-by-step", "step by step", "deduction", "deduced"])
+                # Enhanced negative context detection for review
+                review_negation_patterns = [
+                    r"no review", r"no need to review", r"without review", r"didn't review",
+                    r"skip.*review", r"avoid.*review", r"no need.*review", r"didn't need review",
+                    r"no review.*needed"
+                ]
+                is_review = any(kw in note_lower for kw in ["review", "reviewed"]) and not any(
+                    re.search(pattern, note_lower) for pattern in review_negation_patterns
+                )
+
+                if is_hint or is_step or is_review:
+                    if is_hint:
+                        category = "guided_progress"
+                        summary_msg = f"Learner successfully utilized hints for support on {task.topic_focus}: {attempt.result_note}"
+                        tags = ["behavior", task.execution_mode, "guided_progress", "success_pattern", "positive"]
+                    elif is_step:
+                        category = "response_preference"
+                        summary_msg = f"Learner successfully applied a step-by-step reasoning strategy on {task.topic_focus}: {attempt.result_note}"
+                        tags = ["behavior", task.execution_mode, "response_preference", "success_pattern", "positive"]
+                    else:  # is_review
+                        category = "guided_progress"
+                        summary_msg = f"Learner successfully reviewed prior material or quizzes before assessment on {task.topic_focus}: {attempt.result_note}"
+                        tags = ["behavior", task.execution_mode, "guided_progress", "success_pattern", "positive"]
+
+                    raw_candidate = self._memory_service.build_behavior_memory_candidate(
+                        learner_profile_id=learner_profile_id,
+                        learner_goal_id=task.learner_goal_id,
+                        learner_message=summary_msg,
+                        assistant_message=assistant_message,
+                        source_message_id=None,
+                        mode=task.execution_mode,
+                        subject=task.topic_focus,
+                        session_title=task.title,
+                        source_event_ids=[],
+                        provenance_type="task_attempt",
+                        provenance_source_id=attempt.id,
+                    )
+                    if raw_candidate is not None:
+                        behavior = replace(
+                            raw_candidate,
+                            behavior_category=category,
+                            behavior_key=MemoryNormalizer.normalize_topic_key(f"{category}:{task.topic_focus or task.title or 'session'}"),
+                            title=f"{category.replace('_', ' ').title()} for {task.topic_focus or task.title or 'session'}",
+                            summary=summary_msg,
+                            tags=tags,
+                            importance_score=0.40,
+                            confidence_score=0.40,
+                            freshness_score=0.40,
+                        )
 
         knowledge_results = []
         behavior_results = []
@@ -355,7 +420,7 @@ class LongTermMemoryMaterializationService:
             time_horizon="early" if knowledge_level == "foundation" else "mid",
             importance_score=candidate.importance_score,
             confidence_score=candidate.confidence_score,
-            freshness_score=1.0,
+            freshness_score=0.50,
             prerequisite_keys=[],
             source_event_ids=[],
             source_memory_ids=[],
@@ -394,7 +459,7 @@ class LongTermMemoryMaterializationService:
             time_horizon="mid",
             importance_score=candidate.importance_score,
             confidence_score=candidate.confidence_score,
-            freshness_score=1.0,
+            freshness_score=0.40,
             source_event_ids=[],
             source_memory_ids=[],
             tags=["structured_extraction", candidate.evidence_role, *candidate.tags],
@@ -409,6 +474,164 @@ class LongTermMemoryMaterializationService:
             }
         )
         return await self._memory_service.upsert_behavior_memory(memory, persist_embedding=persist_embeddings)
+
+    async def materialize_from_answer_attempt(
+        self,
+        *,
+        attempt: SessionQuizAnswerAttempt,
+        persist_embeddings: bool = True,
+    ) -> LongTermMemoryMaterializationResult:
+        """Materializes knowledge and behavior memory candidates from a quiz answer attempt.
+
+        Args:
+            attempt: The SessionQuizAnswerAttempt entity.
+            persist_embeddings: Whether to persist vector embeddings.
+
+        Returns:
+            LongTermMemoryMaterializationResult containing upsert results.
+        """
+        knowledge = None
+        topic_key_normalized = MemoryNormalizer.normalize_topic_key(attempt.topic_key)
+
+        if attempt.is_correct is False or attempt.misconception_codes:
+            knowledge = KnowledgeMemory.build(
+                learner_profile_id=attempt.learner_profile_id,
+                learner_goal_id=attempt.learner_goal_id,
+                knowledge_key=topic_key_normalized,
+                title=f"Struggle with {attempt.topic_key}",
+                summary=f"Learner struggles with {attempt.topic_key}.",
+                details=f"Question: {attempt.question_prompt}\nReference Answer: {attempt.reference_answer}\nLearner Answer: {attempt.learner_answer}",
+                knowledge_level="core",
+                time_horizon="mid",
+                importance_score=0.5,
+                confidence_score=0.4,
+                freshness_score=1.0,
+                prerequisite_keys=[],
+                source_event_ids=[],
+                source_memory_ids=[],
+                tags=["quiz_attempt", "struggle"],
+            )
+            knowledge = replace(
+                knowledge,
+                provenance_type="quiz_answer_attempt",
+                provenance_source_id=attempt.id,
+            )
+        elif attempt.is_correct is True:
+            knowledge = KnowledgeMemory.build(
+                learner_profile_id=attempt.learner_profile_id,
+                learner_goal_id=attempt.learner_goal_id,
+                knowledge_key=topic_key_normalized,
+                title=f"Mastery of {attempt.topic_key}",
+                summary=f"Learner demonstrated understanding of {attempt.topic_key}.",
+                details=f"Question: {attempt.question_prompt}\nLearner Answer: {attempt.learner_answer}",
+                knowledge_level="core",
+                time_horizon="mid",
+                importance_score=0.4,
+                confidence_score=0.4,
+                freshness_score=1.0,
+                prerequisite_keys=[],
+                source_event_ids=[],
+                source_memory_ids=[],
+                tags=["quiz_attempt", "success"],
+            )
+            knowledge = replace(
+                knowledge,
+                provenance_type="quiz_answer_attempt",
+                provenance_source_id=attempt.id,
+            )
+        elif attempt.grading_status == "needs_review":
+            knowledge = KnowledgeMemory.build(
+                learner_profile_id=attempt.learner_profile_id,
+                learner_goal_id=attempt.learner_goal_id,
+                knowledge_key=topic_key_normalized,
+                title=f"Pending review for {attempt.topic_key}",
+                summary=f"Learner attempt on {attempt.topic_key} requires human review.",
+                details=f"Question: {attempt.question_prompt}\nLearner Answer: {attempt.learner_answer}",
+                knowledge_level="core",
+                time_horizon="mid",
+                importance_score=0.3,
+                confidence_score=0.3,
+                freshness_score=1.0,
+                prerequisite_keys=[],
+                source_event_ids=[],
+                source_memory_ids=[],
+                tags=["quiz_attempt", "needs_review"],
+            )
+            knowledge = replace(
+                knowledge,
+                provenance_type="quiz_answer_attempt",
+                provenance_source_id=attempt.id,
+            )
+
+        behavior = None
+        if attempt.is_correct is True and not attempt.hint_used:
+            behavior_category = "guided_progress"
+            summary = f"Learner independently solved problems on {attempt.topic_key}."
+            behavior_tags = ["quiz_attempt", "behavior", "success_pattern", "positive"]
+            behavior_importance = 0.4
+        elif attempt.hint_used or (attempt.learner_answer and len(attempt.learner_answer.strip()) < 3):
+            behavior_category = "support_request" if attempt.hint_used else "response_preference"
+            if attempt.learner_answer and len(attempt.learner_answer.strip()) < 3 and attempt.hint_used:
+                summary = "Learner often submits short guesses before requesting hints."
+            elif attempt.hint_used:
+                summary = "Learner used hints during quiz."
+            else:
+                summary = f"Learner submits short guess '{attempt.learner_answer}'."
+            behavior_tags = ["quiz_attempt", "behavior"]
+            behavior_importance = 0.4
+        else:
+            behavior_category = None
+            summary = None
+            behavior_tags = []
+
+        if behavior_category is not None and summary is not None:
+            behavior = BehaviorMemory.build(
+                learner_profile_id=attempt.learner_profile_id,
+                learner_goal_id=attempt.learner_goal_id,
+                behavior_key=MemoryNormalizer.normalize_topic_key(f"{behavior_category}:{attempt.topic_key}"),
+                behavior_category=behavior_category,
+                title=f"Behavior pattern for {attempt.topic_key}",
+                summary=summary,
+                details=f"Question: {attempt.question_prompt}\nLearner Answer: {attempt.learner_answer}\nHint Used: {attempt.hint_used}\nHint Count: {attempt.hint_count}",
+                behavior_level="recurrent",
+                time_horizon="mid",
+                importance_score=behavior_importance,
+                confidence_score=0.4,
+                freshness_score=0.4,
+                source_event_ids=[],
+                source_memory_ids=[],
+                tags=behavior_tags,
+                intervention_effect=None,
+            )
+            behavior = replace(
+                behavior,
+                provenance_type="quiz_answer_attempt",
+                provenance_source_id=attempt.id,
+            )
+
+        knowledge_results = []
+        behavior_results = []
+        if knowledge is not None:
+            result = await self._memory_service.upsert_knowledge_memory(knowledge, persist_embedding=persist_embeddings)
+            if result.action not in {"skipped", "skipped_suppressed"}:
+                await self._memory_service.upsert_quiz_answer_attempt_evidence(
+                    memory=result.memory,
+                    memory_type="knowledge",
+                    attempt=attempt,
+                )
+            knowledge_results.append(result)
+        if behavior is not None:
+            result = await self._memory_service.upsert_behavior_memory(behavior, persist_embedding=persist_embeddings)
+            if result.action not in {"skipped", "skipped_suppressed"}:
+                await self._memory_service.upsert_quiz_answer_attempt_evidence(
+                    memory=result.memory,
+                    memory_type="behavior",
+                    attempt=attempt,
+                )
+            behavior_results.append(result)
+
+        observe_long_term_memory_materialization(source_type="quiz_answer_attempt", status="succeeded")
+        return LongTermMemoryMaterializationResult(knowledge=knowledge_results, behavior=behavior_results)
 
     @staticmethod
     def _topic_from_reflection(reflection: ReflectionRecord) -> str | None:

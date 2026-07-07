@@ -18,6 +18,7 @@ from agent_core.api.routes.quiz import router as quiz_router
 from agent_core.api.routes.reflection import router as reflection_router
 from agent_core.api.routes.sessions import router as sessions_router
 from agent_core.api.routes.skills import router as skills_router
+from agent_core.api.routes.skill_packages import router as skill_packages_router
 from agent_core.api.routes.workspace import router as workspace_router
 from agent_core.api.routes.audit import router as audit_router
 from agent_core.application.services.skills import refresh_skill_observability_metrics
@@ -76,6 +77,7 @@ def create_app() -> FastAPI:
     register_error_handlers(app)
     app.include_router(health_router)
     app.include_router(skills_router, prefix="/api/v1")
+    app.include_router(skill_packages_router, prefix="/api/v1")
     app.include_router(profiles_router, prefix="/api/v1")
     app.include_router(workspace_router, prefix="/api/v1")
     app.include_router(goals_router, prefix="/api/v1")

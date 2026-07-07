@@ -78,18 +78,24 @@ export function Layout({ children }: LayoutProps) {
       </header>
 
       <main
-        className={`mx-auto w-full flex-1 px-6 ${
-          isDetailPage ? "max-w-5xl py-5" : "max-w-5xl py-10"
+        className={`w-full flex-1 ${
+          isSessionDetail
+            ? "max-w-none px-0 py-0"
+            : isGoalDetail
+              ? "mx-auto max-w-6xl px-6 py-5"
+              : "mx-auto max-w-5xl px-6 py-10"
         }`}
       >
         {children}
       </main>
 
-      <footer className="border-t border-border-subtle py-5">
-        <div className="mx-auto max-w-5xl px-6 text-center text-xs text-text-secondary">
-          Agent Edu · 专注深度理解，而非标准答案
-        </div>
-      </footer>
+      {!isSessionDetail && (
+        <footer className="border-t border-border-subtle py-5">
+          <div className="mx-auto max-w-5xl px-6 text-center text-xs text-text-secondary">
+            Agent Edu · 专注深度理解，而非标准答案
+          </div>
+        </footer>
+      )}
     </div>
   );
 }

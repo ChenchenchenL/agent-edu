@@ -1,4 +1,5 @@
 from sqlalchemy.ext.asyncio import AsyncSession
+import logging
 
 from agent_core.application.services.audit import AuditService
 from agent_core.application.services.dynamic_runtime_registry import (
@@ -9,6 +10,7 @@ from agent_core.application.services.goal_skill_binding_resolver import ActiveGo
 from agent_core.application.services.reflection_proposal_rollout_observation_scheduler import (
     ReflectionProposalRolloutObservationScheduler,
 )
+from agent_core.application.services.skill.capability import CapabilityRequest
 from agent_core.application.services.skills import SkillUsageService
 from agent_core.application.skills.registry import SkillRegistry
 from agent_core.domain.entities.quiz import SessionQuiz, SessionQuizQuestion
@@ -21,9 +23,19 @@ from agent_core.domain.schemas.quiz import (
     QuizDraftResponse,
     QuizSummaryResponse,
 )
-from agent_core.infrastructure.db.repositories import SessionQuizRepository, SessionRepository
+from agent_core.infrastructure.db.repositories import (
+    SessionQuizRepository,
+    SessionRepository,
+    LearnerTopicMasteryRepository,
+    SessionQuizAnswerAttemptRepository,
+    LearnerGoalStrategyCardRepository,
+)
 from agent_core.infrastructure.llm.types import LLMProvider
 from agent_core.infrastructure.observability.metrics import observe_llm_operation
+from agent_core.application.services.adaptive_quiz_policy import AdaptiveQuizPolicyService
+from agent_core.application.services.memory import MemoryService
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class QuizService:
@@ -40,6 +52,8 @@ class QuizService:
         rollout_observation_scheduler: ReflectionProposalRolloutObservationScheduler | None = None,
         skill_usage_service: SkillUsageService | None = None,
         runtime_registry: DynamicRuntimeRegistryService | None = None,
+        adaptive_policy_service: AdaptiveQuizPolicyService | None = None,
+        memory_service: MemoryService | None = None,
     ) -> None:
         self._db_session = db_session
         self._audit_service = audit_service
@@ -51,6 +65,8 @@ class QuizService:
         self._rollout_observation_scheduler = rollout_observation_scheduler
         self._skill_usage_service = skill_usage_service
         self._runtime_registry = runtime_registry
+        self._adaptive_policy_service = adaptive_policy_service or AdaptiveQuizPolicyService()
+        self._memory_service = memory_service
 
     async def generate_quiz(self, payload: GenerateQuizRequest, *, commit: bool = True) -> QuizDraftResponse:
         if payload.session_id is None:
@@ -89,20 +105,103 @@ class QuizService:
             resource_id=session.id,
         )
 
+        current_mastery = None
+        recent_attempts = []
+        active_strategy_card = None
+        ltm_interpretation = None
+
+        if session.learner_goal_id is not None:
+            try:
+                mastery_repo = LearnerTopicMasteryRepository(self._db_session)
+                current_mastery = await mastery_repo.get_by_goal_and_topic(
+                    learner_goal_id=session.learner_goal_id, topic_key=payload.topic
+                )
+            except Exception:
+                _LOGGER.warning(
+                    "Failed to fetch learner topic mastery for goal=%s topic=%s, proceeding without mastery data.",
+                    session.learner_goal_id,
+                    payload.topic,
+                    exc_info=True,
+                )
+
+            try:
+                attempt_repo = SessionQuizAnswerAttemptRepository(self._db_session)
+                recent_attempts = await attempt_repo.list_recent_by_goal_topic(
+                    learner_goal_id=session.learner_goal_id, topic_key=payload.topic, limit=20
+                )
+            except Exception:
+                _LOGGER.warning(
+                    "Failed to fetch recent quiz attempts for goal=%s topic=%s, proceeding without attempt history.",
+                    session.learner_goal_id,
+                    payload.topic,
+                    exc_info=True,
+                )
+
+            try:
+                strategy_repo = LearnerGoalStrategyCardRepository(self._db_session)
+                active_strategy_card = await strategy_repo.get_active_by_goal(session.learner_goal_id)
+            except Exception:
+                _LOGGER.warning(
+                    "Failed to fetch active strategy card for goal=%s, proceeding without strategy bias.",
+                    session.learner_goal_id,
+                    exc_info=True,
+                )
+
+            if self._memory_service is not None:
+                try:
+                    interpretation = await self._memory_service.build_interpretation(
+                        learner_profile_id=session.learner_profile_id,
+                        learner_goal_id=session.learner_goal_id,
+                    )
+                    facts = [f.summary for f in interpretation.facts]
+                    behaviors = [b.summary for b in interpretation.behavior_patterns]
+                    ltm_interpretation = "; ".join(facts + behaviors) if (facts or behaviors) else None
+                except Exception:
+                    _LOGGER.exception("Failed to build memory interpretation, proceeding without it.")
+
+        runtime_directives = (
+            dict(skill_execution_plan.runtime_directives)
+            if skill_execution_plan is not None
+            else dict(skill_binding.runtime_directives) if skill_binding is not None else {}
+        )
+
+        # Resolve adaptive policy
+        policy_output = self._adaptive_policy_service.resolve_policy(
+            learner_profile_id=session.learner_profile_id,
+            learner_goal_id=session.learner_goal_id,
+            session_id=session.id,
+            topic_key=payload.topic,
+            requested_difficulty=payload.difficulty,
+            requested_question_count=payload.question_count,
+            current_mastery=current_mastery,
+            recent_attempts=recent_attempts,
+            active_strategy_card=active_strategy_card,
+            long_term_memory_interpretation=ltm_interpretation,
+            runtime_directives=runtime_directives,
+        )
+
+        directives_list: list[str] = []
+        if policy_output.skill_directives:
+            for k, v in policy_output.skill_directives.items():
+                if k == "directives" and isinstance(v, list):
+                    directives_list.extend(str(item) for item in v)
+                elif isinstance(v, bool):
+                    if v:
+                        directives_list.append(f"{k}: true")
+                elif isinstance(v, list):
+                    directives_list.append(f"{k}: {', '.join(str(i) for i in v)}")
+                else:
+                    directives_list.append(f"{k}: {v}")
+
         quiz = None
         session_quiz = None
         try:
-            runtime_directives = (
-                dict(skill_execution_plan.runtime_directives)
-                if skill_execution_plan is not None
-                else dict(skill_binding.runtime_directives) if skill_binding is not None else {}
-            )
             quiz = await self._llm_provider.generate_quiz_draft(
                 topic=payload.topic,
-                difficulty=payload.difficulty,
-                question_count=int(runtime_directives.get("question_count") or payload.question_count),
-                skill_directives=list(runtime_directives.get("skill_directives") or []) or None,
-                feedback_style=str(runtime_directives.get("feedback_style")) if runtime_directives.get("feedback_style") else None,
+                difficulty=policy_output.effective_difficulty,
+                question_count=policy_output.question_count,
+                skill_directives=directives_list or None,
+                feedback_style=policy_output.feedback_style,
             )
             session_quiz = SessionQuiz.build(
                 session_id=session.id,
@@ -147,9 +246,10 @@ class QuizService:
                 actor="system",
                 event_data={
                     "topic": payload.topic,
-                    "question_count": payload.question_count,
+                    "question_count": len(quiz.questions),
                     "session_id": session.id,
                     "quiz_id": session_quiz.id,
+                    "adaptation_rationale": policy_output.adaptation_rationale,
                 },
             )
             observe_llm_operation(
@@ -175,6 +275,7 @@ class QuizService:
                         "retry_count": quiz.retry_count,
                         "provider": quiz.provider,
                         "model": quiz.model,
+                        "adaptation_rationale": policy_output.adaptation_rationale,
                     },
                     execution_plan=skill_execution_plan,
                     runtime_plan=runtime_plan,
@@ -228,6 +329,7 @@ class QuizService:
                         "quiz_id": session_quiz.id if session_quiz is not None else None,
                         "difficulty": payload.difficulty,
                         "question_count": payload.question_count,
+                        "adaptation_rationale": policy_output.adaptation_rationale,
                     },
                     execution_plan=skill_execution_plan,
                     runtime_plan=runtime_plan,
@@ -323,6 +425,22 @@ class QuizService:
     ) -> RuntimeSkillExecutionPlan | None:
         if self._runtime_registry is None:
             return None
+        surface_to_capability = {"quiz": "assessment.generate"}
+        capability = surface_to_capability.get(surface)
+        if capability is not None:
+            request = CapabilityRequest(
+                capability=capability,
+                surface=surface,
+                learner_goal_id=learner_goal_id,
+                topic_key=topic_key,
+                trigger_source=trigger_source,
+            )
+            result = await self._runtime_registry.resolve_capability_request(
+                request,
+                resource_id=resource_id,
+            )
+            if result is not None:
+                return result.plan
         return await self._runtime_registry.resolve_runtime_plan(
             learner_goal_id=learner_goal_id,
             skill_name=skill_name,

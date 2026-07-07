@@ -56,10 +56,10 @@ export function OperatorShell({ children }: OperatorShellProps) {
                 </div>
               </div>
               <div className="flex items-center space-x-2 pt-2">
-                <Checkbox 
-                  id="persist" 
-                  checked={persist} 
-                  onCheckedChange={(c) => setPersist(c === true)}
+                <Checkbox
+                  id="persist"
+                  checked={persist}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPersist(e.target.checked)}
                   className="rounded-none border-border data-[state=checked]:bg-primary"
                 />
                 <Label htmlFor="persist" className="text-sm font-normal text-text-secondary">

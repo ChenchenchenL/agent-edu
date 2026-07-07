@@ -87,6 +87,7 @@ class MemoryNormalizer:
         evaluation_status: str | None = None,
         has_progress: bool = False,
         has_struggle: bool = False,
+        is_positive_behavior: bool = False,
     ) -> str:
         if memory_type not in MEMORY_TYPES:
             raise ValidationError("Unsupported memory type.")
@@ -94,9 +95,13 @@ class MemoryNormalizer:
             return cls.normalize_evidence_role(raw_role)
         if evidence_source_type == "task_attempt":
             if outcome_status == "completed":
-                return "supporting" if memory_type == "knowledge" else "contradicting"
+                if memory_type == "knowledge":
+                    return "supporting"
+                return "supporting" if is_positive_behavior else "contradicting"
             if outcome_status in {"failed", "skipped"}:
-                return "contradicting" if memory_type == "knowledge" else "supporting"
+                if memory_type == "knowledge":
+                    return "contradicting"
+                return "contradicting" if is_positive_behavior else "supporting"
             return "refreshing"
         if evidence_source_type == "session_memory_event":
             if memory_type == "knowledge":
@@ -113,6 +118,12 @@ class MemoryNormalizer:
                 return "contradicting"
             return "refreshing"
         if evidence_source_type == "topic_mastery":
+            return "refreshing"
+        if evidence_source_type == "quiz_answer_attempt":
+            if outcome_status == "completed":
+                return "supporting"
+            if outcome_status == "failed":
+                return "contradicting"
             return "refreshing"
         return "refreshing"
 

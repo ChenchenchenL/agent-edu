@@ -22,6 +22,7 @@ from agent_core.domain.entities.memory import (
 )
 from agent_core.domain.entities.reflection import ReflectionRecord
 from agent_core.domain.entities.reflection_v2 import ReflectionOutcomeEvaluation
+from agent_core.domain.entities.session.quiz import SessionQuizAnswerAttempt
 from agent_core.infrastructure.db.repositories import (
     MemoryEventRepository,
     MemoryEvidenceLinkRepository,
@@ -298,10 +299,12 @@ class EvidenceService:
                 else KNOWLEDGE_EVIDENCE_WEIGHTS.task_attempt_default_link
             )
         else:
+            is_positive = getattr(memory, "is_positive_behavior", False)
             evidence_role = MemoryNormalizer.classify_evidence_role(
                 memory_type="behavior",
                 evidence_source_type="task_attempt",
                 outcome_status=attempt.outcome_status,
+                is_positive_behavior=is_positive,
             )
             weight = (
                 BEHAVIOR_EVIDENCE_WEIGHTS.failed_or_skipped_task_link
@@ -327,6 +330,49 @@ class EvidenceService:
                     "daily_task_id": attempt.daily_task_id,
                     "workflow_run_id": attempt.workflow_run_id,
                 },
+                observed_at=attempt.created_at,
+            )
+        )
+
+    async def upsert_quiz_answer_attempt_evidence(
+        self,
+        *,
+        memory: KnowledgeMemory | BehaviorMemory,
+        memory_type: str,
+        attempt: SessionQuizAnswerAttempt,
+    ) -> None:
+        if self._evidence_link_repository is None:
+            return
+        evidence_role = MemoryNormalizer.classify_evidence_role(
+            memory_type=memory_type,
+            evidence_source_type="quiz_answer_attempt",
+            outcome_status="completed" if attempt.is_correct else "failed",
+        )
+        base_weight = 0.5
+        if attempt.grading_status == "needs_review":
+            base_weight *= 0.5
+        elif attempt.confidence is not None and attempt.confidence >= 0.8:
+            base_weight = min(1.0, base_weight * 1.2)
+        weight = clamp_score(base_weight)
+        payload = {
+            "score": attempt.score,
+            "difficulty": attempt.metadata.get("difficulty", "medium") if attempt.metadata else "medium",
+            "misconception_codes": list(attempt.misconception_codes),
+            "hint_count": attempt.hint_count,
+            "question_id": attempt.question_id,
+        }
+        await self._evidence_link_repository.upsert(
+            MemoryEvidenceLink.build(
+                memory_type=memory_type,
+                memory_id=memory.id,
+                learner_profile_id=memory.learner_profile_id,
+                learner_goal_id=memory.learner_goal_id,
+                evidence_source_type="quiz_answer_attempt",
+                evidence_source_id=attempt.id,
+                evidence_role=evidence_role,
+                signal_type="quiz_attempt",
+                weight=weight,
+                payload=payload,
                 observed_at=attempt.created_at,
             )
         )

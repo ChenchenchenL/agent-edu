@@ -4,6 +4,7 @@ from agent_core.domain.schemas.quiz import QuizQuestion
 from datetime import date
 
 from agent_core.infrastructure.llm.types import (
+    AnswerGradingDraft,
     HintContext,
     QuizDraft,
     ReflectionSummaryDraft,
@@ -213,6 +214,46 @@ class MockLLMProvider:
                 f"actions={action_labels}; evidence_keys={', '.join(sorted(evidence_payload.keys()))}."
             ),
             recommended_next_step=f"Proceed with {action_labels} while monitoring {topic}.",
+            provider="mock",
+            model=self._model_name,
+            latency_ms=0,
+            retry_count=0,
+            response_shape_valid=True,
+        )
+
+    async def generate_answer_grading(
+        self,
+        *,
+        question_prompt: str,
+        question_type: str,
+        reference_answer: str,
+        learner_answer: str,
+        options: list[str] | None = None,
+    ) -> AnswerGradingDraft:
+        self._check_guard()
+        ref = (reference_answer or "").strip().lower()
+        ans = (learner_answer or "").strip().lower()
+        if question_type == "mcq" and options:
+            option_set = {opt.strip().lower() for opt in options}
+            is_correct = ans in option_set and ans == ref
+        else:
+            is_correct = bool(ref) and ans == ref
+        score = 1.0 if is_correct else 0.0
+        rubric = (
+            f"Mock grading for {question_type} question on '{question_prompt[:60]}'. "
+            f"Exact match with reference answer."
+            if is_correct
+            else f"Mock grading: learner answer did not match reference for {question_type} question."
+        )
+        misconceptions: list[str] = [] if is_correct else ["mock_misconception"]
+        reasoning = "exact_match" if is_correct else "no_match"
+        return AnswerGradingDraft(
+            score=score,
+            is_correct=is_correct,
+            confidence=0.95 if is_correct else 0.7,
+            rubric_feedback=rubric,
+            misconception_codes=misconceptions,
+            reasoning_quality=reasoning,
             provider="mock",
             model=self._model_name,
             latency_ms=0,

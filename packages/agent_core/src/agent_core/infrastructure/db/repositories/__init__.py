@@ -6,10 +6,19 @@ from agent_core.infrastructure.db.repositories.session import (  # noqa: F401
     SessionQuizRepository,
 )
 
+from agent_core.infrastructure.db.repositories.quiz_answer_attempt import (  # noqa: F401
+    SessionQuizAnswerAttemptRepository,
+)
+
 from agent_core.infrastructure.db.repositories.skill import (  # noqa: F401
     SkillArtifactRepository,
     SkillUsageEventRepository,
     SkillCuratorRecommendationRepository,
+)
+
+from agent_core.infrastructure.db.repositories.skill_package import (  # noqa: F401
+    SkillPackageRepository,
+    TenantSkillPackageInstallationRepository,
 )
 
 from agent_core.infrastructure.db.repositories.memory import (  # noqa: F401

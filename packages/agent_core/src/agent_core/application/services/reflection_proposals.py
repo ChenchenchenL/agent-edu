@@ -7,7 +7,8 @@ from uuid import uuid4
 from agent_core.application.services.audit import AuditService
 from agent_core.application.services.autonomy_jobs import AutonomyJobService
 from agent_core.application.services.skills import ALLOWED_SKILL_PACKAGE_TOOLS
-from agent_core.application.services.tool_plan_contracts import validate_tool_plan_contract
+from agent_core.application.services.plan_template_validation import PlanTemplateValidator
+from agent_core.application.services.plan_template_selector import PlanTemplateSelector
 from agent_core.domain.entities.reflection import ReflectionRecord
 from agent_core.domain.entities.reflection_closure import (
     ReflectionProposal,
@@ -17,6 +18,7 @@ from agent_core.domain.entities.reflection_closure import (
     proposal_rollout_surface,
 )
 from agent_core.domain.errors import NotFoundError, ValidationError
+from agent_core.domain.entities.skill import SkillArtifact, SkillCuratorRecommendation
 from agent_core.infrastructure.db.repositories import (
     ReflectionProposalApprovalDecisionRepository,
     ReflectionProposalEvaluationRepository,
@@ -78,6 +80,47 @@ class ReflectionProposalService:
                     structured_patch_payload=self._workflow_patch(reflection),
                     expected_improvement=self._workflow_expected_improvement(reflection),
                     risk_level="medium" if reflection.primary_root_cause != "workflow_issue" else "high",
+                    evidence_snapshot=dict(reflection.evidence_payload),
+                )
+            )
+        if reflection.primary_root_cause == "router_issue":
+            proposals.append(
+                ReflectionProposal.build(
+                    reflection_record_id=reflection.id,
+                    learner_goal_id=reflection.learner_goal_id,
+                    proposal_type="routing_policy",
+                    target_scope=prompt_scope,
+                    priority_score=min(1.0, reflection.priority_score + 0.1),
+                    hypothesis="Optimizing routing policy to resolve capability router failures.",
+                    change_summary="Optimizing routing policy to select the correct resolver and fallback chain. This is a high-risk candidate for auto-admit.",
+                    structured_patch_payload={
+                        "routing_rules": {"fallback_on_incompatible": True},
+                        "fallback_chain": ["dynamic_resolver", "static_fallback"],
+                        "trust_policy": "guided",
+                        "ranking_policy": "confidence_first",
+                    },
+                    expected_improvement="Resolve capability router mismatches and fallback bursts.",
+                    risk_level="high",
+                    evidence_snapshot=dict(reflection.evidence_payload),
+                )
+            )
+        if reflection.primary_root_cause == "template_issue":
+            proposals.append(
+                ReflectionProposal.build(
+                    reflection_record_id=reflection.id,
+                    learner_goal_id=reflection.learner_goal_id,
+                    proposal_type="template_policy",
+                    target_scope=workflow_scope,
+                    priority_score=min(1.0, reflection.priority_score + 0.1),
+                    hypothesis="Optimizing template policy to resolve sequence mismatches.",
+                    change_summary="Optimizing template policy sequence contracts and template rules. This is a high-risk candidate for auto-admit.",
+                    structured_patch_payload={
+                        "template_id": "advanced_tutor",
+                        "sequence_contract": "1.1",
+                        "template_rules": {"allow_multi_step_repair": True},
+                    },
+                    expected_improvement="Resolve template sequence contract violations.",
+                    risk_level="high",
                     evidence_snapshot=dict(reflection.evidence_payload),
                 )
             )
@@ -501,8 +544,8 @@ class ReflectionProposalService:
         activation_surface = self._activation_surface(proposal)
         return {
             **proposal.__dict__,
-            "auto_sandbox_eligible": proposal.risk_level in {"low", "medium"},
-            "admission_mode": "auto" if proposal.risk_level in {"low", "medium"} else "manual",
+            "auto_sandbox_eligible": proposal.risk_level in {"low", "medium", "high"},
+            "admission_mode": "auto",
             "rollout_eligible": activation_surface is not None,
             "activation_surface": activation_surface,
         }
@@ -762,7 +805,20 @@ class ReflectionProposalService:
                 tool_name = str(item.get("tool_name") or "")
                 if tool_name not in ALLOWED_SKILL_PACKAGE_TOOLS:
                     raise ValidationError("Unsupported skill package tool.")
-            validate_tool_plan_contract(surface, tool_plan)
+            # Phase 5: validate via template system rather than legacy constant table.
+            # This is the same path used by SkillCandidateService._validated_payload().
+            _validator = PlanTemplateValidator()
+            _selector = PlanTemplateSelector()
+            _template_candidates = _selector.build_candidates_from_legacy_tool_plan(
+                surface=surface,
+                tool_plan=[dict(item) for item in tool_plan],
+            )
+            for _candidate in _template_candidates:
+                _result = _validator.validate_template(template=_candidate, surface=surface)
+                if not _result.valid:
+                    raise ValidationError(
+                        f"Skill package tool_plan fails template validation: {_result.rejection_reason_codes}"
+                    )
         if proposal.proposal_type == "skill_patch_request":
             payload = proposal.structured_patch_payload
             for key in ("skill_name", "scope", "surface", "recommendation_id", "recommendation_reason_code"):
@@ -776,6 +832,24 @@ class ReflectionProposalService:
             for key in ("evidence_snapshot", "metrics_snapshot"):
                 if not isinstance(payload.get(key), dict):
                     raise ValidationError("Skill patch request snapshots must be objects.")
+        if proposal.proposal_type == "routing_policy":
+            payload = proposal.structured_patch_payload
+            if not isinstance(payload.get("routing_rules"), dict):
+                raise ValidationError("routing_policy payload must contain 'routing_rules' object.")
+            if not isinstance(payload.get("fallback_chain"), list):
+                raise ValidationError("routing_policy payload must contain 'fallback_chain' list.")
+            if not isinstance(payload.get("trust_policy"), str) or not payload.get("trust_policy"):
+                raise ValidationError("routing_policy payload must contain non-empty 'trust_policy'.")
+            if not isinstance(payload.get("ranking_policy"), str) or not payload.get("ranking_policy"):
+                raise ValidationError("routing_policy payload must contain non-empty 'ranking_policy'.")
+        if proposal.proposal_type == "template_policy":
+            payload = proposal.structured_patch_payload
+            if not isinstance(payload.get("template_id"), str) or not payload.get("template_id"):
+                raise ValidationError("template_policy payload must contain non-empty 'template_id'.")
+            if not isinstance(payload.get("sequence_contract"), str) or not payload.get("sequence_contract"):
+                raise ValidationError("template_policy payload must contain non-empty 'sequence_contract'.")
+            if not isinstance(payload.get("template_rules"), dict):
+                raise ValidationError("template_policy payload must contain 'template_rules' object.")
 
     @staticmethod
     def _validate_patch_request_artifact_anchor(
@@ -1288,3 +1362,151 @@ class ReflectionProposalService:
         if self._approval_decision_repository is None:
             return
         await self._approval_decision_repository.create(decision)
+
+    async def create_proposal_from_recommendation(
+        self,
+        recommendation: SkillCuratorRecommendation,
+        *,
+        operator_id: str,
+    ) -> ReflectionProposal:
+        if recommendation.recommendation_type == "patch_needed":
+            learner_goal_id, reflection_record_id = await self._skill_patch_anchor(recommendation)
+            return await self.create_skill_patch_request_from_recommendation(
+                recommendation_id=recommendation.id,
+                artifact_id=recommendation.artifact_id,
+                skill_name=recommendation.skill_name,
+                skill_version=recommendation.skill_version,
+                scope=recommendation.scope,
+                surface=recommendation.surface,
+                recommendation_reason_code=recommendation.reason_code,
+                evidence_snapshot=dict(recommendation.evidence_snapshot),
+                metrics_snapshot=dict(recommendation.metrics_snapshot),
+                related_artifact_ids=list(recommendation.related_artifact_ids),
+                reflection_record_id=reflection_record_id,
+                learner_goal_id=learner_goal_id,
+                operator_id=operator_id,
+            )
+        if recommendation.recommendation_type == "merge_candidate":
+            learner_goal_id, reflection_record_id = await self._skill_patch_anchor(recommendation)
+            return await self.create_skill_merge_package_from_recommendation(
+                recommendation_id=recommendation.id,
+                artifact_id=recommendation.artifact_id,
+                skill_name=recommendation.skill_name,
+                skill_version=recommendation.skill_version,
+                scope=recommendation.scope,
+                surface=recommendation.surface,
+                recommendation_reason_code=recommendation.reason_code,
+                evidence_snapshot=dict(recommendation.evidence_snapshot),
+                metrics_snapshot=dict(recommendation.metrics_snapshot),
+                related_artifact_ids=list(recommendation.related_artifact_ids),
+                reflection_record_id=reflection_record_id,
+                learner_goal_id=learner_goal_id,
+                operator_id=operator_id,
+            )
+
+        learner_goal_id, reflection_record_id = await self._skill_patch_anchor(recommendation)
+        evidence = dict(recommendation.evidence_snapshot)
+
+        if recommendation.recommendation_type == "patch_routing_policy":
+            proposal = ReflectionProposal.build(
+                reflection_record_id=reflection_record_id,
+                learner_goal_id=learner_goal_id,
+                proposal_type="routing_policy",
+                target_scope=recommendation.scope,
+                priority_score=0.8,
+                hypothesis="Optimize routing policy from recommendation.",
+                change_summary="Optimizing routing policy based on recommendation evidence. This is a high-risk candidate.",
+                structured_patch_payload={
+                    "routing_rules": {"fallback_on_incompatible": True},
+                    "fallback_chain": ["dynamic_resolver", "static_fallback"],
+                    "trust_policy": "guided",
+                    "ranking_policy": "confidence_first",
+                },
+                expected_improvement="Resolve capability routing regression.",
+                risk_level="high",
+                evidence_snapshot=evidence,
+            )
+        elif recommendation.recommendation_type == "patch_template_policy":
+            proposal = ReflectionProposal.build(
+                reflection_record_id=reflection_record_id,
+                learner_goal_id=learner_goal_id,
+                proposal_type="template_policy",
+                target_scope=recommendation.scope,
+                priority_score=0.8,
+                hypothesis="Optimize template policy from recommendation.",
+                change_summary="Optimizing template policy based on recommendation evidence. This is a high-risk candidate.",
+                structured_patch_payload={
+                    "template_id": "advanced_tutor",
+                    "sequence_contract": "1.1",
+                    "template_rules": {"allow_multi_step_repair": True},
+                },
+                expected_improvement="Resolve template policy issues.",
+                risk_level="high",
+                evidence_snapshot=evidence,
+            )
+        elif recommendation.recommendation_type in {"patch_skill_package", "select_replacement_skill_package"}:
+            proposal = ReflectionProposal.build(
+                reflection_record_id=reflection_record_id,
+                learner_goal_id=learner_goal_id,
+                proposal_type="skill_package",
+                target_scope=recommendation.scope,
+                priority_score=0.8,
+                hypothesis="Patch skill package from recommendation.",
+                change_summary="Patching skill package based on recommendation evidence.",
+                structured_patch_payload={
+                    "surface": recommendation.surface,
+                    "match_rules": {},
+                    "runtime_directives": {},
+                    "tool_plan": [],
+                },
+                expected_improvement="Resolve skill package issues.",
+                risk_level="medium",
+                evidence_snapshot=evidence,
+            )
+        else:
+            raise ValidationError(f"Unsupported recommendation type: {recommendation.recommendation_type}")
+
+        await self._repository.create(proposal)
+        await self._audit_service.record(
+            event_type="reflection.proposal.created",
+            resource_type="reflection_proposal",
+            resource_id=proposal.id,
+            actor=operator_id,
+            event_data={
+                "recommendation_id": recommendation.id,
+                "proposal_type": proposal.proposal_type,
+                "risk_level": proposal.risk_level,
+            },
+        )
+        return proposal
+
+    async def _skill_patch_anchor(self, recommendation: SkillCuratorRecommendation) -> tuple[str, str]:
+        evidence = dict(recommendation.evidence_snapshot)
+        learner_goal_id = self._optional_str(evidence.get("learner_goal_id"))
+        reflection_record_id = self._optional_str(evidence.get("reflection_record_id"))
+        source_proposal_id = self._optional_str(evidence.get("source_proposal_id"))
+        artifact: SkillArtifact | None = None
+        if recommendation.artifact_id is not None:
+            artifact = await self._artifact_repository.get_by_id(recommendation.artifact_id)
+            if artifact is None:
+                raise NotFoundError(f"Skill artifact '{recommendation.artifact_id}' was not found.")
+            source_proposal_id = source_proposal_id or artifact.source_proposal_id
+        if (learner_goal_id is None or reflection_record_id is None) and source_proposal_id is not None:
+            try:
+                proposal = await self.get(source_proposal_id)
+            except NotFoundError:
+                proposal = None
+            if proposal is not None:
+                learner_goal_id = learner_goal_id or proposal.learner_goal_id
+                reflection_record_id = reflection_record_id or proposal.reflection_record_id
+        if reflection_record_id is None and artifact is not None and artifact.source_reflection_ids:
+            reflection_record_id = artifact.source_reflection_ids[0]
+        if learner_goal_id is None or reflection_record_id is None:
+            raise ValidationError("Skill patch recommendation requires learner_goal_id and reflection_record_id.")
+        return learner_goal_id, reflection_record_id
+
+    @staticmethod
+    def _optional_str(value: object) -> str | None:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return None

@@ -13,6 +13,8 @@ from agent_core.application.services.dynamic_runtime_registry import (
     DynamicRuntimeRegistryService,
     RuntimeSkillExecutionPlan,
 )
+from agent_core.application.services.skill.capability import CapabilityRequest
+from agent_core.application.services.skill.capability_catalog import reverse_lookup
 from agent_core.application.services.goal_skill_binding_resolver import ActiveGoalSkillBinding, GoalSkillBindingResolver
 from agent_core.application.services.long_term_memory_materialization import LongTermMemoryMaterializationService
 from agent_core.application.services.long_term_memory_materialization_replay import (
@@ -2844,6 +2846,8 @@ class AutonomousTaskService:
             tool_plan=runtime_plan.tool_plan,
             context=context,
             dry_run=False,
+            template_id=runtime_plan.selected_template_id,
+            template_source=runtime_plan.selected_template_source,
         )
 
     @staticmethod
@@ -2884,6 +2888,22 @@ class AutonomousTaskService:
         include_staged: bool = False,
     ) -> RuntimeSkillExecutionPlan | None:
         if self._runtime_registry is not None:
+            capability = reverse_lookup(skill_name, surface)
+            if capability is not None:
+                request = CapabilityRequest(
+                    capability=capability,
+                    surface=surface,
+                    learner_goal_id=learner_goal_id,
+                    topic_key=topic_key,
+                    task_type=task_type,
+                    trigger_source=trigger_source,
+                )
+                result = await self._runtime_registry.resolve_capability_request(
+                    request,
+                    resource_id=resource_id or learner_goal_id,
+                )
+                if result is not None:
+                    return result.plan
             runtime_plan = await self._runtime_registry.resolve_runtime_plan(
                 learner_goal_id=learner_goal_id,
                 skill_name=skill_name,

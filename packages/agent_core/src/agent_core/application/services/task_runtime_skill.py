@@ -1,4 +1,4 @@
-"""Task runtime skill orchestration service."""
+"""Task runtime skill orchest service."""
 
 from __future__ import annotations
 
@@ -14,6 +14,11 @@ if TYPE_CHECKING:
     from agent_core.application.services.reflection_proposal_rollout_observation_scheduler import ReflectionProposalRolloutObservationScheduler
 
 from agent_core.application.services.review import ReviewService
+from agent_core.application.services.skill.capability import (
+    CapabilityRequest,
+    RuntimeCapabilityExecutionPlan,
+)
+from agent_core.application.services.skill.capability_catalog import reverse_lookup
 from agent_core.domain.entities.autonomy import LearnerTopicMastery
 from agent_core.domain.entities.goal import LearnerGoal
 from agent_core.domain.errors import ValidationError
@@ -69,6 +74,21 @@ class TaskRuntimeSkillService:
         self._rollout_observation_scheduler = rollout_observation_scheduler
         self._review_service = review_service
 
+    async def resolve_capability_execution_plan(
+        self,
+        request: CapabilityRequest,
+        resource_id: str | None,
+    ) -> RuntimeCapabilityExecutionPlan | None:
+        """Resolve a capability-driven runtime execution plan."""
+        if self._runtime_registry is not None:
+            result = await self._runtime_registry.resolve_capability_request(
+                request,
+                resource_id=resource_id or request.learner_goal_id or "capability",
+            )
+            if result is not None:
+                return result
+        return None
+
     async def resolve_autonomy_execution_plan(
         self,
         *,
@@ -81,7 +101,29 @@ class TaskRuntimeSkillService:
         trigger_source: str | None = None,
         include_staged: bool = False,
     ) -> RuntimeSkillExecutionPlan | None:
-        """Resolve a runtime execution plan for autonomy flows."""
+        """Resolve a runtime execution plan for autonomy flows.
+
+        Compatibility bridge -- constructs a CapabilityRequest internally
+        when a capability mapping exists, otherwise falls back to the
+        legacy resolution path.
+        """
+        capability = reverse_lookup(skill_name, surface)
+        if capability is not None:
+            request = CapabilityRequest(
+                capability=capability,
+                surface=surface,
+                learner_goal_id=learner_goal_id,
+                topic_key=topic_key,
+                task_type=task_type,
+                trigger_source=trigger_source,
+            )
+            result = await self.resolve_capability_execution_plan(
+                request,
+                resource_id=resource_id,
+            )
+            if result is not None:
+                return result.plan
+
         if self._runtime_registry is not None:
             runtime_plan = await self._runtime_registry.resolve_runtime_plan(
                 learner_goal_id=learner_goal_id,
@@ -161,6 +203,8 @@ class TaskRuntimeSkillService:
             tool_plan=runtime_plan.tool_plan,
             context=context,
             dry_run=False,
+            template_id=runtime_plan.selected_template_id,
+            template_source=runtime_plan.selected_template_source,
         )
 
     def build_tool_plan_execution_context(

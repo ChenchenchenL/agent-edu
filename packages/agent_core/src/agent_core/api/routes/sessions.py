@@ -1,13 +1,15 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_core.api.dependencies import (
     get_chat_service,
     get_db_session,
     get_message_history_service,
+    get_quiz_attempt_service,
     get_quiz_service,
     get_session_service,
 )
+from agent_core.domain.errors import NotFoundError, ValidationError
 from agent_core.domain.schemas.session import (
     BindGoalRequest,
     CreateSessionRequest,
@@ -18,10 +20,12 @@ from agent_core.domain.schemas.session import (
     UpdateSessionStatusRequest,
 )
 from agent_core.domain.schemas.quiz import (
+    AnswerAttemptResponse,
     GenerateQuizRequest,
     QuizDetailResponse,
     QuizDraftResponse,
     QuizSummaryResponse,
+    SubmitAnswerAttemptRequest,
 )
 
 router = APIRouter(tags=["sessions"])
@@ -122,3 +126,38 @@ async def get_session_quiz(
 ) -> QuizDetailResponse:
     service = get_quiz_service(session)
     return await service.get_quiz(session_id=session_id, quiz_id=quiz_id)
+
+
+@router.post(
+    "/sessions/{session_id}/quizzes/{quiz_id}/questions/{question_id}/attempts",
+    response_model=AnswerAttemptResponse,
+    status_code=201,
+)
+async def submit_quiz_answer_attempt(
+    session_id: str,
+    quiz_id: str,
+    question_id: str,
+    payload: SubmitAnswerAttemptRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> AnswerAttemptResponse:
+    service = get_quiz_attempt_service(session)
+    try:
+        return await service.submit_attempt(
+            session_id=session_id,
+            quiz_id=quiz_id,
+            question_id=question_id,
+            learner_answer=payload.learner_answer,
+            hint_used=payload.hint_used,
+            hint_count=payload.hint_count,
+            client_context=payload.client_context,
+            grading_strategy=payload.grading_strategy,
+        )
+    except ValidationError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=422, detail=str(exc))
+    except NotFoundError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception:
+        await session.rollback()
+        raise

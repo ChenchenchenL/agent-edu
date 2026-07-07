@@ -7,6 +7,7 @@ export interface LearnerGoal {
   baseline_note: string | null;
   deadline_date: string;
   weekly_study_minutes: number;
+  preferred_language: string;
   status: string;
   created_at: string;
   updated_at: string;
@@ -19,6 +20,7 @@ export interface CreateGoalRequest {
   baseline_note?: string | null;
   deadline_date: string;
   weekly_study_minutes: number;
+  preferred_language?: string;
 }
 
 export interface StudyPlanSummary {

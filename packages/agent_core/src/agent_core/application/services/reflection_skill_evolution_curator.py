@@ -9,6 +9,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_core.application.services.audit import AuditService
 from agent_core.application.services.reflection_proposals import ReflectionProposalService
+from agent_core.application.services.reflection_proposal_sandbox import ReflectionProposalSandboxService
+from agent_core.application.services.reflection_sandbox_admission import (
+    SandboxAdmissionDecision,
+    SandboxAdmissionRequest,
+    SandboxAdmissionService,
+)
+from agent_core.application.services.skill.activation_governance import (
+    ActivationGovernanceDecision,
+    ActivationGovernanceRequest,
+    ActivationGovernanceService,
+)
 from agent_core.application.services.skills import SkillReplacementStagingService
 from agent_core.domain.entities.reflection_closure import (
     ReflectionProposal,
@@ -75,6 +86,9 @@ class ReflectionSkillEvolutionCuratorService:
         audit_service: AuditService,
         db_session: AsyncSession | None = None,
         config: ReflectionSkillEvolutionCuratorConfig | None = None,
+        sandbox_admission_service: SandboxAdmissionService | None = None,
+        activation_governance_service: ActivationGovernanceService | None = None,
+        sandbox_service: ReflectionProposalSandboxService | None = None,
     ) -> None:
         self._proposal_repository = proposal_repository
         self._evaluation_repository = evaluation_repository
@@ -85,6 +99,9 @@ class ReflectionSkillEvolutionCuratorService:
         self._audit_service = audit_service
         self._db_session = db_session
         self._config = config or ReflectionSkillEvolutionCuratorConfig()
+        self._sandbox_admission_service = sandbox_admission_service
+        self._activation_governance_service = activation_governance_service
+        self._sandbox_service = sandbox_service
 
     async def run_once(
         self,
@@ -182,14 +199,22 @@ class ReflectionSkillEvolutionCuratorService:
         return True
 
     async def _process_sandbox_candidate(self, proposal: ReflectionProposal) -> str | None:
-        if proposal.risk_level == "high":
-            await self._manual_review_required(
-                proposal=proposal,
-                phase="sandbox_enqueue",
-                reason_code="risk_level_high",
-                reason_note="high-risk proposals require manual sandbox review",
+        if self._sandbox_admission_service is not None:
+            admission = self._sandbox_admission_service.decide(
+                SandboxAdmissionRequest(proposal=proposal),
             )
-            return "suspended"
+            if not admission.allowed:
+                await self._manual_review_required(
+                    proposal=proposal,
+                    phase="sandbox_enqueue",
+                    reason_code="sandbox_admission_blocked",
+                    reason_note=f"admission blocked: {','.join(admission.reason_codes)}",
+                )
+                observe_reflection_skill_evolution(
+                    event="sandbox_admission_blocked",
+                    reason_code=",".join(admission.reason_codes) or "unknown",
+                )
+                return "suspended"
 
         sandbox_run = await self._load_sandbox_run(proposal=proposal, evaluation=None)
         if sandbox_run is not None and sandbox_run.status in {"failed", "cancelled"}:
@@ -204,6 +229,18 @@ class ReflectionSkillEvolutionCuratorService:
 
         updated = await self._proposal_service.auto_enqueue_sandbox(proposal_id=proposal.id)
         if updated.status == "sandbox_queued":
+            if self._sandbox_service is not None:
+                try:
+                    await self._sandbox_service.execute(proposal_id=proposal.id)
+                except Exception as exc:
+                    # Exception is logged/handled by execute internally, but we log curator state here
+                    await self._manual_review_required(
+                        proposal=proposal,
+                        phase="sandbox_enqueue",
+                        reason_code="sandbox_execution_failed",
+                        reason_note=str(exc),
+                    )
+                    return "suspended"
             return "enqueued"
         await self._manual_review_required(
             proposal=updated,
@@ -214,7 +251,27 @@ class ReflectionSkillEvolutionCuratorService:
         return "suspended"
 
     async def _process_auto_stage_candidate(self, proposal: ReflectionProposal, *, now: datetime) -> str | None:
-        if proposal.risk_level == "high":
+        if self._activation_governance_service is not None:
+            governance = self._activation_governance_service.decide(
+                ActivationGovernanceRequest(
+                    action="stage",
+                    risk_level=proposal.risk_level,
+                    source_proposal_type=proposal.evidence_snapshot.get("source") if isinstance(proposal.evidence_snapshot, dict) else None,
+                ),
+            )
+            if governance.manual_review_required:
+                await self._manual_review_required(
+                    proposal=proposal,
+                    phase="auto_stage",
+                    reason_code="activation_governance_manual_review",
+                    reason_note=f"governance requires review: {','.join(governance.reason_codes)}",
+                )
+                observe_reflection_skill_evolution(
+                    event="activation_governance_manual_review",
+                    reason_code=",".join(governance.reason_codes) or "unknown",
+                )
+                return "suspended"
+        elif proposal.risk_level == "high":
             await self._manual_review_required(
                 proposal=proposal,
                 phase="auto_stage",

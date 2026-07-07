@@ -17,6 +17,7 @@ SKILL_ARTIFACT_STATUSES = {
     "archived",
     "rejected",
     "suppressed",
+    "baseline",
 }
 SKILL_SELECTABLE_ARTIFACT_STATUSES = {"active", "stable"}
 SKILL_TYPES = {"baseline", "learned", "curated", "operator_defined"}
@@ -54,6 +55,12 @@ SKILL_OUTCOME_SIGNAL_KEYS = {
     "validation_error",
     "score_delta",
     "confidence",
+    "mastery_before",
+    "mastery_after",
+    "mastery_delta",
+    "answer_correctness_delta",
+    "hint_dependency_delta",
+    "misconception_reduction",
 }
 SKILL_CURATOR_RECOMMENDATION_TYPES = {
     "activate_candidate",
@@ -65,6 +72,11 @@ SKILL_CURATOR_RECOMMENDATION_TYPES = {
     "rollback_review",
     "flag_for_review",
     "restore_candidate",
+    "patch_routing_policy",
+    "patch_template_policy",
+    "patch_skill_package",
+    "select_replacement_skill_package",
+    "demote_candidate",
 }
 SKILL_CURATOR_RECOMMENDED_ACTIONS = {
     "none",
@@ -75,6 +87,7 @@ SKILL_CURATOR_RECOMMENDED_ACTIONS = {
     "restore_suppressed",
     "replace_selectable",
     "archive_deprecated",
+    "demote_active",
 }
 SKILL_CURATOR_RECOMMENDATION_STATUSES = {
     "pending",
@@ -221,8 +234,15 @@ class SkillCuratorRecommendation:
             raise ValidationError("archive_deprecated requires archive_candidate recommendation.")
         if recommendation_type == "archive_candidate" and recommended_action not in {"none", "archive_deprecated"}:
             raise ValidationError("archive_candidate recommendations must use archive_deprecated or none.")
-        if recommendation_type in {"patch_needed", "merge_candidate"} and recommended_action != "none":
-            raise ValidationError("Patch and merge recommendations are non-executable in v1.")
+        if recommendation_type in {
+            "patch_needed",
+            "merge_candidate",
+            "patch_routing_policy",
+            "patch_template_policy",
+            "patch_skill_package",
+            "select_replacement_skill_package",
+        } and recommended_action != "none":
+            raise ValidationError("Patch, merge, routing, and template recommendations are non-executable in v1.")
 
     def accept(
         self,

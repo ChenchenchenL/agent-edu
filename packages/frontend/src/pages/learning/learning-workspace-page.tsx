@@ -54,116 +54,133 @@ export function LearningWorkspacePage() {
 
   if (sessionLoading) {
     return (
-      <div className="flex items-center justify-center py-20">
-        <Loader2 className="h-5 w-5 animate-spin text-primary" />
+      <div className="flex h-[80vh] items-center justify-center bg-background">
+        <Loader2 className="h-6 w-6 animate-spin text-primary" />
       </div>
     );
   }
 
   if (!session) {
     return (
-      <div className="fade-in flex flex-col items-center gap-4 py-24">
-        <p className="font-medium text-text-primary">会话不存在</p>
+      <div className="fade-in flex flex-col items-center justify-center gap-4 py-24 min-h-[80vh] bg-background">
+        <p className="font-serif text-lg font-semibold text-text-primary">会话不存在</p>
         <p className="text-sm text-text-secondary">
           该会话可能已被删除或链接无效
         </p>
         <Link to="/sessions">
-          <Button variant="outline">返回会话列表</Button>
+          <Button variant="outline" className="rounded-none">返回会话列表</Button>
         </Link>
       </div>
     );
   }
 
   return (
-    <div className="fade-in -mx-6 -mt-5 flex h-[calc(100vh-7rem)] flex-col">
-      <div className="overflow-hidden rounded-xl border border-border-subtle bg-surface shadow-sm">
+    <div className="fade-in flex h-[calc(100vh-4rem)] flex-col bg-surface overflow-hidden">
+      {/* Header section */}
+      <div className="shrink-0">
         <WorkspaceHeader session={session} />
+      </div>
 
-        <div className="flex h-[calc(100vh-7rem-5.5rem)] flex-col lg:flex-row">
-          {/* 对话区 */}
-          <section className="flex min-h-0 flex-1 flex-col border-b border-border-subtle lg:border-r lg:border-b-0">
-            <div className="flex items-center gap-2 border-b border-border-subtle px-5 py-2.5">
-              <MessageSquare className="h-3.5 w-3.5 text-primary" />
-              <span className="text-xs font-medium text-text-primary">
-                对话与讲解
-              </span>
-            </div>
+      {/* Main split workspace */}
+      <div className="flex flex-1 min-h-0 flex-col lg:flex-row">
+        {/* Left Column: Chat / Explanation Workspace (takes remaining space) */}
+        <section className="flex min-h-0 flex-1 flex-col bg-[#fcfbfa] border-b border-border lg:border-r lg:border-b-0">
+          <div className="flex items-center gap-2 border-b border-border px-6 py-3 bg-[#FAF9F6]">
+            <MessageSquare className="h-4 w-4 text-primary" strokeWidth={1.5} />
+            <span className="text-xs font-serif font-semibold tracking-wider text-text-primary uppercase">
+              对话与讲解
+            </span>
+          </div>
 
+          <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
             <MessageThread
               messages={messages}
               isLoading={messagesLoading}
               isSending={sendMessage.isPending}
             />
+          </div>
 
+          <div className="shrink-0 bg-white">
             <ChatComposer
               value={chatInput}
               onChange={setChatInput}
               onSubmit={handleChatSubmit}
               isPending={sendMessage.isPending}
             />
-          </section>
+          </div>
+        </section>
 
-          {/* 工具面板 */}
-          <aside className="flex w-full shrink-0 flex-col lg:w-[380px]">
-            <div className="flex border-b border-border-subtle">
-              <button
-                type="button"
-                onClick={() => setSidePanel("quiz")}
-                className={`flex flex-1 items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors ${
-                  sidePanel === "quiz"
-                    ? "border-b-2 border-primary text-primary"
-                    : "text-text-secondary hover:text-text-primary"
-                }`}
-              >
-                <ClipboardList className="h-3.5 w-3.5" />
-                练习题
-              </button>
-              <button
-                type="button"
-                onClick={() => setSidePanel("hint")}
-                className={`flex flex-1 items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors ${
-                  sidePanel === "hint"
-                    ? "border-b-2 border-primary text-primary"
-                    : "text-text-secondary hover:text-text-primary"
-                }`}
-              >
-                <Lightbulb className="h-3.5 w-3.5" />
-                提示
-              </button>
-              <button
-                type="button"
-                onClick={() => setSidePanel("tasks")}
-                className={`flex flex-1 items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors ${
-                  sidePanel === "tasks"
-                    ? "border-b-2 border-primary text-primary"
-                    : "text-text-secondary hover:text-text-primary"
-                }`}
-              >
-                <BookCheck className="h-3.5 w-3.5" />
-                任务
-              </button>
-            </div>
-
-            <div className="min-h-0 flex-1 overflow-hidden">
-              {sidePanel === "quiz" ? (
-                <QuizPanel
-                  sessionId={session.id}
-                  defaultTopic={session.subject ?? ""}
-                  onRequestHint={sendHint}
-                  onDiscussAnswer={(content) => sendChat(content)}
-                  isPending={sendMessage.isPending}
-                />
-              ) : sidePanel === "hint" ? (
-                <HintPanel
-                  onRequestHint={handleHintRequest}
-                  isPending={sendMessage.isPending}
-                />
-              ) : (
-                <TaskPanel sessionId={session.id} goalId={session.learner_goal_id} />
+        {/* Right Column: Dynamic Tool Workspace (Quiz / Hints / Study Tasks) */}
+        <aside className="flex w-full lg:w-[480px] xl:w-[560px] shrink-0 flex-col bg-white min-h-0 overflow-hidden">
+          {/* Tab Navigation */}
+          <div className="flex border-b border-border bg-[#FAF9F6] shrink-0">
+            <button
+              type="button"
+              onClick={() => setSidePanel("quiz")}
+              className={`flex flex-1 items-center justify-center gap-2 px-5 py-3 text-xs font-serif font-semibold tracking-wider transition-colors relative uppercase ${
+                sidePanel === "quiz"
+                  ? "text-primary"
+                  : "text-text-secondary hover:text-text-primary"
+              }`}
+            >
+              <ClipboardList className="h-4 w-4" strokeWidth={1.5} />
+              练习题
+              {sidePanel === "quiz" && (
+                <div className="absolute bottom-[-1px] left-0 right-0 h-0.5 bg-primary" />
               )}
-            </div>
-          </aside>
-        </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => setSidePanel("hint")}
+              className={`flex flex-1 items-center justify-center gap-2 px-5 py-3 text-xs font-serif font-semibold tracking-wider transition-colors relative uppercase ${
+                sidePanel === "hint"
+                  ? "text-primary"
+                  : "text-text-secondary hover:text-text-primary"
+              }`}
+            >
+              <Lightbulb className="h-4 w-4" strokeWidth={1.5} />
+              提示
+              {sidePanel === "hint" && (
+                <div className="absolute bottom-[-1px] left-0 right-0 h-0.5 bg-primary" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => setSidePanel("tasks")}
+              className={`flex flex-1 items-center justify-center gap-2 px-5 py-3 text-xs font-serif font-semibold tracking-wider transition-colors relative uppercase ${
+                sidePanel === "tasks"
+                  ? "text-primary"
+                  : "text-text-secondary hover:text-text-primary"
+              }`}
+            >
+              <BookCheck className="h-4 w-4" strokeWidth={1.5} />
+              任务
+              {sidePanel === "tasks" && (
+                <div className="absolute bottom-[-1px] left-0 right-0 h-0.5 bg-primary" />
+              )}
+            </button>
+          </div>
+
+          {/* Panel Content Panel */}
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            {sidePanel === "quiz" ? (
+              <QuizPanel
+                sessionId={session.id}
+                defaultTopic={session.subject ?? ""}
+                onRequestHint={sendHint}
+                onDiscussAnswer={(content) => sendChat(content)}
+                isPending={sendMessage.isPending}
+              />
+            ) : sidePanel === "hint" ? (
+              <HintPanel
+                onRequestHint={handleHintRequest}
+                isPending={sendMessage.isPending}
+              />
+            ) : (
+              <TaskPanel sessionId={session.id} goalId={session.learner_goal_id} />
+            )}
+          </div>
+        </aside>
       </div>
     </div>
   );

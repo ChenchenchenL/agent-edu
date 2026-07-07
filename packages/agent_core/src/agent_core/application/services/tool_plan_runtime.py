@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent_core.application.services.audit import AuditService
-from agent_core.application.services.tool_plan_contracts import parse_step_reference, validate_tool_plan_contract
+from agent_core.application.services.plan_template_validation import PlanTemplateValidator
+from agent_core.application.services.plan_templates import PlanTemplate, build_plan_template_from_legacy_tool_plan
 from agent_core.application.tools.registry import InternalToolRegistry, ToolExecutionRequest
 from agent_core.domain.errors import ValidationError
 
@@ -65,9 +66,11 @@ class ToolPlanRuntimeExecutor:
         *,
         internal_tool_registry: InternalToolRegistry | None,
         audit_service: AuditService,
+        template_validator: PlanTemplateValidator | None = None,
     ) -> None:
         self._internal_tool_registry = internal_tool_registry
         self._audit_service = audit_service
+        self._template_validator = template_validator or PlanTemplateValidator()
 
     async def execute(
         self,
@@ -76,24 +79,35 @@ class ToolPlanRuntimeExecutor:
         tool_plan: list[dict[str, Any]],
         context: ToolPlanExecutionContext,
         dry_run: bool = False,
+        template_id: str | None = None,
+        template_source: str | None = None,
     ) -> MultiStepToolPlanExecutionReport:
-        validate_tool_plan_contract(surface, tool_plan)
         if not tool_plan:
             raise ValidationError("Tool plan execution requires a non-empty tool_plan.")
-        step_definitions = self._parse_steps(tool_plan)
+        validated_tool_plan = self._validate_and_expand_tool_plan(
+            surface=surface,
+            tool_plan=tool_plan,
+            template_id=template_id,
+        )
+        step_definitions = self._parse_steps(validated_tool_plan)
         step_outputs: dict[str, dict[str, Any] | None] = {}
         step_results: list[ToolPlanStepResult] = []
+        audit_data: dict[str, Any] = {
+            "surface": surface,
+            "sequence": [step.tool_name for step in step_definitions],
+            "step_count": len(step_definitions),
+            "dry_run": dry_run,
+        }
+        if template_id is not None:
+            audit_data["template_id"] = template_id
+        if template_source is not None:
+            audit_data["template_source"] = template_source
         await self._audit_service.record(
             event_type="tool.plan.execution.started",
             resource_type="internal_tool_plan",
             resource_id=context.resource_id,
             actor=context.actor,
-            event_data={
-                "surface": surface,
-                "sequence": [step.tool_name for step in step_definitions],
-                "step_count": len(step_definitions),
-                "dry_run": dry_run,
-            },
+            event_data=audit_data,
         )
         try:
             for step_definition in step_definitions:
@@ -226,6 +240,25 @@ class ToolPlanRuntimeExecutor:
             )
         return definitions
 
+    def _validate_and_expand_tool_plan(
+        self,
+        *,
+        surface: str,
+        tool_plan: list[dict[str, Any]],
+        template_id: str | None,
+    ) -> list[dict[str, Any]]:
+        template = build_plan_template_from_legacy_tool_plan(
+            template_id=template_id or f"runtime_{surface}",
+            surface=surface,
+            tool_plan=tool_plan,
+        )
+        validation = self._template_validator.validate_template(template=template, surface=surface)
+        if not validation.valid or validation.validated_template is None:
+            raise ValidationError(
+                f"{surface} runtime tool_plan fails template validation: {validation.rejection_reason_codes}"
+            )
+        return validation.validated_template.to_legacy_tool_plan()
+
     @staticmethod
     def _resolve_payload_template(
         *,
@@ -254,7 +287,7 @@ class ToolPlanRuntimeExecutor:
         template_values = context.template_values()
         if value in template_values:
             return template_values[value]
-        step_reference = parse_step_reference(value)
+        step_reference = PlanTemplate.parse_step_reference(value)
         if step_reference is None:
             raise ValidationError(f"Tool plan template variable '{value}' is missing from runtime context.")
         return ToolPlanRuntimeExecutor._read_prior_step_output(step_reference=step_reference, step_outputs=step_outputs)

@@ -9,7 +9,11 @@ import {
   CheckCircle2,
   XCircle,
   Clock,
+  BarChart3,
+  Target,
+  TrendingUp,
 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -20,6 +24,11 @@ import {
   useCuratorRecommendations,
   useAuditEvents,
 } from "@/hooks/use-operator";
+import {
+  useOperatorAttempts,
+  useMisconceptionTrend,
+  useLearningGainDashboard,
+} from "@/hooks/use-operator-quiz-observability";
 import type { AuditEvent } from "@/types/operator";
 
 function StatusDot({ status }: { status: "ok" | "warn" | "error" }) {
@@ -287,6 +296,78 @@ function AuditEventsCard() {
   );
 }
 
+function QuizObservabilityCard() {
+  const navigate = useNavigate();
+  const { data: attemptsData } = useOperatorAttempts({ limit: 1 });
+  const { data: misconceptionsData } = useMisconceptionTrend(1);
+  const { data: gainsData } = useLearningGainDashboard(1);
+
+  const attemptCount = attemptsData?.total_count ?? 0;
+  const misconceptionCount = misconceptionsData?.trends.length ?? 0;
+  const skillCount = gainsData?.learning_gains.length ?? 0;
+
+  const tiles = [
+    {
+      label: "答题记录",
+      value: attemptCount,
+      hint: "总提交",
+      icon: <ClipboardList className="h-4 w-4" />,
+      to: "/operator/quiz/attempts",
+      accent: "text-primary",
+    },
+    {
+      label: "误解趋势",
+      value: misconceptionCount,
+      hint: "唯一代码",
+      icon: <Target className="h-4 w-4" />,
+      to: "/operator/quiz/misconceptions",
+      accent: "text-accent-gold",
+    },
+    {
+      label: "学习增益",
+      value: skillCount,
+      hint: "技能",
+      icon: <TrendingUp className="h-4 w-4" />,
+      to: "/operator/quiz/learning-gains",
+      accent: "text-success",
+    },
+  ];
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <BarChart3 className="h-4 w-4 text-primary" />
+          答题观测
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-3 gap-2">
+          {tiles.map((tile) => (
+            <button
+              key={tile.label}
+              type="button"
+              onClick={() => navigate(tile.to)}
+              className="group rounded-md border border-border-subtle bg-background p-3 text-left transition-colors hover:border-primary/30 hover:bg-primary-surface/40"
+            >
+              <div className={`mb-2 ${tile.accent}`}>{tile.icon}</div>
+              <div className="font-mono text-xl font-semibold tabular-nums text-text-primary">
+                {tile.value}
+              </div>
+              <div className="mt-0.5 text-[10px] uppercase tracking-wider text-text-secondary">
+                {tile.label}
+              </div>
+              <div className="mt-1 text-[10px] text-text-secondary">
+                {tile.hint}
+              </div>
+            </button>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export function OperatorDashboardPage() {
   return (
     <div className="fade-in">
@@ -300,6 +381,9 @@ export function OperatorDashboardPage() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
+        <div className="lg:col-span-2">
+          <QuizObservabilityCard />
+        </div>
         <GuardrailsCard />
         <ReviewQueuesCard />
         <CuratorRecommendationsCard />

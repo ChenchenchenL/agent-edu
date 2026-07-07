@@ -295,6 +295,23 @@ class SessionQuizRepository:
         self._session.add(model)
         await self._session.flush()
 
+    async def get_quiz_by_id(self, quiz_id: str) -> SessionQuiz | None:
+        result = await self._session.execute(
+            select(SessionQuizModel).where(SessionQuizModel.id == quiz_id)
+        )
+        model = result.scalar_one_or_none()
+        if model is None:
+            return None
+        return SessionQuiz(
+            id=model.id,
+            session_id=model.session_id,
+            topic=model.topic,
+            difficulty=model.difficulty,
+            question_count=model.question_count,
+            skill_trace=tuple(model.skill_trace or ()),
+            created_at=model.created_at,
+        )
+
     async def create_questions(self, entities: list[SessionQuizQuestion]) -> None:
         self._session.add_all([SessionQuizQuestionModel(**entity.__dict__) for entity in entities])
         await self._session.flush()
@@ -328,7 +345,13 @@ class SessionQuizRepository:
         return StoredSessionQuiz(
             quiz=self._to_quiz_entity(quiz_model),
             questions=[
-                QuizQuestion(prompt=model.prompt, answer=model.answer)
+                QuizQuestion(
+                    id=model.id,
+                    prompt=model.prompt,
+                    answer=model.answer,
+                    question_type=model.question_type or "open_ended",
+                    options=list(model.options or []),
+                )
                 for model in question_models
             ],
         )

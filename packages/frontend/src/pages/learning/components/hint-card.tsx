@@ -1,4 +1,5 @@
 import { Lightbulb, ShieldCheck, AlertCircle } from "lucide-react";
+import { MarkdownContent } from "@/components/markdown-content";
 import type { HintPayload } from "@/types/session";
 import { hintLevelLabel } from "@/pages/learning/lib/labels";
 
@@ -33,29 +34,29 @@ export function HintCard({ payload }: HintCardProps) {
         </div>
       )}
 
-      <p className="text-xs leading-relaxed text-text-primary">
+      <div className="text-xs leading-relaxed text-text-primary">
         <span className="font-medium">下一步：</span>
-        {payload.next_step_hint}
-      </p>
+        <MarkdownContent content={payload.next_step_hint} className="inline text-xs" />
+      </div>
 
       {payload.key_principle && (
-        <p className="text-xs leading-relaxed text-text-secondary">
+        <div className="text-xs leading-relaxed text-text-secondary">
           <span className="font-medium text-text-primary">关键原理：</span>
-          {payload.key_principle}
-        </p>
+          <MarkdownContent content={payload.key_principle} className="inline text-xs" />
+        </div>
       )}
 
       {payload.pitfall && (
-        <p className="text-xs leading-relaxed text-text-secondary">
+        <div className="text-xs leading-relaxed text-text-secondary">
           <span className="font-medium text-text-primary">注意：</span>
-          {payload.pitfall}
-        </p>
+          <MarkdownContent content={payload.pitfall} className="inline text-xs" />
+        </div>
       )}
 
       {payload.encouragement && (
-        <p className="border-t border-border-subtle pt-2 text-xs italic text-text-secondary">
-          {payload.encouragement}
-        </p>
+        <div className="border-t border-border-subtle pt-2 text-xs italic text-text-secondary">
+          <MarkdownContent content={payload.encouragement} className="inline text-xs" />
+        </div>
       )}
     </div>
   );

@@ -24,6 +24,7 @@ MEMORY_PROVENANCE_TYPES = {
     "operator",
     "compression",
     "system_inference",
+    "quiz_answer_attempt",
 }
 MEMORY_EVIDENCE_SOURCE_TYPES = {
     "session_memory_event",
@@ -32,6 +33,7 @@ MEMORY_EVIDENCE_SOURCE_TYPES = {
     "operator_annotation",
     "reflection_record",
     "reflection_outcome",
+    "quiz_answer_attempt",
 }
 MEMORY_EVIDENCE_ROLES = {"supporting", "contradicting", "refreshing"}
 MEMORY_DECISION_TYPES = {"promote", "demote", "archive", "compress", "suppress", "restore", "refresh"}

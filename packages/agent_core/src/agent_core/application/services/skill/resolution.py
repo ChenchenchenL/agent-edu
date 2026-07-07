@@ -144,6 +144,7 @@ class SkillResolver:
         *,
         resolution: SkillResolution,
         skill_binding: ActiveGoalSkillBinding | None = None,
+        tool_plan_override: list[dict[str, Any]] | None = None,
     ) -> SkillExecutionPlan:
         if resolution.resolver_status in {"blocked", "incompatible"}:
             raise ValidationError(f"Skill resolution is {resolution.resolver_status}.")
@@ -160,11 +161,14 @@ class SkillResolver:
             if skill_binding is not None
             else {}
         )
-        effective_tool_plan = (
-            [dict(item) for item in skill_binding.tool_plan]
-            if skill_binding is not None and skill_binding.tool_plan
-            else base_tool_plan
-        )
+        if tool_plan_override is not None:
+            effective_tool_plan = [dict(item) for item in tool_plan_override]
+        else:
+            effective_tool_plan = (
+                [dict(item) for item in skill_binding.tool_plan]
+                if skill_binding is not None and skill_binding.tool_plan
+                else base_tool_plan
+            )
         binding_metadata = (
             skill_binding.usage_metadata(skill_name=resolution.skill_name)
             if skill_binding is not None

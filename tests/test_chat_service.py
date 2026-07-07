@@ -14,6 +14,8 @@ from agent_core.domain.entities.memory import (
     KnowledgeMemoryRetrievalResult,
     MemoryRetrievalResult,
     RetrievedMemory,
+    RetrievedKnowledgeMemory,
+    RetrievedBehaviorMemory,
 )
 from agent_core.application.skills.registry import SkillRegistry
 from agent_core.domain.entities.skill import SkillExecutionPlan, SkillResolution
@@ -228,6 +230,7 @@ class CaptureTutorReplyProvider:
 
     def __init__(self):
         self.last_skill_directives = None
+        self.last_learner_profile = None
 
     async def generate_tutor_reply(
         self,
@@ -242,6 +245,7 @@ class CaptureTutorReplyProvider:
         hint_context=None,
     ):
         self.last_skill_directives = list(learner_profile.skill_directives)
+        self.last_learner_profile = learner_profile
         return TutorReply(
             content="captured reply",
             payload=ExplanationPayload(
@@ -259,6 +263,40 @@ class CaptureTutorReplyProvider:
         )
 
 
+class StubKnowledgeMemory:
+    def __init__(self, id, title, summary, status="active", validation_status="unverified", governance_state="active"):
+        self.id = id
+        self.memory_id = id
+        self.title = title
+        self.summary = summary
+        self.status = status
+        self.governance_state = governance_state
+        self.validation_status = validation_status
+        self.knowledge_key = "key"
+        self.knowledge_level = "conceptual"
+        self.time_horizon = "short"
+        self.importance_score = 0.8
+        self.confidence_score = 0.8
+        self.freshness_score = 0.8
+
+
+class StubBehaviorMemory:
+    def __init__(self, id, title, summary, status="active", validation_status="unverified"):
+        self.id = id
+        self.memory_id = id
+        self.title = title
+        self.summary = summary
+        self.status = status
+        self.validation_status = validation_status
+        self.behavior_key = "key"
+        self.behavior_category = "conceptual"
+        self.behavior_level = "conceptual"
+        self.time_horizon = "short"
+        self.importance_score = 0.8
+        self.confidence_score = 0.8
+        self.freshness_score = 0.8
+
+
 class StubSemanticMemoryService:
     def __init__(self, created_at):
         self.recorded = []
@@ -266,6 +304,12 @@ class StubSemanticMemoryService:
         self._created_at = created_at
         self.embedding_provider_name = "stub"
         self.embedding_model_name = "stub-embedding-v1"
+        self.knowledge_memories = []
+        self.behavior_memories = []
+        self.fail_knowledge = False
+        self.fail_behavior = False
+        self.knowledge_details = {}
+        self.behavior_details = {}
 
     async def record_learning_memories(self, **kwargs):
         events = [
@@ -343,22 +387,37 @@ class StubSemanticMemoryService:
         )
 
     async def retrieve_relevant_knowledge_memories(self, **kwargs):
+        if self.fail_knowledge:
+            raise RuntimeError("knowledge retrieval failed")
         return KnowledgeMemoryRetrievalResult(
-            memories=[],
+            memories=self.knowledge_memories,
             provider="stub",
             model="stub-embedding-v1",
             latency_ms=1,
-            candidate_count=0,
+            candidate_count=len(self.knowledge_memories),
+            eligible_candidate_count=0,
         )
 
     async def retrieve_relevant_behavior_memories(self, **kwargs):
+        if self.fail_behavior:
+            raise RuntimeError("behavior retrieval failed")
         return BehaviorMemoryRetrievalResult(
-            memories=[],
+            memories=self.behavior_memories,
             provider="stub",
             model="stub-embedding-v1",
             latency_ms=1,
-            candidate_count=0,
+            candidate_count=len(self.behavior_memories),
         )
+
+    async def get_knowledge_memory(self, memory_id: str):
+        if memory_id in self.knowledge_details:
+            return self.knowledge_details[memory_id]
+        return StubKnowledgeMemory(memory_id, "Title", "Summary")
+
+    async def get_behavior_memory(self, memory_id: str):
+        if memory_id in self.behavior_details:
+            return self.behavior_details[memory_id]
+        return StubBehaviorMemory(memory_id, "Title", "Summary")
 
 
 class FailingProfileMemoryService(StubSemanticMemoryService):
@@ -1015,3 +1074,351 @@ async def test_chat_usage_metadata_includes_dynamic_runtime_registry_summary():
     metadata = skill_usage_service.events[-1]["metadata"]
     assert metadata["dynamic_registry_version"] == "v1"
     assert metadata["source_summary"]["artifact_source"] == "artifact"
+
+
+async def test_chat_message_injects_knowledge_and_behavior_memories():
+    session = LearningSession.build(learner_profile_id="profile-1", title="Linear Algebra", subject="Matrices")
+    semantic_memory = StubSemanticMemoryService(session.created_at)
+    
+    # Configure mock knowledge and behavior memories
+    semantic_memory.knowledge_memories = [
+        RetrievedKnowledgeMemory(
+            memory_id="know-1",
+            knowledge_key="matrix_mult",
+            title="Matrix Multiplication Rules",
+            summary="Multiplication requires matching dimensions.",
+            knowledge_level="conceptual",
+            time_horizon="short",
+            importance_score=0.9,
+            confidence_score=0.9,
+            freshness_score=0.9,
+            status="active",
+            governance_state="active",
+        ),
+        RetrievedKnowledgeMemory(
+            memory_id="know-candidate-eligible",
+            knowledge_key="det_rules",
+            title="Determinant Rules",
+            summary="Eligible candidate rule.",
+            knowledge_level="conceptual",
+            time_horizon="short",
+            importance_score=0.9,
+            confidence_score=0.9,
+            freshness_score=0.9,
+            status="candidate",
+            governance_state="candidate_eligible",
+        )
+    ]
+    semantic_memory.behavior_memories = [
+        RetrievedBehaviorMemory(
+            memory_id="behav-1",
+            behavior_key="hints_preference",
+            behavior_category="conceptual",
+            title="Hint Usage Pattern",
+            summary="Learner prefers hints before solving complex equations.",
+            behavior_level="conceptual",
+            time_horizon="short",
+            importance_score=0.8,
+            confidence_score=0.8,
+            freshness_score=0.8,
+            status="active",
+        )
+    ]
+
+    llm_provider = CaptureTutorReplyProvider()
+    chat_service = ChatService(
+        db_session=FakeSession(),
+        session_repository=StubSessionRepository(session),
+        message_repository=StubMessageRepository(),
+        quiz_repository=StubQuizRepository(),
+        memory_service=semantic_memory,
+        audit_service=AuditService(StubAuditRepository()),
+        llm_provider=llm_provider,
+        skill_registry=SkillRegistry.from_allowed_skills(["explain_concept"]),
+        reflection_evidence_service=None,
+        strategy_card_service=StubStrategyCardService(),
+    )
+
+    response = await chat_service.create_message(
+        session_id=session.id,
+        payload=MessageRequest(content="Explain matrix multiplication simply.", mode="chat"),
+    )
+
+    assert response.assistant_message == "captured reply"
+    profile = llm_provider.last_learner_profile
+    assert profile is not None
+    # Verify both knowledge and behavior memory contexts exist in long_term_context
+    assert any("Knowledge: Matrix Multiplication Rules" in item for item in profile.long_term_context)
+    assert any("Knowledge: Determinant Rules" in item for item in profile.long_term_context)
+    assert any("Behavior: Hint Usage Pattern" in item for item in profile.long_term_context)
+    # Check that cross_session_context_count metrics is correctly updated
+    assert response.turn_metrics.cross_session_context_count == len(profile.long_term_context)
+
+
+async def test_chat_message_filters_contested_and_unauthorized_memories():
+    session = LearningSession.build(learner_profile_id="profile-1", title="Linear Algebra", subject="Matrices")
+    semantic_memory = StubSemanticMemoryService(session.created_at)
+    
+    # 1. Contested knowledge memory
+    # 2. Candidate knowledge memory (NOT eligible)
+    # 3. Suppressed knowledge memory
+    semantic_memory.knowledge_memories = [
+        RetrievedKnowledgeMemory(
+            memory_id="know-contested",
+            knowledge_key="contested_key",
+            title="Contested Concept",
+            summary="This summary should not be shown.",
+            knowledge_level="conceptual",
+            time_horizon="short",
+            importance_score=0.9,
+            confidence_score=0.9,
+            freshness_score=0.9,
+            status="active",
+            governance_state="active",
+        ),
+        RetrievedKnowledgeMemory(
+            memory_id="know-candidate-ineligible",
+            knowledge_key="ineligible_key",
+            title="Ineligible Candidate Concept",
+            summary="Candidate concept without eligibility gate.",
+            knowledge_level="conceptual",
+            time_horizon="short",
+            importance_score=0.9,
+            confidence_score=0.9,
+            freshness_score=0.9,
+            status="candidate",
+            governance_state="candidate",
+        )
+    ]
+    # Configure contested full details
+    semantic_memory.knowledge_details["know-contested"] = StubKnowledgeMemory(
+        id="know-contested",
+        title="Contested Concept",
+        summary="This summary should not be shown.",
+        status="active",
+        validation_status="contested",
+    )
+    
+    # Contested and candidate ineligible behavior memories
+    semantic_memory.behavior_memories = [
+        RetrievedBehaviorMemory(
+            memory_id="behav-contested",
+            behavior_key="contested_behav",
+            behavior_category="conceptual",
+            title="Contested Behavior",
+            summary="Contested behavior summary.",
+            behavior_level="conceptual",
+            time_horizon="short",
+            importance_score=0.8,
+            confidence_score=0.8,
+            freshness_score=0.8,
+            status="active",
+        ),
+        RetrievedBehaviorMemory(
+            memory_id="behav-candidate",
+            behavior_key="candidate_behav",
+            behavior_category="conceptual",
+            title="Candidate Behavior",
+            summary="Candidate behavior summary.",
+            behavior_level="conceptual",
+            time_horizon="short",
+            importance_score=0.8,
+            confidence_score=0.8,
+            freshness_score=0.8,
+            status="candidate",
+        )
+    ]
+    semantic_memory.behavior_details["behav-contested"] = StubBehaviorMemory(
+        id="behav-contested",
+        title="Contested Behavior",
+        summary="Contested behavior summary.",
+        status="active",
+        validation_status="contested",
+    )
+
+    llm_provider = CaptureTutorReplyProvider()
+    chat_service = ChatService(
+        db_session=FakeSession(),
+        session_repository=StubSessionRepository(session),
+        message_repository=StubMessageRepository(),
+        quiz_repository=StubQuizRepository(),
+        memory_service=semantic_memory,
+        audit_service=AuditService(StubAuditRepository()),
+        llm_provider=llm_provider,
+        skill_registry=SkillRegistry.from_allowed_skills(["explain_concept"]),
+        reflection_evidence_service=None,
+        strategy_card_service=StubStrategyCardService(),
+    )
+
+    await chat_service.create_message(
+        session_id=session.id,
+        payload=MessageRequest(content="Explain matrix multiplication simply.", mode="chat"),
+    )
+
+    profile = llm_provider.last_learner_profile
+    assert profile is not None
+    # All contested, ineligible candidates, and suppressed memories must be excluded
+    for item in profile.long_term_context:
+        assert "Contested" not in item
+        assert "Ineligible" not in item
+        assert "Candidate Behavior" not in item
+
+
+async def test_chat_message_isolates_knowledge_and_behavior_retrieval_failures():
+    session = LearningSession.build(learner_profile_id="profile-1", title="Linear Algebra", subject="Matrices")
+    semantic_memory = StubSemanticMemoryService(session.created_at)
+    # Trigger fail flags
+    semantic_memory.fail_knowledge = True
+    semantic_memory.fail_behavior = True
+
+    audit_repository = StubAuditRepository()
+    chat_service = ChatService(
+        db_session=FakeSession(),
+        session_repository=StubSessionRepository(session),
+        message_repository=StubMessageRepository(),
+        quiz_repository=StubQuizRepository(),
+        memory_service=semantic_memory,
+        audit_service=AuditService(audit_repository),
+        llm_provider=MockLLMProvider("mock-tutor-v1"),
+        skill_registry=SkillRegistry.from_allowed_skills(["explain_concept"]),
+        reflection_evidence_service=None,
+        strategy_card_service=StubStrategyCardService(),
+    )
+
+    # Chat should succeed even if retrieval fails
+    response = await chat_service.create_message(
+        session_id=session.id,
+        payload=MessageRequest(content="Explain matrix multiplication simply.", mode="chat"),
+    )
+
+    assert "structured explanation" in response.assistant_message
+    
+    # Failures must be logged in audit
+    failed_events = [
+        item for item in audit_repository.events if item.event_type == "embedding.query.failed"
+    ]
+    assert len(failed_events) >= 2
+    ops = {e.event_data["operation"] for e in failed_events}
+    assert "knowledge_memory_retrieval" in ops
+    assert "behavior_memory_retrieval" in ops
+
+
+async def test_chat_message_context_quota_budget_enforced():
+    session = LearningSession.build(learner_profile_id="profile-1", title="Linear Algebra", subject="Matrices")
+    semantic_memory = StubSemanticMemoryService(session.created_at)
+    
+    # Setup 4 knowledge and 4 behavior memories
+    semantic_memory.knowledge_memories = [
+        RetrievedKnowledgeMemory(
+            memory_id=f"know-{i}",
+            knowledge_key=f"key-{i}",
+            title=f"Knowledge Title {i}",
+            summary=f"Summary {i}",
+            knowledge_level="conceptual",
+            time_horizon="short",
+            importance_score=0.9,
+            confidence_score=0.9,
+            freshness_score=0.9,
+            status="active",
+            governance_state="active",
+        )
+        for i in range(4)
+    ]
+    semantic_memory.behavior_memories = [
+        RetrievedBehaviorMemory(
+            memory_id=f"behav-{i}",
+            behavior_key=f"key-{i}",
+            behavior_category="conceptual",
+            title=f"Behavior Title {i}",
+            summary=f"Summary {i}",
+            behavior_level="conceptual",
+            time_horizon="short",
+            importance_score=0.8,
+            confidence_score=0.8,
+            freshness_score=0.8,
+            status="active",
+        )
+        for i in range(4)
+    ]
+
+    llm_provider = CaptureTutorReplyProvider()
+    chat_service = ChatService(
+        db_session=FakeSession(),
+        session_repository=StubSessionRepository(session),
+        message_repository=StubMessageRepository(),
+        quiz_repository=StubQuizRepository(),
+        memory_service=semantic_memory,
+        audit_service=AuditService(StubAuditRepository()),
+        llm_provider=llm_provider,
+        skill_registry=SkillRegistry.from_allowed_skills(["explain_concept"]),
+        reflection_evidence_service=None,
+        strategy_card_service=StubStrategyCardService(),
+    )
+
+    await chat_service.create_message(
+        session_id=session.id,
+        payload=MessageRequest(content="Explain matrices.", mode="chat"),
+    )
+
+    profile = llm_provider.last_learner_profile
+    assert profile is not None
+    
+    # Verify only up to 2 knowledge and 2 behavior memories are injected due to quotas
+    knowledge_injected = [item for item in profile.long_term_context if "Knowledge:" in item]
+    behavior_injected = [item for item in profile.long_term_context if "Behavior:" in item]
+    
+    assert len(knowledge_injected) == 2
+    assert len(behavior_injected) == 2
+
+
+async def test_chat_memory_retrieval_passes_learner_facing():
+    from dataclasses import replace
+    session = LearningSession.build(
+        learner_profile_id="profile-1",
+        subject="matrices",
+        title="Linear Algebra",
+    )
+    session = replace(session, id="session-123")
+    session_repo = StubSessionRepository(session)
+
+    semantic_memory = StubSemanticMemoryService(session.created_at)
+    llm_provider = CaptureTutorReplyProvider()
+
+    chat_service = ChatService(
+        db_session=FakeSession(),
+        session_repository=session_repo,
+        message_repository=StubMessageRepository(),
+        quiz_repository=StubQuizRepository(),
+        memory_service=semantic_memory,
+        audit_service=AuditService(StubAuditRepository()),
+        llm_provider=llm_provider,
+        skill_registry=SkillRegistry.from_allowed_skills(["explain_concept"]),
+        reflection_evidence_service=None,
+        strategy_card_service=StubStrategyCardService(),
+    )
+
+    # Track retrieved parameters
+    retrieved_knowledge_args = []
+    retrieved_behavior_args = []
+
+    async def mock_retrieve_knowledge(*args, **kwargs):
+        retrieved_knowledge_args.append(kwargs)
+        return KnowledgeMemoryRetrievalResult(memories=[], provider="stub", model="stub", latency_ms=0, candidate_count=0, eligible_candidate_count=0)
+
+    async def mock_retrieve_behavior(*args, **kwargs):
+        retrieved_behavior_args.append(kwargs)
+        return BehaviorMemoryRetrievalResult(memories=[], provider="stub", model="stub", latency_ms=0, candidate_count=0)
+
+    semantic_memory.retrieve_relevant_knowledge_memories = mock_retrieve_knowledge
+    semantic_memory.retrieve_relevant_behavior_memories = mock_retrieve_behavior
+
+    await chat_service.create_message(
+        session_id=session.id,
+        payload=MessageRequest(content="Explain matrices.", mode="chat"),
+    )
+
+    assert len(retrieved_knowledge_args) == 1
+    assert retrieved_knowledge_args[0].get("surface") == "chat"
+
+    assert len(retrieved_behavior_args) == 1
+    assert retrieved_behavior_args[0].get("surface") == "chat"

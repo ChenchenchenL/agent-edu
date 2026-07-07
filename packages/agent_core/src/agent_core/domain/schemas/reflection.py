@@ -93,6 +93,9 @@ class ReflectionRecordDetailResponse(BaseModel):
     updated_at: datetime
     processed_at: datetime | None
     actions: list[ReflectionActionResponse]
+    routing_evidence: dict | None = None
+    template_evidence: dict | None = None
+    governance_evidence: dict | None = None
 
     model_config = {"from_attributes": True}
 

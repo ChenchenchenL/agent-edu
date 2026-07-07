@@ -1,9 +1,11 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { get, post } from "@/api/client";
 import type {
+  AnswerAttemptResponse,
   GenerateQuizRequest,
   QuizDraft,
   QuizSummary,
+  SubmitAnswerAttemptRequest,
 } from "@/types/quiz";
 
 export function useSessionQuizzes(sessionId: string) {
@@ -37,6 +39,31 @@ export function useGenerateQuiz(sessionId: string) {
     onSuccess: () => {
       void queryClient.invalidateQueries({
         queryKey: ["sessions", sessionId, "quizzes"],
+      });
+    },
+  });
+}
+
+export interface SubmitAnswerAttemptParams {
+  quizId: string;
+  questionId: string;
+  payload: SubmitAnswerAttemptRequest;
+}
+
+export function useSubmitAnswerAttempt(sessionId: string) {
+  const queryClient = useQueryClient();
+  return useMutation<AnswerAttemptResponse, Error, SubmitAnswerAttemptParams>({
+    mutationFn: ({ quizId, questionId, payload }) =>
+      post<AnswerAttemptResponse>(
+        `/sessions/${sessionId}/quizzes/${quizId}/questions/${questionId}/attempts`,
+        payload,
+      ),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["sessions", sessionId, "quizzes"],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["learner", "mastery"],
       });
     },
   });

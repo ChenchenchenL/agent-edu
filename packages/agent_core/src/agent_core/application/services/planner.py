@@ -13,6 +13,7 @@ from agent_core.application.services.dynamic_runtime_registry import (
 from agent_core.application.services.goal_skill_binding_resolver import ActiveGoalSkillBinding, GoalSkillBindingResolver
 from agent_core.application.services.memory import MemoryInterpretationResult
 from agent_core.application.services.reflection_proposal_rollout_resolver import ReflectionProposalRolloutResolver
+from agent_core.application.services.skill.capability import CapabilityRequest
 from agent_core.application.services.skills import SkillUsageService
 from agent_core.application.services.strategy_cards import StrategyCardService
 from agent_core.domain.entities.goal import LearnerGoal
@@ -96,6 +97,14 @@ class PlannerService:
             strategy_summary=strategy_summary,
             memory_interpretation=memory_interpretation,
         )
+        language_instruction = {
+            "zh": "请使用中文生成所有计划内容，包括阶段标题、任务标题、任务说明等。",
+            "en": "Please generate all plan content in English, including stage titles, task titles, and task instructions.",
+        }
+        strategy_summary = {
+            **(strategy_summary or {}),
+            "language_instruction": language_instruction.get(goal.preferred_language, language_instruction["zh"]),
+        }
         stage_blueprint = self._build_stage_blueprint(goal, strategy_summary=strategy_summary)
         task_blueprint = self._build_task_blueprint(goal=goal, stage_blueprint=stage_blueprint, strategy_summary=strategy_summary)
         llm_started_at = perf_counter()
@@ -272,14 +281,19 @@ class PlannerService:
     async def _resolve_runtime_plan(self, goal: LearnerGoal) -> RuntimeSkillExecutionPlan | None:
         if self._runtime_registry is None:
             return None
-        return await self._runtime_registry.resolve_runtime_plan(
-            learner_goal_id=goal.id,
-            skill_name="plan_study_path",
+        request = CapabilityRequest(
+            capability="plan.generate",
             surface="plan_generation",
-            resource_id=goal.id,
+            learner_goal_id=goal.id,
             topic_key=goal.subject,
-            include_staged=False,
         )
+        result = await self._runtime_registry.resolve_capability_request(
+            request,
+            resource_id=goal.id,
+        )
+        if result is not None:
+            return result.plan
+        return None
 
     @staticmethod
     def _skill_directives_from_execution_plan(execution_plan: SkillExecutionPlan | None) -> list[str] | None:

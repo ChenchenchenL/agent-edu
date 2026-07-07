@@ -170,6 +170,15 @@ class TaskStatusUpdateSupportService:
                 attempt=attempt,
             )
         await self._derive_task_evidence(task, attempt=attempt)
+        if self._reflection_service is not None:
+            await self._trigger_post_task_reflection(task)
+            await self._evaluate_recent_reflection_outcomes(task)
+            goal = await self._require_goal(task.learner_goal_id)
+            await self._reflection_service.evaluate_and_trigger_proactive_reflections(
+                learner_profile_id=goal.learner_profile_id,
+                learner_goal_id=goal.id,
+                task=task,
+            )
         await self._enqueue_autonomy_followups(task)
         if self._rollout_observation_scheduler is not None:
             await self._rollout_observation_scheduler.schedule_active(
@@ -178,9 +187,6 @@ class TaskStatusUpdateSupportService:
                 trigger_source="task_status_updated",
                 source_ref=task.id,
             )
-        if self._reflection_service is not None:
-            await self._trigger_post_task_reflection(task)
-            await self._evaluate_recent_reflection_outcomes(task)
         if inline_followups and self._inline_status_followup_handler is not None:
             await self._inline_status_followup_handler(task)
 
@@ -436,7 +442,15 @@ class TaskStatusUpdateSupportService:
 
     async def _trigger_post_task_reflection(self, task: DailyTask) -> None:
         goal = await self._require_goal(task.learner_goal_id)
-        if task.status in {"failed", "skipped"}:
+        trigger_source = None
+        if task.status == "failed":
+            trigger_source = "task_failed"
+        elif task.status == "skipped":
+            trigger_source = "task_skipped"
+        elif task.status == "completed" and task.task_type == "assessment":
+            trigger_source = "assessment_completed"
+
+        if trigger_source is not None:
             await self._reflection_service.trigger_reflection(
                 ReflectionTriggerRequest(
                     learner_profile_id=goal.learner_profile_id,
@@ -444,55 +458,7 @@ class TaskStatusUpdateSupportService:
                     scope="task",
                     target_type="daily_task",
                     target_id=task.id,
-                    trigger_source="task_failed" if task.status == "failed" else "task_skipped",
-                    reflection_depth=1,
-                    daily_task_id=task.id,
-                    workflow_run_id=task.last_workflow_run_id,
-                    study_plan_id=task.study_plan_id,
-                    source_attempt_id=task.id,
-                )
-            )
-            if await self._has_consecutive_topic_failures(task):
-                await self._reflection_service.trigger_reflection(
-                    ReflectionTriggerRequest(
-                        learner_profile_id=goal.learner_profile_id,
-                        learner_goal_id=goal.id,
-                        scope="goal",
-                        target_type="learner_goal",
-                        target_id=goal.id,
-                        trigger_source="consecutive_failure_pattern",
-                        reflection_depth=1,
-                        daily_task_id=task.id,
-                        workflow_run_id=task.last_workflow_run_id,
-                        study_plan_id=task.study_plan_id,
-                        source_attempt_id=task.id,
-                    )
-                )
-            return
-        if task.status == "completed" and task.task_type == "assessment":
-            await self._reflection_service.trigger_reflection(
-                ReflectionTriggerRequest(
-                    learner_profile_id=goal.learner_profile_id,
-                    learner_goal_id=goal.id,
-                    scope="task",
-                    target_type="daily_task",
-                    target_id=task.id,
-                    trigger_source="assessment_completed",
-                    reflection_depth=1,
-                    daily_task_id=task.id,
-                    workflow_run_id=task.last_workflow_run_id,
-                    study_plan_id=task.study_plan_id,
-                    source_attempt_id=task.id,
-                )
-            )
-            await self._reflection_service.trigger_reflection(
-                ReflectionTriggerRequest(
-                    learner_profile_id=goal.learner_profile_id,
-                    learner_goal_id=goal.id,
-                    scope="goal",
-                    target_type="learner_goal",
-                    target_id=goal.id,
-                    trigger_source="assessment_completed",
+                    trigger_source=trigger_source,
                     reflection_depth=1,
                     daily_task_id=task.id,
                     workflow_run_id=task.last_workflow_run_id,

@@ -28,6 +28,7 @@ class CreateLearnerGoalRequest(BaseModel):
     baseline_note: str | None = Field(default=None, max_length=2000)
     deadline_date: date
     weekly_study_minutes: int = Field(ge=60, le=1200)
+    preferred_language: str = Field(default="zh", min_length=1, max_length=16)
 
 
 class UpdateLearnerGoalStatusRequest(BaseModel):
@@ -43,6 +44,7 @@ class LearnerGoalResponse(BaseModel):
     baseline_note: str | None
     deadline_date: date
     weekly_study_minutes: int
+    preferred_language: str = "zh"
     status: str
     created_at: datetime
     updated_at: datetime

@@ -45,6 +45,15 @@ class ActiveGoalSkillBinding:
 
 
 class GoalSkillBindingResolver:
+    """Resolve binding overlay hints for a goal/surface context.
+
+    This resolver provides *context input* to the capability-driven
+    runtime -- it returns a binding overlay (directives, tool plan,
+    rollout metadata) that enriches a ``CapabilityRequest``.  It does
+    **not** select which skill or capability to use; that decision
+    belongs to the runtime registry / router layer.
+    """
+
     def __init__(self, *, repository: GoalSkillBindingRepository) -> None:
         self._repository = repository
 
@@ -59,6 +68,12 @@ class GoalSkillBindingResolver:
         goal_active_root_causes: set[str] | None = None,
         include_staged: bool = False,
     ) -> ActiveGoalSkillBinding | None:
+        """Return the active binding overlay hint for the given context.
+
+        The returned binding is a *hint* that the runtime registry may
+        apply on top of the base artifact resolution.  It does not
+        represent a final skill selection.
+        """
         bindings = await self._repository.list_active_by_goal_and_surface(
             learner_goal_id,
             surface,

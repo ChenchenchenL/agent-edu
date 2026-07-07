@@ -17,6 +17,7 @@ SKILL_ARTIFACT_STATUSES = {
     "archived",
     "rejected",
     "suppressed",
+    "baseline",
 }
 SKILL_SELECTABLE_ARTIFACT_STATUSES = {"active", "stable"}
 SKILL_TYPES = {"baseline", "learned", "curated", "operator_defined"}
@@ -54,6 +55,12 @@ SKILL_OUTCOME_SIGNAL_KEYS = {
     "validation_error",
     "score_delta",
     "confidence",
+    "mastery_before",
+    "mastery_after",
+    "mastery_delta",
+    "answer_correctness_delta",
+    "hint_dependency_delta",
+    "misconception_reduction",
 }
 SKILL_CURATOR_RECOMMENDATION_TYPES = {
     "activate_candidate",
@@ -65,6 +72,11 @@ SKILL_CURATOR_RECOMMENDATION_TYPES = {
     "rollback_review",
     "flag_for_review",
     "restore_candidate",
+    "patch_routing_policy",
+    "patch_template_policy",
+    "patch_skill_package",
+    "select_replacement_skill_package",
+    "demote_candidate",
 }
 SKILL_CURATOR_RECOMMENDED_ACTIONS = {
     "none",
@@ -75,6 +87,7 @@ SKILL_CURATOR_RECOMMENDED_ACTIONS = {
     "restore_suppressed",
     "replace_selectable",
     "archive_deprecated",
+    "demote_active",
 }
 SKILL_CURATOR_RECOMMENDATION_STATUSES = {
     "pending",
@@ -108,6 +121,7 @@ class SkillArtifact:
     definition: dict[str, Any]
     runtime_directives: dict[str, Any]
     tool_plan: list[dict[str, Any]]
+    plan_templates: list[dict[str, Any]]
     compatibility_contract: dict[str, Any]
     source_reflection_ids: list[str]
     source_memory_ids: list[str]
@@ -142,6 +156,7 @@ class SkillArtifact:
         definition: dict[str, Any] | None = None,
         runtime_directives: dict[str, Any] | None = None,
         tool_plan: list[dict[str, Any]] | None = None,
+        plan_templates: list[dict[str, Any]] | None = None,
         compatibility_contract: dict[str, Any] | None = None,
         source_reflection_ids: list[str] | None = None,
         source_memory_ids: list[str] | None = None,
@@ -174,6 +189,25 @@ class SkillArtifact:
             scope=scope,
             implementation_binding=name,
         )
+        normalized_tool_plan = [dict(item) for item in tool_plan or []]
+        normalized_plan_templates = [dict(item) for item in plan_templates or []]
+        if not normalized_plan_templates and normalized_tool_plan:
+            normalized_plan_templates = [
+                {
+                    "template_id": f"legacy_{scope}",
+                    "surface": scope,
+                    "steps": [
+                        {
+                            "step_id": str(item.get("step_id") or f"step_{index + 1}"),
+                            "capability_id": str(item.get("tool_name") or ""),
+                            "payload_template": dict(item.get("payload_template") or {}),
+                        }
+                        for index, item in enumerate(normalized_tool_plan)
+                    ],
+                    "template_source": "artifact",
+                    "version": "1.0",
+                }
+            ]
         now = _utcnow()
         artifact_id = str(uuid4())
         return cls(
@@ -189,7 +223,8 @@ class SkillArtifact:
             description=description,
             definition=dict(definition or {}),
             runtime_directives=dict(runtime_directives or {}),
-            tool_plan=[dict(item) for item in tool_plan or []],
+            tool_plan=normalized_tool_plan,
+            plan_templates=normalized_plan_templates,
             compatibility_contract=normalized_contract,
             source_reflection_ids=list(source_reflection_ids or []),
             source_memory_ids=list(source_memory_ids or []),
@@ -371,3 +406,26 @@ class SkillArtifact:
         if not operator_id.strip():
             raise ValidationError("operator_id is required.")
         return replace(self, status="archived", updated_at=_utcnow())
+
+    def get_plan_template_candidates(self) -> list[dict[str, Any]]:
+        if self.plan_templates:
+            return [dict(item) for item in self.plan_templates]
+        if self.tool_plan:
+            return [
+                {
+                    "template_id": f"legacy_{self.scope}_{self.id}",
+                    "surface": self.scope,
+                    "steps": [
+                        {
+                            "step_id": str(item.get("step_id") or f"step_{index + 1}"),
+                            "capability_id": str(item.get("tool_name") or ""),
+                            "payload_template": dict(item.get("payload_template") or {}),
+                        }
+                        for index, item in enumerate(self.tool_plan)
+                    ],
+                    "template_source": "artifact",
+                    "source_artifact_id": self.id,
+                    "version": "1.0",
+                }
+            ]
+        return []

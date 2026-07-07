@@ -1247,6 +1247,7 @@ def test_reflection_endpoints_cover_goal_task_and_detail(app_client_factory):
         json={"status": "failed", "result_note": "Still confused"},
     )
     assert failed_response.status_code == 200
+
     _run_autonomy_worker_once()
 
     goal_reflections = client.get(f"/api/v1/goals/{goal_id}/reflections", headers=headers)
@@ -3071,7 +3072,7 @@ def test_milestone_gate_surfaces_assessment_due_phase(app_client_factory):
     assert tasks.status_code == 200
     first_stage_id = tasks.json()[0]["plan_stage_id"]
     first_stage_tasks = [item for item in tasks.json() if item["plan_stage_id"] == first_stage_id and item["task_type"] in {"lesson", "practice"}]
-    target_count = max(1, (len(first_stage_tasks) + 1) // 2)
+    target_count = len(first_stage_tasks)
     for item in first_stage_tasks[:target_count]:
         executed = client.post(f"/api/v1/tasks/{item['id']}/execute", headers=headers)
         assert executed.status_code == 200
@@ -3085,6 +3086,7 @@ def test_milestone_gate_surfaces_assessment_due_phase(app_client_factory):
 
     worker_materialized = client.post(f"/api/v1/goals/{goal_id}/autonomy/materialize-today", headers=headers)
     assert worker_materialized.status_code == 200
+    _run_autonomy_worker_once()
 
     state = client.get(f"/api/v1/goals/{goal_id}/autonomy", headers=headers)
     assert state.status_code == 200

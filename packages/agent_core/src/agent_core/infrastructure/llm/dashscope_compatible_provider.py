@@ -15,6 +15,7 @@ from agent_core.domain.errors import ProviderError, ValidationError
 from agent_core.domain.schemas.quiz import QuizQuestion
 from agent_core.domain.schemas.session import ExplanationPayload, HintPayload
 from agent_core.infrastructure.llm.types import (
+    AnswerGradingDraft,
     HintContext,
     QuizDraft,
     ReflectionSummaryDraft,
@@ -97,6 +98,17 @@ class _ReflectionSummaryPayload(BaseModel):
     summary: str
     evidence_summary: str
     recommended_next_step: str
+
+
+class _GradingLLMPayload(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    score: float
+    is_correct: bool
+    confidence: float
+    rubric_feedback: str
+    misconception_codes: list[str]
+    reasoning_quality: str
 
 
 class DashScopeCompatibleLLMProvider:
@@ -249,6 +261,9 @@ class DashScopeCompatibleLLMProvider:
             "Return only valid JSON with keys: topic, difficulty, questions. "
             "Each question must contain prompt and answer fields. "
             f"Return exactly {question_count} questions."
+            " Use LaTeX for ALL mathematical expressions: $...$ for inline math, $$...$$ for block formulas. "
+            "Use proper LaTeX commands: \\frac{}{} for fractions, \\lim_{} for limits, \\to for arrows, "
+            "^ for superscripts, _ for subscripts."
             f"{directives_hint}{feedback_hint}"
         )
         user_prompt = (
@@ -461,6 +476,72 @@ class DashScopeCompatibleLLMProvider:
             response_shape_valid=True,
         )
 
+    async def generate_answer_grading(
+        self,
+        *,
+        question_prompt: str,
+        question_type: str,
+        reference_answer: str,
+        learner_answer: str,
+        options: list[str] | None = None,
+    ) -> AnswerGradingDraft:
+        system_prompt = (
+            "You are a governed educational grading assistant. "
+            "You produce evidence only. You must NOT output mastery_delta, memory_write, "
+            "skill_proposal, or any action-directing fields. "
+            "Return only valid JSON with keys: score (0.0-1.0), is_correct (bool), "
+            "confidence (0.0-1.0), rubric_feedback (str), misconception_codes (list[str]), "
+            "reasoning_quality (str)."
+        )
+        user_prompt = json.dumps(
+            {
+                "question_prompt": question_prompt,
+                "question_type": question_type,
+                "reference_answer": reference_answer,
+                "learner_answer": learner_answer,
+                "options": options or [],
+            },
+            ensure_ascii=True,
+        )
+        raw_content, latency_ms, retry_count = await self._create_chat_completion(
+            model=self._tutor_model,
+            messages=[
+                _ChatMessage(role="system", content=system_prompt),
+                _ChatMessage(role="user", content=user_prompt),
+            ],
+            temperature=0.0,
+            max_output_tokens=self._max_output_tokens,
+            response_format={"type": "json_object"},
+        )
+        payload = await self._parse_with_repair(
+            raw_content=raw_content,
+            schema_type=_GradingLLMPayload,
+            model=self._tutor_model,
+            repair_instruction=(
+                "Return valid JSON with exactly keys: score, is_correct, confidence, "
+                "rubric_feedback, misconception_codes, reasoning_quality. "
+                "No extra keys allowed."
+            ),
+            original_messages=[
+                _ChatMessage(role="system", content=system_prompt),
+                _ChatMessage(role="user", content=user_prompt),
+            ],
+        )
+        self._validate_grading_payload(payload)
+        return AnswerGradingDraft(
+            score=payload.score,
+            is_correct=payload.is_correct,
+            confidence=payload.confidence,
+            rubric_feedback=payload.rubric_feedback,
+            misconception_codes=list(payload.misconception_codes),
+            reasoning_quality=payload.reasoning_quality,
+            provider="dashscope_compatible",
+            model=self._tutor_model,
+            latency_ms=latency_ms,
+            retry_count=retry_count,
+            response_shape_valid=True,
+        )
+
     async def _create_chat_completion(
         self,
         *,
@@ -576,13 +657,15 @@ class DashScopeCompatibleLLMProvider:
         json_start = raw_content.find("{")
         json_end = raw_content.rfind("}")
         if json_start == -1 or json_end == -1 or json_end <= json_start:
-            raise ProviderError("LLM provider did not return valid JSON content.")
+            preview = raw_content[:200].replace("\n", " ")
+            raise ProviderError(f"LLM provider did not return valid JSON content. Preview: {preview}")
 
         try:
             snippet = raw_content[json_start : json_end + 1]
             return schema_type.model_validate(json.loads(snippet))
         except (json.JSONDecodeError, PydanticValidationError) as exc:
-            raise ProviderError("LLM provider returned invalid JSON content.") from exc
+            preview = raw_content[:200].replace("\n", " ")
+            raise ProviderError(f"LLM provider returned invalid JSON content. Preview: {preview}") from exc
 
     @staticmethod
     def _validate_quiz_payload(payload: _QuizDraftPayload, *, expected_question_count: int) -> None:
@@ -603,6 +686,21 @@ class DashScopeCompatibleLLMProvider:
             seen_prompts.add(prompt_key)
 
     @staticmethod
+    def _validate_grading_payload(payload: _GradingLLMPayload) -> None:
+        if not 0.0 <= payload.score <= 1.0:
+            raise ValidationError(
+                f"Grading provider returned out-of-range score {payload.score}; expected 0.0-1.0."
+            )
+        if not 0.0 <= payload.confidence <= 1.0:
+            raise ValidationError(
+                f"Grading provider returned out-of-range confidence {payload.confidence}; expected 0.0-1.0."
+            )
+        if not isinstance(payload.misconception_codes, list) or not all(
+            isinstance(code, str) for code in payload.misconception_codes
+        ):
+            raise ValidationError("Grading provider returned non-string misconception codes.")
+
+    @staticmethod
     def _history_to_messages(history: list[SessionMessage]) -> list[_ChatMessage]:
         messages: list[_ChatMessage] = []
         for item in history:
@@ -618,6 +716,13 @@ class DashScopeCompatibleLLMProvider:
         mode: str,
         hint_context: HintContext | None = None,
     ) -> str:
+        latex_instruction = (
+            "IMPORTANT: Use LaTeX for ALL mathematical expressions. "
+            "Use $...$ for inline math (e.g., $f'(x) = 2x$) and $$...$$ for block formulas. "
+            "Use proper LaTeX commands: \\frac{}{} for fractions, \\lim_{} for limits, \\to for arrows, "
+            "^ for superscripts, _ for subscripts, \\sqrt{} for square roots, etc. "
+            "Example: $f'(2) = \\lim_{h \\to 0} \\frac{(2+h)^2 - 4}{h} = 4$."
+        )
         if mode == "hint":
             hint_level = hint_context.hint_level if hint_context is not None else "conceptual"
             return (
@@ -626,13 +731,15 @@ class DashScopeCompatibleLLMProvider:
                 f"This turn must use a {hint_level} hint. "
                 "Respond only with JSON containing hint_level, next_step_hint, key_principle, pitfall, encouragement, direct_answer_given. "
                 "Never provide the final answer, the completed derivation, or a full solved solution. "
-                "direct_answer_given must always be false."
+                "direct_answer_given must always be false. "
+                f"{latex_instruction}"
             )
         return (
             "You are a structured educational tutor. "
             f"The learner is currently studying {subject_label}. "
             "Respond only with JSON containing definition, core_principles, worked_example, common_mistake, next_step. "
-            "Explain clearly with teaching intent rather than casual chat."
+            "Explain clearly with teaching intent rather than casual chat. "
+            f"{latex_instruction}"
         )
 
     @staticmethod
@@ -660,7 +767,7 @@ class DashScopeCompatibleLLMProvider:
 
     @staticmethod
     def _build_long_term_context_message(long_term_context: list[str]) -> str:
-        context_lines = "\n".join(f"- {item}" for item in long_term_context[:4]) or "- none"
+        context_lines = "\n".join(f"- {item}" for item in long_term_context[:8]) or "- none"
         return (
             "Long-term learner context from prior sessions:\n"
             f"{context_lines}\n"

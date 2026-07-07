@@ -5,7 +5,10 @@ export HTTP_PROXY ?= $(VMWARE_NAT_PROXY)
 export HTTPS_PROXY ?= $(VMWARE_NAT_PROXY)
 export NO_PROXY ?= $(DEFAULT_NO_PROXY)
 
-.PHONY: dev-up dev-down logs logs-api logs-worker ps migrate test lint test-api docker-api-test mvp-check real-provider-regression observability-up observability-down install-local smoke-api smoke-stack frontend-dev-doc memory-check reflection-check
+.PHONY: dev-up dev-down logs logs-api logs-worker ps migrate test lint test-api \
+	mvp-smoke mvp-regression mvp-check docker-mvp-check frontend-build release-check \
+	docker-api-test real-provider-regression observability-up observability-down \
+	install-local smoke-api smoke-stack frontend-dev-doc memory-check reflection-check
 
 dev-up:
 	docker compose up --build
@@ -34,10 +37,62 @@ test:
 test-api:
 	docker compose run --rm api pytest tests/test_api_integration.py
 
-mvp-check:
+# ---------------------------------------------------------------------------
+# MVP validation baseline (layered)
+# ---------------------------------------------------------------------------
+
+# Fastest: acceptance main path only. Use during development.
+mvp-smoke:
 	docker compose build api
 	docker compose run --rm api pytest tests/test_mvp_acceptance.py -v
 
+# Core regression: acceptance + api integration + worker + task runtime.
+mvp-regression:
+	docker compose build api
+	docker compose run --rm api pytest \
+		tests/test_mvp_acceptance.py \
+		tests/test_api_integration.py \
+		tests/test_worker_runtime.py \
+		tests/test_task_runtime_skill.py \
+		-q
+
+# Default release gate: in-process regression + docker blackbox.
+mvp-check: mvp-regression docker-api-test
+
+# Docker-only blackbox: requires running stack, runs HTTP-only tests.
+#
+# Limitation: docker compose's `.env` takes precedence over `--env-file`, so
+# the blackbox inherits the dev environment's LLM provider settings. If the
+# dev `.env` points at a real provider, the blackbox will be slow and require
+# credentials. Workaround:
+#
+#   docker compose --env-file blackbox.env.example up -d postgres redis api
+#   docker compose --env-file blackbox.env.example --profile test run --rm \
+#       -e AGENT_EDU_API_BASE_URL=http://api:8000 \
+#       tester pytest tests/test_mvp_blackbox.py -q
+#
+# Until the compose stack supports a dedicated blackbox profile, this target
+# is not included in `release-check`.
+docker-mvp-check:
+	docker compose up -d --build postgres redis api
+	docker compose --profile test run --rm \
+		-e AGENT_EDU_API_BASE_URL=http://api:8000 \
+		-e AGENT_EDU_LLM_PROVIDER=mock \
+		-e AGENT_EDU_LLM_MODEL=mock-tutor-v1 \
+		-e AGENT_EDU_EMBEDDING_PROVIDER=mock \
+		-e AGENT_EDU_EMBEDDING_MODEL=mock-embedding-v1 \
+		-e AGENT_EDU_OPERATOR_API_KEY=secret-operator \
+		tester \
+		pytest tests/test_mvp_blackbox.py tests/test_docker_blackbox.py -q
+
+# Frontend build (TypeScript + Vite). Used by release-check.
+frontend-build:
+	npm --prefix packages/frontend run build
+
+# Full release gate: lint + frontend build + backend regression + docker blackbox.
+release-check: lint frontend-build mvp-check
+
+# Legacy alias kept for back-compat.
 docker-api-test:
 	docker compose up -d --build postgres redis api
 	docker compose --profile test run --rm --no-deps \

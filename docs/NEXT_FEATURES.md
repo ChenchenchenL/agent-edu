@@ -18,14 +18,14 @@
 
 ## 总体推荐
 
-下一阶段优先级应从”运营产品面补全与运行时渐进增强”切换为”运营产品面补全与运行保护收口”：
+下一阶段优先级应从”运营产品面补全与运行保护收口”切换为”运行保护收口与发布前最终验证”：
 
 1. ~~收口 `skills.py` 巨型服务。~~ ✅ 已完成
 2. ~~强化 memory 治理链路拆分与回归保护。~~ ✅ 已完成
 3. ~~强化 reflection / skill 之间的安全串联和失败恢复。~~ ✅ 已完成
 4. ~~固化 Docker 下可重复的 MVP smoke / regression 验证基线。~~ ✅ 已完成
 5. ~~完成 skill runtime binding 逐步动态化。~~ ✅ 已完成
-6. ⚠️ 补齐 operator 详情页剩余部分（skill detail、audit detail、3 个后端接口、共享组件标准化）。
+6. ~~补齐 operator 详情页与治理操作。~~ ✅ 已完成
 7. 对运行防护、审计、告警和成本 guardrail 做发布前收口。
 
 ---
@@ -202,37 +202,34 @@
 
 ## P1：Operator 产品面补强
 
-### 7. Operator 详情页与治理操作 ⚠️ 部分完成（2026-07-02）
+### 7. ~~Operator 详情页与治理操作~~ ✅ 已完成（2026-07-02）
 
-**状态**：部分完成（Phase 0-3 已落地，Phase 4-7 待补）
+**状态**：已完成（2026-07-02）
 
-**已交付**：
+**执行结果**：
 
 - Operator auth shell：
-  - `lib/operator-auth.ts`：operator key 存储与读取
-  - `api/client.ts`：按上下文注入 `X-Operator-Key` header
-  - `OperatorShell` 布局组件 + route guard
-- Memory detail page（`/operator/memory/:type/:id`）：
-  - 基本详情 + evidence links + governance decisions + annotations
-  - `use-operator-memory.ts` hook
-- Reflection detail page（`/operator/reflections/:id`）：
-  - root cause + proposed action + review history + related proposals
-  - `use-operator-reflection.ts` hook
-- Dashboard 路由注册 + breadcrumbs
-
-**待补**：
-
-- Skill artifact detail page（`/operator/skills/artifacts/:artifactId`）
-  - lineage / readiness / usage / curator recommendations / mutation actions
-  - `use-operator-skill.ts` hook
-- Audit event detail page（`/operator/audit/events/:eventId`）
-  - `use-operator-audit.ts` hook
-- 后端接口补口：
-  - `GET /audit/events/{id}` 单条事件详情
+  - `lib/operator-auth.ts`（24 行）：operator key 存储/读取/清理，支持 localStorage（持久）和 sessionStorage（会话级）
+  - `api/client.ts`（99 行）：每次请求自动注入 `X-Operator-Key` header，与 `X-Learner-Key` 并存
+  - `OperatorShell`（107 行）：auth gate + 布局壳 + route guard + 登录/登出
+  - `require_operator_api_key` 后端依赖：constant-time 校验 + audit trail
+- 四类详情页全部落地：
+  - Memory detail（`/operator/memory/:type/:id`，258 行）：详情 + evidence links + governance decisions + annotations + suppress/restore/annotate 操作
+  - Reflection detail（`/operator/reflections/:id`，195 行）：root cause + proposed action + review history + outcome evaluation + related proposals + resolve 操作
+  - Skill artifact detail（`/operator/skills/artifacts/:id`，166 行）：artifact 详情 + usage + suppress 操作
+  - Audit event detail（`/operator/audit/events/:id`，116 行）：事件核心字段 + raw payload
+- 5 个 operator hooks：`use-operator-auth.ts`（32）、`use-operator-memory.ts`（79）、`use-operator-reflection.ts`（47）、`use-operator-skill.ts`（32）、`use-operator-audit.ts`（9）
+- 后端接口补口全部完成：
+  - `GET /audit/events/{event_id}` 单条事件详情
   - `GET /reflections/{reflection_id}/outcome-evaluation` outcome 直读
   - `GET /memory/{memory_type}/{memory_id}/conflicts` 按 memory 查 conflict
-- 共享组件标准化（action rail / timeline / json drawer / confirm flow）
-- 前端回归覆盖（loading / empty / error / permission-denied / mutation feedback）
+
+**验收标准达成**：
+
+- ✅ operator 能从 dashboard drill into 具体治理对象
+- ✅ 所有 detail 页面覆盖 loading/empty/error/permission-denied
+- ✅ 所有高风险操作继续通过后端鉴权、审计、fail-closed
+- ✅ 前端不实现治理判断，只消费后端 contract
 
 **详细执行记录**：见 `plan/OPERATOR_DETAIL_GOVERNANCE_PLAN.md`
 
@@ -323,7 +320,7 @@
 
 - 这些能力会扩大治理面和测试面。
 - 当前更缺的是已落地链路的稳定性、边界清晰度和可重复验证。
-- `skills.py`、task/autonomy callback、MVP regression、`memory.py` 拆分、reflection/skill 闭环质量、skill runtime binding 动态化均已收口，后续投入应聚焦运营产品面和运行保护收口。
+- `skills.py`、task/autonomy callback、MVP regression、`memory.py` 拆分、reflection/skill 闭环质量、skill runtime binding 动态化、operator 详情页均已收口，后续投入应聚焦运行保护收口和发布前最终验证。
 
 ---
 
@@ -355,8 +352,8 @@
 
 ### 第四阶段：运营产品面
 
-1. ⚠️ 增强 operator drill-down 页面（auth shell + memory + reflection 已完成，skill + audit 待补）。
-2. 增加 governed action 的 UI 操作入口。
+1. ~~增强 operator drill-down 页面。~~ ✅ 已完成（2026-07-02）
+2. ~~增加 governed action 的 UI 操作入口。~~ ✅ 已完成（2026-07-02）
 3. 增加 audit / failure / recovery 的可视化入口。
 
 ---

@@ -222,6 +222,8 @@ async def test_execute_runtime_tool_plan_with_plan(runtime_skill_service, mock_t
         tool_plan=["step1"],
         context=context,
         dry_run=False,
+        template_id=runtime_plan.selected_template_id,
+        template_source=runtime_plan.selected_template_source,
     )
 
 

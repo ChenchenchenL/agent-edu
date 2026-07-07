@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from agent_core.application.services.skill.capability_catalog import resolve_capability_to_legacy
 from agent_core.domain.errors import ValidationError
 
 
@@ -132,3 +133,35 @@ class SkillRegistry:
         if skill_name not in self._skills_by_name:
             raise ValidationError(f"Skill '{skill_name}' is not enabled for mode '{mode}'.")
         return [skill_name]
+
+    def default_skill_for_capability(
+        self,
+        capability: str,
+        surface: str | None = None,
+    ) -> str | None:
+        """Resolve a capability to its legacy skill name via the bridge catalog."""
+        resolved = resolve_capability_to_legacy(capability, surface=surface)
+        if resolved is None:
+            return None
+        legacy_skill_name, _ = resolved
+        if not self.has_skill(legacy_skill_name):
+            return None
+        return legacy_skill_name
+
+    def supports_capability(
+        self,
+        capability: str,
+        surface: str | None = None,
+    ) -> bool:
+        return self.default_skill_for_capability(capability, surface=surface) is not None
+
+    def default_handler_for_capability(
+        self,
+        capability: str,
+        surface: str | None = None,
+    ) -> str | None:
+        """Resolve a capability to its legacy implementation binding."""
+        legacy_skill_name = self.default_skill_for_capability(capability, surface=surface)
+        if legacy_skill_name is None:
+            return None
+        return self.default_handler_for_skill(legacy_skill_name)

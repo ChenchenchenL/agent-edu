@@ -90,6 +90,21 @@ class ReflectionSummaryDraft:
 
 
 @dataclass(frozen=True)
+class AnswerGradingDraft:
+    score: float
+    is_correct: bool
+    confidence: float
+    rubric_feedback: str
+    misconception_codes: list[str]
+    reasoning_quality: str
+    provider: str
+    model: str
+    latency_ms: int
+    retry_count: int
+    response_shape_valid: bool
+
+
+@dataclass(frozen=True)
 class SessionLearnerProfile:
     current_topic: str
     response_preference: str
@@ -151,4 +166,15 @@ class LLMProvider(Protocol):
         evidence_payload: dict[str, object],
         proposed_actions: list[dict[str, object]],
     ) -> ReflectionSummaryDraft:
+        ...
+
+    async def generate_answer_grading(
+        self,
+        *,
+        question_prompt: str,
+        question_type: str,
+        reference_answer: str,
+        learner_answer: str,
+        options: list[str] | None = None,
+    ) -> AnswerGradingDraft:
         ...

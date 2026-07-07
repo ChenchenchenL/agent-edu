@@ -16,7 +16,8 @@ from agent_core.application.services.skill.constants import (
     CANDIDATE_MIN_SCORE_DELTA,
 )
 from agent_core.application.services.skill.observability import refresh_skill_observability_metrics
-from agent_core.application.services.tool_plan_contracts import validate_tool_plan_contract
+from agent_core.application.services.plan_template_validation import PlanTemplateValidator
+from agent_core.application.services.plan_template_selector import PlanTemplateSelector
 from agent_core.application.skills.registry import SkillRegistry
 from agent_core.domain.entities.reflection_closure import (
     ReflectionProposal,
@@ -77,6 +78,23 @@ class SkillCandidateService:
             proposal=proposal,
             skill_name=skill_name,
         )
+        tool_plan_data = [dict(item) for item in payload["tool_plan"]]
+        selector = PlanTemplateSelector()
+        template_candidates = selector.build_candidates_from_legacy_tool_plan(
+            surface=surface,
+            tool_plan=tool_plan_data,
+            source_artifact_id=None,
+        )
+        plan_templates_data = [
+            {
+                "template_id": tpl.template_id,
+                "surface": tpl.surface,
+                "steps": [step.to_legacy_step() for step in tpl.steps],
+                "template_source": tpl.template_source,
+                "version": tpl.version,
+            }
+            for tpl in template_candidates
+        ]
         artifact = SkillArtifact.build(
             name=skill_name,
             version=await self._next_candidate_version(skill_name),
@@ -103,7 +121,8 @@ class SkillCandidateService:
                 },
             },
             runtime_directives=dict(payload["runtime_directives"]),
-            tool_plan=[dict(item) for item in payload["tool_plan"]],
+            tool_plan=tool_plan_data,
+            plan_templates=plan_templates_data,
             compatibility_contract={
                 "surfaces": [surface],
                 "implementation_binding": implementation_binding,
@@ -161,7 +180,23 @@ class SkillCandidateService:
             tool_name = item.get("tool_name")
             if tool_name not in ALLOWED_SKILL_PACKAGE_TOOLS:
                 raise ValidationError("Unsupported skill package tool.")
-        validate_tool_plan_contract(str(surface), [dict(item) for item in tool_plan])
+        # Phase 5: PlanTemplateValidator is the sole validation gate for
+        # tool_plan contracts. The legacy validate_tool_plan_contract function
+        # (hardcoded constant table) is intentionally NOT called here; all
+        # surface policy and capability checks are delegated to the template
+        # validator which uses the policy-driven template system.
+        validator = PlanTemplateValidator()
+        selector = PlanTemplateSelector()
+        template_candidates = selector.build_candidates_from_legacy_tool_plan(
+            surface=str(surface),
+            tool_plan=[dict(item) for item in tool_plan],
+        )
+        for candidate in template_candidates:
+            result = validator.validate_template(template=candidate, surface=str(surface))
+            if not result.valid:
+                raise ValidationError(
+                    f"Skill package tool_plan fails template validation: {result.rejection_reason_codes}"
+                )
         return {
             "artifact_kind": payload["artifact_kind"],
             "skill_name": skill_name.strip(),

@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from agent_core.domain.errors import ValidationError
 
-EVIDENCE_SOURCE_TYPES = {"session_turn", "task_attempt", "workflow_run", "memory_corpus"}
+EVIDENCE_SOURCE_TYPES = {"session_turn", "task_attempt", "workflow_run", "memory_corpus", "quiz_answer_attempt"}
 EVIDENCE_SIGNAL_CODES = {
     "high_hint_dependency",
     "repeat_confusion",
@@ -20,6 +20,11 @@ EVIDENCE_SIGNAL_CODES = {
     "repeated_skip_pattern",
     "cross_session_confusion",
     "topic_failure_cluster",
+    "repeated_misconception",
+    "hint_after_wrong_answer",
+    "low_mastery_high_difficulty_mismatch",
+    "assessment_regression_from_quiz",
+    "quiz_strategy_failure",
 }
 OUTCOME_EVALUATION_STATUSES = {"pending", "effective", "ineffective", "inconclusive"}
 REVIEW_DECISION_TYPES = {"reviewed", "resolved", "override_root_cause", "override_action", "rejected"}

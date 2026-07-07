@@ -7,7 +7,14 @@ from uuid import uuid4
 
 from agent_core.domain.errors import ValidationError
 
-PROPOSAL_TYPES = {"prompt_optimization", "workflow_optimization", "skill_package", "skill_patch_request"}
+PROPOSAL_TYPES = {
+    "prompt_optimization",
+    "workflow_optimization",
+    "skill_package",
+    "skill_patch_request",
+    "routing_policy",
+    "template_policy",
+}
 PROPOSAL_TARGET_SCOPES = {"chat", "hint", "quiz", "plan_generation", "review_scheduling", "assessment_generation", "replan"}
 PROPOSAL_STATUSES = {
     "proposed",
@@ -68,6 +75,21 @@ SKILL_PATCH_REQUEST_POLICY_KEYS = {
     "related_artifact_ids",
     "evidence_snapshot",
     "metrics_snapshot",
+}
+ROUTING_POLICY_KEYS = {
+    "routing_rules",
+    "fallback_chain",
+    "trust_policy",
+    "ranking_policy",
+    "target_scope",
+    "strategy_summary",
+}
+TEMPLATE_POLICY_KEYS = {
+    "template_id",
+    "sequence_contract",
+    "template_rules",
+    "target_scope",
+    "strategy_summary",
 }
 SKILL_BINDING_STATUSES = {"staged", "rolled_out", "rolled_back"}
 
@@ -493,6 +515,10 @@ def proposal_policy_keys(proposal_type: str) -> set[str]:
         return set(SKILL_POLICY_KEYS)
     if proposal_type == "skill_patch_request":
         return set(SKILL_PATCH_REQUEST_POLICY_KEYS)
+    if proposal_type == "routing_policy":
+        return set(ROUTING_POLICY_KEYS)
+    if proposal_type == "template_policy":
+        return set(TEMPLATE_POLICY_KEYS)
     raise ValidationError("Unsupported reflection proposal type.")
 
 

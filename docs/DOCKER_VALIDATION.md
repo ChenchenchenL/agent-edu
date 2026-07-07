@@ -1,5 +1,11 @@
 # Docker Validation And Observability
 
+> **Single source of truth for the release gate:**
+> see [`docs/MVP_VALIDATION_BASELINE.md`](MVP_VALIDATION_BASELINE.md) for the
+> full command ladder (`mvp-smoke` → `release-check`), test layers, current
+> baseline numbers, and failure triage order. This document covers the
+> Docker-specific validation path and observability loop.
+
 ## Purpose
 
 This document describes the default Docker validation path for `agent-edu` and the minimum observability loop used to inspect runtime behavior.

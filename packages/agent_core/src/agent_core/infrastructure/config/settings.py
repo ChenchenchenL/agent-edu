@@ -441,6 +441,15 @@ class Settings(BaseSettings):
     llm_circuit_breaker_cooldown_seconds: float = Field(
         alias="AGENT_EDU_LLM_CIRCUIT_BREAKER_COOLDOWN_SECONDS", default=60.0, gt=0, le=3600,
     )
+    embedding_circuit_breaker_enabled: bool = Field(
+        alias="AGENT_EDU_EMBEDDING_CIRCUIT_BREAKER_ENABLED", default=False,
+    )
+    embedding_circuit_breaker_failure_threshold: int = Field(
+        alias="AGENT_EDU_EMBEDDING_CIRCUIT_BREAKER_FAILURE_THRESHOLD", default=5, ge=1, le=100,
+    )
+    embedding_circuit_breaker_cooldown_seconds: float = Field(
+        alias="AGENT_EDU_EMBEDDING_CIRCUIT_BREAKER_COOLDOWN_SECONDS", default=60.0, gt=0, le=3600,
+    )
     alert_log_path: str | None = Field(alias="AGENT_EDU_ALERT_LOG_PATH", default=None)
     alert_webhook_url: str | None = Field(alias="AGENT_EDU_ALERT_WEBHOOK_URL", default=None)
 

@@ -171,6 +171,7 @@ class LearnerGoalRepository:
             baseline_note=entity.baseline_note,
             deadline_date=entity.deadline_date,
             weekly_study_minutes=entity.weekly_study_minutes,
+            preferred_language=entity.preferred_language,
             status=entity.status,
             created_at=entity.created_at,
             updated_at=entity.updated_at,
@@ -217,6 +218,7 @@ class LearnerGoalRepository:
             baseline_note=model.baseline_note,
             deadline_date=model.deadline_date,
             weekly_study_minutes=model.weekly_study_minutes,
+            preferred_language=model.preferred_language,
             status=model.status,
             created_at=model.created_at,
             updated_at=model.updated_at,
@@ -522,6 +524,26 @@ class LearnerTopicMasteryRepository:
             )
         )
         model = result.scalar_one_or_none()
+        if model is None:
+            return None
+        return self._to_entity(model)
+
+    async def get_by_profile_and_topic(
+        self, learner_profile_id: str, topic_key: str
+    ) -> LearnerTopicMastery | None:
+        result = await self._session.execute(
+            select(LearnerTopicMasteryModel)
+            .join(
+                LearnerGoalModel,
+                LearnerTopicMasteryModel.learner_goal_id == LearnerGoalModel.id,
+            )
+            .where(
+                LearnerGoalModel.learner_profile_id == learner_profile_id,
+                LearnerTopicMasteryModel.topic_key == topic_key,
+            )
+            .limit(1)
+        )
+        model = result.scalars().first()
         if model is None:
             return None
         return self._to_entity(model)

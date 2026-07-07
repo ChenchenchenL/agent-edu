@@ -290,6 +290,10 @@ class TaskAutonomySchedulingService:
                     source_attempt_id=f"{goal.id}:{date.today().isoformat()}",
                 )
             )
+            await self._reflection_service.evaluate_and_trigger_proactive_reflections(
+                learner_profile_id=goal.learner_profile_id,
+                learner_goal_id=goal.id,
+            )
         await self._sync_goal_state(goal.id, phase="active", reason="periodic_goal_reflection")
         await self._db_session.commit()
         refreshed = await self._require_goal_autonomy_state(goal_id)

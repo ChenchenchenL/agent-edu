@@ -52,6 +52,10 @@ from agent_core.domain.schemas.skill import (
     SuppressSkillArtifactRequest,
     SkillUsageEventResponse,
     RuntimeBindingExplainResponse,
+    RouterExplainResponse,
+    ArtifactTimelineResponse,
+    RolloutDrillDownResponse,
+    FallbackTraceResponse,
 )
 
 router = APIRouter(tags=["skills"])
@@ -481,6 +485,64 @@ async def explain_runtime_binding(
 
 
 @router.get(
+    "/skill-router/explain",
+    response_model=RouterExplainResponse,
+    dependencies=[Depends(require_operator_api_key)],
+)
+async def explain_router_decision(
+    capability: str = Query(..., max_length=128),
+    surface: str = Query(..., max_length=64),
+    learner_goal_id: str | None = Query(default=None, max_length=36),
+    topic_key: str | None = Query(default=None, max_length=128),
+    task_type: str | None = Query(default=None, max_length=64),
+    trigger_source: str | None = Query(default=None, max_length=64),
+    include_staged: bool = Query(default=False),
+    service: RuntimeExplainService = Depends(get_runtime_explain_service),
+) -> RouterExplainResponse:
+    from agent_core.domain.entities.skill.capability import CapabilityRequest
+    request = CapabilityRequest(
+        capability=capability,
+        surface=surface,
+        learner_goal_id=learner_goal_id,
+        topic_key=topic_key,
+    )
+    result = await service.explain_router_decision(request=request)
+    return RouterExplainResponse(**result)
+
+
+@router.get(
+    "/skill-router/explain-capability",
+    response_model=RouterExplainResponse,
+    dependencies=[Depends(require_operator_api_key)],
+)
+async def explain_capability_full(
+    capability: str = Query(..., max_length=128),
+    surface: str = Query(..., max_length=64),
+    learner_goal_id: str | None = Query(default=None, max_length=36),
+    topic_key: str | None = Query(default=None, max_length=128),
+    task_type: str | None = Query(default=None, max_length=64),
+    trigger_source: str | None = Query(default=None, max_length=64),
+    risk_budget: str | None = Query(default=None, max_length=32),
+    tenant_policy_id: str | None = Query(default=None, max_length=64),
+    include_staged: bool = Query(default=False),
+    service: RuntimeExplainService = Depends(get_runtime_explain_service),
+) -> RouterExplainResponse:
+    from agent_core.domain.entities.skill.capability import CapabilityRequest
+    request = CapabilityRequest(
+        capability=capability,
+        surface=surface,
+        learner_goal_id=learner_goal_id,
+        topic_key=topic_key,
+        task_type=task_type,
+        trigger_source=trigger_source,
+        risk_budget=risk_budget,
+        tenant_policy_id=tenant_policy_id,
+    )
+    result = await service.explain_capability(request=request)
+    return RouterExplainResponse(**result)
+
+
+@router.get(
     "/skill-artifacts/{artifact_id}/usage",
     response_model=list[SkillUsageEventResponse],
     dependencies=[Depends(require_operator_api_key)],
@@ -553,3 +615,95 @@ async def resolve_skill(
         )
     await session.commit()
     return SkillResolutionResponse.model_validate(resolution)
+
+
+@router.get(
+    "/skill-artifacts/{artifact_id}/timeline",
+    response_model=ArtifactTimelineResponse,
+    dependencies=[Depends(require_operator_api_key)],
+)
+async def get_artifact_timeline(
+    artifact_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> ArtifactTimelineResponse:
+    from agent_core.application.services.skill.artifact_timeline import SkillArtifactTimelineService
+    from agent_core.infrastructure.db.repositories.audit import AuditRepository
+    svc = SkillArtifactTimelineService(
+        artifact_repository=SkillArtifactRepository(session),
+        audit_repository=AuditRepository(session),
+        usage_repository=SkillUsageEventRepository(session),
+        recommendation_repository=SkillCuratorRecommendationRepository(session),
+    )
+    timeline = await svc.build_timeline(artifact_id)
+    return ArtifactTimelineResponse(
+        artifact_id=timeline.artifact_id,
+        artifact_summary=timeline.artifact_summary,
+        lifecycle_events=timeline.lifecycle_events,
+        usage_summary=timeline.usage_summary,
+        quality_history=timeline.quality_history,
+        related_proposal_ids=timeline.related_proposal_ids,
+        suppression_history=timeline.suppression_history,
+        recommendation_history=timeline.recommendation_history,
+    )
+
+
+@router.get(
+    "/skill-rollouts/{rollout_id}/drilldown",
+    response_model=RolloutDrillDownResponse,
+    dependencies=[Depends(require_operator_api_key)],
+)
+async def get_rollout_drilldown(
+    rollout_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> RolloutDrillDownResponse:
+    from agent_core.application.services.skill.rollout_drilldown import RolloutDrillDownService
+    from agent_core.infrastructure.db.repositories.reflection import (
+        ReflectionProposalRepository,
+        ReflectionProposalRolloutDecisionRepository,
+        ReflectionProposalRolloutObservationRepository,
+        ReflectionProposalRolloutRepository,
+    )
+    svc = RolloutDrillDownService(
+        rollout_repository=ReflectionProposalRolloutRepository(session),
+        observation_repository=ReflectionProposalRolloutObservationRepository(session),
+        decision_repository=ReflectionProposalRolloutDecisionRepository(session),
+        proposal_repository=ReflectionProposalRepository(session),
+        usage_repository=SkillUsageEventRepository(session),
+    )
+    summary = await svc.build_summary(rollout_id)
+    return RolloutDrillDownResponse(
+        rollout_id=summary.rollout_id,
+        proposal_summary=summary.proposal_summary,
+        observation_timeline=summary.observation_timeline,
+        decision_timeline=summary.decision_timeline,
+        usage_attribution=summary.usage_attribution,
+        signal_trend=summary.signal_trend,
+        current_status=summary.current_status,
+        duration_days=summary.duration_days,
+    )
+
+
+@router.get(
+    "/skill-runtime-binding/fallback-trace",
+    response_model=FallbackTraceResponse,
+    dependencies=[Depends(require_operator_api_key)],
+)
+async def get_fallback_trace(
+    skill_name: str = Query(..., max_length=128),
+    surface: str = Query(..., max_length=64),
+    learner_goal_id: str | None = Query(default=None, max_length=36),
+    session: AsyncSession = Depends(get_db_session),
+    service: RuntimeExplainService = Depends(get_runtime_explain_service),
+) -> FallbackTraceResponse:
+    from agent_core.infrastructure.db.repositories.skill import SkillUsageEventRepository
+    from agent_core.application.services.skill.runtime_explain import RuntimeExplainService as RES
+    explain_svc = RES(
+        dynamic_runtime_registry=service._dynamic_runtime_registry,
+        usage_repository=SkillUsageEventRepository(session),
+    )
+    result = await explain_svc.trace_fallback(
+        skill_name=skill_name,
+        surface=surface,
+        learner_goal_id=learner_goal_id,
+    )
+    return FallbackTraceResponse(**result)

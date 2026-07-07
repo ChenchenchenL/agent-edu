@@ -1,3 +1,11 @@
+"""Legacy tool_plan contract validation.
+
+This module is a **transitional bridge**. Phase 5 introduces a policy-driven
+template system (tool_capabilities, surface_policies, plan_templates) that
+replaces the hardcoded constants below. The legacy functions remain for
+backward compatibility with existing callers but new code should use the
+template validator directly.
+"""
 from __future__ import annotations
 
 import re

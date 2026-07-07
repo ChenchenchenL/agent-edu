@@ -42,7 +42,11 @@ from agent_core.domain.schemas.reflection_closure import (
     PromoteReflectionProposalRolloutRequest,
     ReviewReflectionProposalRequest,
 )
-from agent_core.domain.schemas.reflection import ReflectionListResponse, ReflectionRecordDetailResponse
+from agent_core.domain.schemas.reflection import (
+    ReflectionListResponse,
+    ReflectionRecordDetailResponse,
+    ReflectionActionResponse,
+)
 from agent_core.domain.schemas.reflection_v2 import (
     OverrideReflectionActionRequest,
     OverrideReflectionRootCauseRequest,
@@ -50,6 +54,7 @@ from agent_core.domain.schemas.reflection_v2 import (
     ReflectionReviewQueueResponse,
     ReviewReflectionRequest,
     ResolveReflectionRequest,
+    ActivateReflectionActionRequest,
 )
 from agent_core.infrastructure.db.repositories import GoalSkillBindingRepository
 
@@ -225,6 +230,26 @@ async def override_reflection_action(
     )
     await session.commit()
     return ReflectionReviewDecisionResponse.model_validate(result)
+
+
+@router.post("/reflections/{reflection_id}/actions/{action_id}/activate", response_model=ReflectionActionResponse)
+async def activate_reflection_action(
+    reflection_id: str,
+    action_id: str,
+    payload: ActivateReflectionActionRequest,
+    operator_id: str = Depends(require_operator_api_key),
+    session: AsyncSession = Depends(get_db_session),
+) -> ReflectionActionResponse:
+    service = get_reflection_governance_service(session)
+    result = await service.activate_action(
+        reflection_id=reflection_id,
+        action_id=action_id,
+        operator_id=operator_id,
+        reason_code=payload.reason_code,
+        reason_note=payload.reason_note,
+    )
+    await session.commit()
+    return ReflectionActionResponse.model_validate(result)
 
 
 @router.get("/reflections/{reflection_id}/proposals", response_model=list[ReflectionProposalResponse])

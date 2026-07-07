@@ -1,5 +1,6 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
+from dataclasses import replace
 
 from agent_core.application.services.audit import AuditService
 from agent_core.application.services.long_term_memory_materialization import LongTermMemoryMaterializationService
@@ -18,6 +19,8 @@ from agent_core.domain.entities.memory import (
     MemoryEvidenceLink,
     MemoryGovernanceDecision,
     MemoryPromotionEligibilityRecord,
+    KnowledgeMemory,
+    BehaviorMemory,
 )
 from agent_core.domain.entities.planning import DailyTask
 from agent_core.domain.entities.reflection import ReflectionRecord
@@ -1388,7 +1391,9 @@ async def test_structured_extraction_validates_model_output_and_only_writes_cand
     assert behavior_repository.created_statuses == ["candidate"]
     assert knowledge_repository.memories[0].semantic_category == "misconception"
     assert knowledge_repository.memories[0].provenance_type == "system_inference"
+    assert knowledge_repository.memories[0].freshness_score == 0.50
     assert behavior_repository.memories[0].behavior_category == "support_request"
+    assert behavior_repository.memories[0].freshness_score == 0.40
     assert all(item.status == "candidate" for item in knowledge_repository.memories + behavior_repository.memories)
     assert any(
         event.event_type == "long_term_memory.extraction.validation_failed"
@@ -1631,6 +1636,326 @@ async def test_materialize_task_outcome_skips_non_terminal_status():
     assert result.skipped_reason == "non_terminal_task_status"
     assert result.knowledge == []
     assert result.behavior == []
+
+
+async def test_materialize_task_outcome_success_path_with_signals():
+    knowledge_repository = StubKnowledgeMemoryRepository()
+    behavior_repository = StubBehaviorMemoryRepository()
+    evidence_repository = StubMemoryEvidenceLinkRepository()
+    memory_service = MemoryService(
+        StubMemoryRepository(),
+        knowledge_memory_repository=knowledge_repository,
+        behavior_memory_repository=behavior_repository,
+        evidence_link_repository=evidence_repository,
+    )
+    materialization_service = LongTermMemoryMaterializationService(memory_service)
+    
+    task = DailyTask.build(
+        learner_goal_id="goal-1",
+        study_plan_id="plan-1",
+        plan_stage_id=None,
+        task_origin="planner",
+        task_type="practice",
+        execution_mode="chat",
+        title="Matrix practice",
+        instructions="Instructions",
+        topic_focus="Matrix Multiplication",
+        difficulty="medium",
+        question_count=None,
+        estimated_minutes=20,
+        scheduled_for=date(2026, 5, 29),
+        due_on=date(2026, 5, 29),
+    )
+
+    # 1. Test "hint" signal
+    completed_task_hint = task.with_status("completed", result_note="Used hints to solve the question.")
+    attempt_hint = TaskAttempt.build(
+        learner_goal_id="goal-1",
+        daily_task_id=task.id,
+        workflow_run_id="workflow-1",
+        execution_session_id="session-1",
+        task_type="practice",
+        topic_focus=task.topic_focus,
+        outcome_status="completed",
+        score=0.9,
+        result_note=completed_task_hint.result_note,
+    )
+
+    res_hint = await materialization_service.materialize_from_task_outcome(
+        learner_profile_id="profile-1",
+        task=completed_task_hint,
+        attempt=attempt_hint,
+        persist_embeddings=False,
+    )
+    assert len(res_hint.behavior) == 1
+    behavior_hint = res_hint.behavior[0].memory
+    assert behavior_hint.behavior_category == "guided_progress"
+    assert "success_pattern" in behavior_hint.tags
+    assert "positive" in behavior_hint.tags
+    assert behavior_hint.importance_score == 0.40
+    assert behavior_hint.confidence_score == 0.40
+    assert behavior_hint.freshness_score == 0.40
+    assert "successfully utilized hints" in behavior_hint.summary
+
+    # 2. Test "step-by-step" signal
+    completed_task_step = task.with_status("completed", result_note="Applied a step-by-step reasoning strategy.")
+    attempt_step = TaskAttempt.build(
+        learner_goal_id="goal-1",
+        daily_task_id=task.id,
+        workflow_run_id="workflow-2",
+        execution_session_id="session-2",
+        task_type="practice",
+        topic_focus=task.topic_focus,
+        outcome_status="completed",
+        score=0.95,
+        result_note=completed_task_step.result_note,
+    )
+
+    res_step = await materialization_service.materialize_from_task_outcome(
+        learner_profile_id="profile-1",
+        task=completed_task_step,
+        attempt=attempt_step,
+        persist_embeddings=False,
+    )
+    assert len(res_step.behavior) == 1
+    behavior_step = res_step.behavior[0].memory
+    assert behavior_step.behavior_category == "response_preference"
+    assert behavior_step.freshness_score == 0.40
+    assert "successfully applied a step-by-step reasoning" in behavior_step.summary
+
+    # 3. Test "review" signal
+    completed_task_review = task.with_status("completed", result_note="Reviewed prior quiz before assessment.")
+    attempt_review = TaskAttempt.build(
+        learner_goal_id="goal-1",
+        daily_task_id=task.id,
+        workflow_run_id="workflow-3",
+        execution_session_id="session-3",
+        task_type="practice",
+        topic_focus=task.topic_focus,
+        outcome_status="completed",
+        score=1.0,
+        result_note=completed_task_review.result_note,
+    )
+
+    res_review = await materialization_service.materialize_from_task_outcome(
+        learner_profile_id="profile-1",
+        task=completed_task_review,
+        attempt=attempt_review,
+        persist_embeddings=False,
+    )
+    assert len(res_review.behavior) == 1
+    behavior_review = res_review.behavior[0].memory
+    assert behavior_review.behavior_category == "guided_progress"
+    assert behavior_review.freshness_score == 0.40
+    assert "successfully reviewed prior material" in behavior_review.summary
+
+
+async def test_materialize_task_outcome_success_path_no_signal_is_skipped():
+    knowledge_repository = StubKnowledgeMemoryRepository()
+    behavior_repository = StubBehaviorMemoryRepository()
+    evidence_repository = StubMemoryEvidenceLinkRepository()
+    memory_service = MemoryService(
+        StubMemoryRepository(),
+        knowledge_memory_repository=knowledge_repository,
+        behavior_memory_repository=behavior_repository,
+        evidence_link_repository=evidence_repository,
+    )
+    materialization_service = LongTermMemoryMaterializationService(memory_service)
+
+    task = DailyTask.build(
+        learner_goal_id="goal-1",
+        study_plan_id="plan-1",
+        plan_stage_id=None,
+        task_origin="planner",
+        task_type="practice",
+        execution_mode="chat",
+        title="Matrix practice",
+        instructions="Instructions",
+        topic_focus="Matrix Multiplication",
+        difficulty="medium",
+        question_count=None,
+        estimated_minutes=20,
+        scheduled_for=date(2026, 5, 29),
+        due_on=date(2026, 5, 29),
+    )
+
+    completed_task = task.with_status("completed", result_note="Just completed the exercises normal path.")
+    attempt = TaskAttempt.build(
+        learner_goal_id="goal-1",
+        daily_task_id=task.id,
+        workflow_run_id="workflow-1",
+        execution_session_id="session-1",
+        task_type="practice",
+        topic_focus=task.topic_focus,
+        outcome_status="completed",
+        score=0.85,
+        result_note=completed_task.result_note,
+    )
+
+    res = await materialization_service.materialize_from_task_outcome(
+        learner_profile_id="profile-1",
+        task=completed_task,
+        attempt=attempt,
+        persist_embeddings=False,
+    )
+    # Verify no behavior candidate is produced
+    assert len(res.behavior) == 0
+
+
+async def test_materialize_task_outcome_negative_matching_exclusions():
+    knowledge_repository = StubKnowledgeMemoryRepository()
+    behavior_repository = StubBehaviorMemoryRepository()
+    evidence_repository = StubMemoryEvidenceLinkRepository()
+    memory_service = MemoryService(
+        StubMemoryRepository(),
+        knowledge_memory_repository=knowledge_repository,
+        behavior_memory_repository=behavior_repository,
+        evidence_link_repository=evidence_repository,
+    )
+    materialization_service = LongTermMemoryMaterializationService(memory_service)
+
+    task = DailyTask.build(
+        learner_goal_id="goal-1",
+        study_plan_id="plan-1",
+        plan_stage_id=None,
+        task_origin="planner",
+        task_type="practice",
+        execution_mode="chat",
+        title="Matrix practice",
+        instructions="Instructions",
+        topic_focus="Matrix Multiplication",
+        difficulty="medium",
+        question_count=None,
+        estimated_minutes=20,
+        scheduled_for=date(2026, 5, 29),
+        due_on=date(2026, 5, 29),
+    )
+
+    # 1. Test "without hints"
+    completed_task_no_hint = task.with_status("completed", result_note="Solved without hints.")
+    attempt_no_hint = TaskAttempt.build(
+        learner_goal_id="goal-1",
+        daily_task_id=task.id,
+        workflow_run_id="workflow-1",
+        execution_session_id="session-1",
+        task_type="practice",
+        topic_focus=task.topic_focus,
+        outcome_status="completed",
+        score=0.9,
+        result_note=completed_task_no_hint.result_note,
+    )
+    res_no_hint = await materialization_service.materialize_from_task_outcome(
+        learner_profile_id="profile-1",
+        task=completed_task_no_hint,
+        attempt=attempt_no_hint,
+        persist_embeddings=False,
+    )
+    assert len(res_no_hint.behavior) == 0
+
+    # 2. Test "no need to review"
+    completed_task_no_review = task.with_status("completed", result_note="There was no need to review prior quiz.")
+    attempt_no_review = TaskAttempt.build(
+        learner_goal_id="goal-1",
+        daily_task_id=task.id,
+        workflow_run_id="workflow-2",
+        execution_session_id="session-2",
+        task_type="practice",
+        topic_focus=task.topic_focus,
+        outcome_status="completed",
+        score=1.0,
+        result_note=completed_task_no_review.result_note,
+    )
+    res_no_review = await materialization_service.materialize_from_task_outcome(
+        learner_profile_id="profile-1",
+        task=completed_task_no_review,
+        attempt=attempt_no_review,
+        persist_embeddings=False,
+    )
+    assert len(res_no_review.behavior) == 0
+
+
+async def test_materialize_task_outcome_positive_behavior_evidence_roles():
+    knowledge_repository = StubKnowledgeMemoryRepository()
+    behavior_repository = StubBehaviorMemoryRepository()
+    evidence_repository = StubMemoryEvidenceLinkRepository()
+    memory_service = MemoryService(
+        StubMemoryRepository(),
+        knowledge_memory_repository=knowledge_repository,
+        behavior_memory_repository=behavior_repository,
+        evidence_link_repository=evidence_repository,
+    )
+    materialization_service = LongTermMemoryMaterializationService(memory_service)
+
+    task = DailyTask.build(
+        learner_goal_id="goal-1",
+        study_plan_id="plan-1",
+        plan_stage_id=None,
+        task_origin="planner",
+        task_type="practice",
+        execution_mode="chat",
+        title="Matrix practice",
+        instructions="Instructions",
+        topic_focus="Matrix Multiplication",
+        difficulty="medium",
+        question_count=None,
+        estimated_minutes=20,
+        scheduled_for=date(2026, 5, 29),
+        due_on=date(2026, 5, 29),
+    )
+
+    # 1. First attempt with "hint" signal succeeds -> creates positive behavior memory
+    completed_task = task.with_status("completed", result_note="Used hints to solve the question.")
+    attempt_completed = TaskAttempt.build(
+        learner_goal_id="goal-1",
+        daily_task_id=task.id,
+        workflow_run_id="workflow-1",
+        execution_session_id="session-1",
+        task_type="practice",
+        topic_focus=task.topic_focus,
+        outcome_status="completed",
+        score=0.9,
+        result_note=completed_task.result_note,
+    )
+
+    res = await materialization_service.materialize_from_task_outcome(
+        learner_profile_id="profile-1",
+        task=completed_task,
+        attempt=attempt_completed,
+        persist_embeddings=False,
+    )
+    behavior = res.behavior[0].memory
+    
+    # Check evidence link for completed attempt: role must be "supporting"
+    completed_links = await evidence_repository.list_by_memory(memory_type="behavior", memory_id=behavior.id)
+    assert len(completed_links) == 1
+    assert completed_links[0].evidence_role == "supporting"
+
+    # 2. Second attempt fails -> contradicts the positive behavior memory
+    failed_task = task.with_status("failed", result_note="Attempt failed without hints.")
+    attempt_failed = TaskAttempt.build(
+        learner_goal_id="goal-1",
+        daily_task_id=task.id,
+        workflow_run_id="workflow-2",
+        execution_session_id="session-2",
+        task_type="practice",
+        topic_focus=task.topic_focus,
+        outcome_status="failed",
+        score=0.2,
+        result_note=failed_task.result_note,
+    )
+
+    # Directly record evidence link via upsert_task_attempt_evidence
+    await memory_service.upsert_task_attempt_evidence(
+        memory=behavior,
+        memory_type="behavior",
+        attempt=attempt_failed,
+    )
+
+    links = await evidence_repository.list_by_memory(memory_type="behavior", memory_id=behavior.id)
+    # The second link must have the role "contradicting"
+    assert len(links) == 2
+    failed_link = [link for link in links if link.evidence_source_id == attempt_failed.id][0]
+    assert failed_link.evidence_role == "contradicting"
 
 
 async def test_materialize_reflection_outcome_creates_candidate_and_reflection_evidence():
@@ -3043,7 +3368,7 @@ async def test_run_knowledge_promotion_eligibility_batch_writes_current_record()
                 signal_type="assessment:completed" if idx == 0 else "session.note",
                 weight=0.2,
                 payload={"task_type": "assessment"} if idx == 0 else {},
-                observed_at=observed.replace(hour=observed.hour - min(idx, 1)) if idx < 2 else observed.replace(day=max(observed.day - 1, 1)),
+                observed_at=observed - timedelta(hours=min(idx, 1)) if idx < 2 else observed - timedelta(days=1),
             )
         )
     result = await service.run_knowledge_promotion_eligibility_batch(
@@ -3346,3 +3671,487 @@ async def test_run_knowledge_governance_batch_keeps_candidate_without_current_el
     assert knowledge_repository.memories[0].status == "candidate"
     assert await knowledge_embedding_repository.get_by_memory_id(candidate.id) is None
     assert not any(d.decision_type in {"promote", "suppress"} for d in governance_repository.records)
+
+
+async def test_retrieval_service_operator_vs_learner_facing():
+    knowledge_repository = StubKnowledgeMemoryRepository()
+    knowledge_embedding_repository = StubKnowledgeMemoryEmbeddingRepository()
+    behavior_repository = StubBehaviorMemoryRepository()
+    behavior_embedding_repository = StubBehaviorMemoryEmbeddingRepository()
+    service = MemoryService(
+        StubMemoryRepository(),
+        embedding_provider=StubEmbeddingProvider(),
+        knowledge_memory_repository=knowledge_repository,
+        knowledge_memory_embedding_repository=knowledge_embedding_repository,
+        behavior_memory_repository=behavior_repository,
+        behavior_memory_embedding_repository=behavior_embedding_repository,
+    )
+
+    # 1. Knowledge contested memory setup
+    knowledge = _with_id(
+        service._build_knowledge_memory(
+            learner_profile_id="profile-1",
+            learner_goal_id="goal-1",
+            learner_message="matrices",
+            assistant_message="Matrices summary.",
+            source_message_id=None,
+            mode="chat",
+            subject="matrices",
+            session_title="matrices",
+        ),
+        "k-contested-001",
+    )
+    # Set validation status to contested
+    knowledge = replace(knowledge, validation_status="contested")
+    knowledge_repository.memories = [knowledge]
+    
+    # Store embedding record
+    emb_k = KnowledgeMemoryEmbeddingRecord(
+        id="emb-k-1",
+        memory_id=knowledge.id,
+        learner_profile_id=knowledge.learner_profile_id,
+        learner_goal_id=knowledge.learner_goal_id,
+        knowledge_key=knowledge.knowledge_key,
+        title=knowledge.title,
+        summary=knowledge.summary,
+        knowledge_level=knowledge.knowledge_level,
+        time_horizon=knowledge.time_horizon,
+        importance_score=knowledge.importance_score,
+        confidence_score=knowledge.confidence_score,
+        freshness_score=1.0,
+        stability_score=0.8,
+        goal_relevance_score=0.8,
+        vector=[1.0, 0.0],
+        status="active",
+    )
+    knowledge_embedding_repository.records = [emb_k]
+
+    # 2. Behavior contested memory setup
+    behavior = _with_id(
+        service._build_behavior_memory(
+            learner_profile_id="profile-1",
+            learner_goal_id="goal-1",
+            learner_message="preference",
+            assistant_message="Behavior summary.",
+            source_message_id=None,
+            mode="chat",
+            subject="preference",
+            session_title="preference",
+        ),
+        "b-contested-001",
+    )
+    # Set validation status to contested
+    behavior = replace(behavior, validation_status="contested")
+    behavior_repository.memories = [behavior]
+
+    # Store behavior embedding
+    emb_b = BehaviorMemoryEmbeddingRecord(
+        id="emb-b-1",
+        memory_id=behavior.id,
+        learner_profile_id=behavior.learner_profile_id,
+        learner_goal_id=behavior.learner_goal_id,
+        behavior_key=behavior.behavior_key,
+        behavior_category=behavior.behavior_category,
+        title=behavior.title,
+        summary=behavior.summary,
+        behavior_level=behavior.behavior_level,
+        time_horizon=behavior.time_horizon,
+        importance_score=behavior.importance_score,
+        confidence_score=behavior.confidence_score,
+        freshness_score=1.0,
+        stability_score=0.8,
+        goal_relevance_score=0.8,
+        vector=[1.0, 0.0],
+        status="active",
+    )
+    behavior_embedding_repository.records = [emb_b]
+
+    # First query as Operator (learner_facing=False) -> contested memories retrieved with high score
+    op_k_res = await service.retrieve_relevant_knowledge_memories(
+        learner_profile_id="profile-1",
+        query_text="matrices",
+        learner_facing=False,
+    )
+    assert len(op_k_res.memories) == 1
+    assert op_k_res.memories[0].score >= 0.6
+
+    op_b_res = await service.retrieve_relevant_behavior_memories(
+        learner_profile_id="profile-1",
+        query_text="preference",
+        learner_facing=False,
+    )
+    assert len(op_b_res.memories) == 1
+    assert op_b_res.memories[0].score >= 0.6
+
+    # Second query as Learner (learner_facing=True) -> contested memories penalized below min_score (0.15)
+    learner_k_res = await service.retrieve_relevant_knowledge_memories(
+        learner_profile_id="profile-1",
+        query_text="matrices",
+        learner_facing=True,
+    )
+    assert len(learner_k_res.memories) == 0
+
+    learner_b_res = await service.retrieve_relevant_behavior_memories(
+        learner_profile_id="profile-1",
+        query_text="preference",
+        learner_facing=True,
+    )
+    assert len(learner_b_res.memories) == 0
+
+
+async def test_retrieval_service_candidate_eligible_cap():
+    knowledge_repository = StubKnowledgeMemoryRepository()
+    knowledge_embedding_repository = StubKnowledgeMemoryEmbeddingRepository()
+    eligibility_repository = StubMemoryPromotionEligibilityRepository()
+    service = MemoryService(
+        StubMemoryRepository(),
+        embedding_provider=StubEmbeddingProvider(),
+        knowledge_memory_repository=knowledge_repository,
+        knowledge_memory_embedding_repository=knowledge_embedding_repository,
+        promotion_eligibility_repository=eligibility_repository,
+    )
+
+    # Setup candidate knowledge memory
+    knowledge = _with_id(
+        service._build_knowledge_memory(
+            learner_profile_id="profile-1",
+            learner_goal_id="goal-1",
+            learner_message="matrices",
+            assistant_message="Matrices summary.",
+            source_message_id=None,
+            mode="chat",
+            subject="matrices",
+            session_title="matrices",
+        ),
+        "k-candidate-001",
+    )
+    knowledge = replace(knowledge, status="candidate", importance_score=1.0, confidence_score=1.0, stability_score=1.0, goal_relevance_score=1.0)
+    knowledge_repository.memories = [knowledge]
+
+    # Store embedding
+    emb_k = KnowledgeMemoryEmbeddingRecord(
+        id="emb-k-1",
+        memory_id=knowledge.id,
+        learner_profile_id=knowledge.learner_profile_id,
+        learner_goal_id=knowledge.learner_goal_id,
+        knowledge_key=knowledge.knowledge_key,
+        title=knowledge.title,
+        summary=knowledge.summary,
+        knowledge_level=knowledge.knowledge_level,
+        time_horizon=knowledge.time_horizon,
+        importance_score=1.0,
+        confidence_score=1.0,
+        freshness_score=1.0,
+        stability_score=1.0,
+        goal_relevance_score=1.0,
+        vector=[1.0, 0.0],
+        status="candidate",
+    )
+    knowledge_embedding_repository.records = [emb_k]
+
+    # Register as eligible candidate
+    eligibility_repository.records[knowledge.id] = MemoryPromotionEligibilityRecord.build(
+        memory_id=knowledge.id,
+        learner_profile_id=knowledge.learner_profile_id,
+        learner_goal_id=knowledge.learner_goal_id,
+        status="eligible",
+        score=0.95,
+        independent_source_count=3,
+        high_signal_source_count=1,
+        evidence_span_hours=24.0,
+        conflict_blocked=False,
+        blocked_conflict_set_id=None,
+        blocked_memory_id=None,
+        reason_codes=["eligible"],
+        metrics_snapshot={},
+        evaluated_at=datetime.now(timezone.utc),
+    )
+
+    # Query as Operator (learner_facing=False) -> score is NOT capped at 0.5 (but receives retrieval weight multiplication)
+    op_res = await service.retrieve_relevant_knowledge_memories(
+        learner_profile_id="profile-1",
+        query_text="matrices",
+        learner_facing=False,
+    )
+    assert len(op_res.memories) == 1
+    assert op_res.memories[0].score > 0.5
+
+    # Query as Learner (learner_facing=True) -> score is capped at 0.5
+    learner_res = await service.retrieve_relevant_knowledge_memories(
+        learner_profile_id="profile-1",
+        query_text="matrices",
+        learner_facing=True,
+    )
+    assert len(learner_res.memories) == 1
+    assert learner_res.memories[0].score <= 0.5
+
+
+async def test_retrieve_relevant_memories_surface_weight_profiles():
+    memory_repository = StubMemoryRepository()
+    knowledge_repository = StubKnowledgeMemoryRepository()
+    embedding_repository = StubKnowledgeMemoryEmbeddingRepository()
+    service = MemoryService(
+        memory_repository,
+        embedding_provider=StubEmbeddingProvider(),
+        knowledge_memory_repository=knowledge_repository,
+        knowledge_memory_embedding_repository=embedding_repository,
+    )
+
+    k_memory = service._build_knowledge_memory(  # noqa: SLF001
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+        learner_message="I am confused about matrix multiplication.",
+        assistant_message="Matrix multiplication combines rows and columns.",
+        source_message_id="message-1",
+        mode="chat",
+        subject="Matrices",
+        session_title="Linear Algebra",
+        source_event_ids=["event-1"],
+        provenance_type="session_event",
+        provenance_source_id="event-1",
+    )
+    k_memory = k_memory.with_status("active")
+    knowledge_repository.memories = [k_memory]
+    embedding_repository.records = [
+        KnowledgeMemoryEmbeddingRecord(
+            id="emb-1",
+            memory_id=k_memory.id,
+            learner_profile_id=k_memory.learner_profile_id,
+            learner_goal_id=k_memory.learner_goal_id,
+            knowledge_key=k_memory.knowledge_key,
+            title=k_memory.title,
+            summary=k_memory.summary,
+            knowledge_level=k_memory.knowledge_level,
+            time_horizon=k_memory.time_horizon,
+            importance_score=0.9,
+            confidence_score=0.9,
+            freshness_score=0.9,
+            stability_score=0.9,
+            goal_relevance_score=0.9,
+            scope_type=k_memory.scope_type,
+            provider="stub",
+            model="stub-embedding-v1",
+            dimensions=2,
+            vector=[1.0, 0.0],
+            status="active",
+            created_at=k_memory.created_at,
+        )
+    ]
+
+    # Query with default profile
+    res_default = await service.retrieve_relevant_knowledge_memories(
+        learner_profile_id="profile-1",
+        query_text="matrices",
+        surface="default",
+    )
+    score_default = res_default.memories[0].score
+
+    # Query with planning profile
+    res_planning = await service.retrieve_relevant_knowledge_memories(
+        learner_profile_id="profile-1",
+        query_text="matrices",
+        surface="planning",
+    )
+    score_planning = res_planning.memories[0].score
+
+    # Scores should differ due to weights (planning similarity weight is 0.20, default is 0.40)
+    assert score_default != score_planning
+
+
+async def test_retrieve_relevant_memories_dimension_mismatch_degradation():
+    from agent_core.infrastructure.observability.metrics import EMBEDDING_DIMENSION_MISMATCH_TOTAL
+    from prometheus_client import REGISTRY
+
+    memory_repository = StubMemoryRepository()
+    knowledge_repository = StubKnowledgeMemoryRepository()
+    embedding_repository = StubKnowledgeMemoryEmbeddingRepository()
+    
+    # We will use an embedding provider that returns 3-dimensional embeddings, but record has 2-dimensional vector.
+    class DimmismatchEmbeddingProvider(StubEmbeddingProvider):
+        async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            return [[1.0, 0.0, 0.0] for _ in texts]
+
+    service = MemoryService(
+        memory_repository,
+        embedding_provider=DimmismatchEmbeddingProvider(),
+        knowledge_memory_repository=knowledge_repository,
+        knowledge_memory_embedding_repository=embedding_repository,
+    )
+
+    k_memory = service._build_knowledge_memory(  # noqa: SLF001
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+        learner_message="I am confused about matrix multiplication.",
+        assistant_message="Matrix multiplication.",
+        source_message_id="message-1",
+        mode="chat",
+        subject="Matrices",
+        session_title="Linear Algebra",
+        source_event_ids=["event-1"],
+        provenance_type="session_event",
+        provenance_source_id="event-1",
+    )
+    k_memory = k_memory.with_status("active")
+    knowledge_repository.memories = [k_memory]
+    
+    # Record has 2-dim vector
+    embedding_repository.records = [
+        KnowledgeMemoryEmbeddingRecord(
+            id="emb-1",
+            memory_id=k_memory.id,
+            learner_profile_id=k_memory.learner_profile_id,
+            learner_goal_id=k_memory.learner_goal_id,
+            knowledge_key=k_memory.knowledge_key,
+            title=k_memory.title,
+            summary=k_memory.summary,
+            knowledge_level=k_memory.knowledge_level,
+            time_horizon=k_memory.time_horizon,
+            importance_score=0.8,
+            confidence_score=0.8,
+            freshness_score=0.8,
+            stability_score=0.8,
+            goal_relevance_score=0.8,
+            scope_type=k_memory.scope_type,
+            provider="stub",
+            model="stub-embedding-v1",
+            dimensions=2,
+            vector=[1.0, 0.0],
+            status="active",
+            created_at=k_memory.created_at,
+        )
+    ]
+
+    before_value = REGISTRY.get_sample_value("agent_edu_embedding_dimension_mismatch_total", {"memory_type": "knowledge", "surface": "chat"}) or 0.0
+
+    res = await service.retrieve_relevant_knowledge_memories(
+        learner_profile_id="profile-1",
+        query_text="matrices",
+        surface="chat",
+    )
+
+    # Should not throw error, should fallback gracefully and return the candidate
+    assert len(res.memories) == 1
+    
+    # Score should be fallback score: 0.5 * (freshness * freshness_decay) + 0.5 * importance
+    # importance = 0.8, freshness = 0.8 * decay (decay is 1.0 since it was just created) -> 0.5 * 0.8 + 0.5 * 0.8 = 0.8
+    assert abs(res.memories[0].score - 0.8) < 1e-5
+
+    after_value = REGISTRY.get_sample_value("agent_edu_embedding_dimension_mismatch_total", {"memory_type": "knowledge", "surface": "chat"}) or 0.0
+    assert after_value == before_value + 1
+
+
+async def test_retrieve_relevant_memories_surface_hint_profile():
+    memory_repository = StubMemoryRepository()
+    knowledge_repository = StubKnowledgeMemoryRepository()
+    embedding_repository = StubKnowledgeMemoryEmbeddingRepository()
+    service = MemoryService(
+        memory_repository,
+        embedding_provider=StubEmbeddingProvider(),
+        knowledge_memory_repository=knowledge_repository,
+        knowledge_memory_embedding_repository=embedding_repository,
+    )
+
+    k_memory = service._build_knowledge_memory(  # noqa: SLF001
+        learner_profile_id="profile-1",
+        learner_goal_id="goal-1",
+        learner_message="I need a hint about matrices.",
+        assistant_message="Here is a hint.",
+        source_message_id="message-1",
+        mode="chat",
+        subject="Matrices",
+        session_title="Linear Algebra",
+        source_event_ids=["event-1"],
+        provenance_type="session_event",
+        provenance_source_id="event-1",
+    )
+    k_memory = k_memory.with_status("active")
+    knowledge_repository.memories = [k_memory]
+    embedding_repository.records = [
+        KnowledgeMemoryEmbeddingRecord(
+            id="emb-1",
+            memory_id=k_memory.id,
+            learner_profile_id=k_memory.learner_profile_id,
+            learner_goal_id=k_memory.learner_goal_id,
+            knowledge_key=k_memory.knowledge_key,
+            title=k_memory.title,
+            summary=k_memory.summary,
+            knowledge_level=k_memory.knowledge_level,
+            time_horizon=k_memory.time_horizon,
+            importance_score=0.9,
+            confidence_score=0.9,
+            freshness_score=0.9,
+            stability_score=0.9,
+            goal_relevance_score=0.9,
+            scope_type=k_memory.scope_type,
+            provider="stub",
+            model="stub-embedding-v1",
+            dimensions=2,
+            vector=[1.0, 0.0],
+            status="active",
+            created_at=k_memory.created_at,
+        )
+    ]
+
+    # Query with hint profile
+    res_hint = await service.retrieve_relevant_knowledge_memories(
+        learner_profile_id="profile-1",
+        query_text="matrices",
+        surface="hint",
+    )
+    score_hint = res_hint.memories[0].score
+
+    # Query with chat profile
+    res_chat = await service.retrieve_relevant_knowledge_memories(
+        learner_profile_id="profile-1",
+        query_text="matrices",
+        surface="chat",
+    )
+    score_chat = res_chat.memories[0].score
+
+    # Scores should differ due to weights (hint similarity weight is 0.60, chat similarity weight is 0.50)
+    assert score_hint != score_chat
+
+
+async def test_memory_service_learner_facing_does_not_override_explicit_surface():
+    from agent_core.domain.entities.memory.knowledge import KnowledgeMemoryRetrievalResult
+    memory_repository = StubMemoryRepository()
+    knowledge_repository = StubKnowledgeMemoryRepository()
+    embedding_repository = StubKnowledgeMemoryEmbeddingRepository()
+    
+    # We subclass RetrievalService or inspect the passed surface to retrieval service.
+    # Alternatively, we can use a mock/spy or observe score differences.
+    # Let's mock _retrieval_service.retrieve_relevant_knowledge_memories
+    service = MemoryService(
+        memory_repository,
+        embedding_provider=StubEmbeddingProvider(),
+        knowledge_memory_repository=knowledge_repository,
+        knowledge_memory_embedding_repository=embedding_repository,
+    )
+    
+    captured_surface = None
+    async def mock_retrieve(*args, **kwargs):
+        nonlocal captured_surface
+        captured_surface = kwargs.get("surface")
+        return KnowledgeMemoryRetrievalResult(memories=[], provider="stub", model="stub", candidate_count=0, latency_ms=0)
+    
+    service._retrieval_service.retrieve_relevant_knowledge_memories = mock_retrieve
+
+    # If surface is "hint" and learner_facing is True, surface should remain "hint"
+    await service.retrieve_relevant_knowledge_memories(
+        learner_profile_id="profile-1",
+        query_text="matrices",
+        surface="hint",
+        learner_facing=True,
+    )
+    assert captured_surface == "hint"
+
+    # If surface is "default" and learner_facing is True, surface should be mapped to "chat"
+    await service.retrieve_relevant_knowledge_memories(
+        learner_profile_id="profile-1",
+        query_text="matrices",
+        surface="default",
+        learner_facing=True,
+    )
+    assert captured_surface == "chat"
+
+

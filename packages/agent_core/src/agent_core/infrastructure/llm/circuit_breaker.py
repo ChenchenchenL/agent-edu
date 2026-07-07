@@ -18,12 +18,18 @@ class CircuitBreaker:
         *,
         failure_threshold: int,
         cooldown_seconds: float,
+        name: str = "provider",
     ) -> None:
         self._failure_threshold = failure_threshold
         self._cooldown_seconds = cooldown_seconds
         self._failure_count: int = 0
         self._opened_at: float = 0.0
         self._state: str = "closed"
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
 
     @property
     def state(self) -> str:
@@ -38,8 +44,9 @@ class CircuitBreaker:
         if current == "half_open":
             return
         raise ServiceError(
-            "LLM provider circuit breaker is open. "
-            "Too many consecutive failures. Please retry later."
+            f"{self._name} circuit breaker is open. "
+            "Too many consecutive failures. Please retry later.",
+            error_code="circuit_open",
         )
 
     def record_success(self) -> None:
@@ -48,6 +55,13 @@ class CircuitBreaker:
         self._opened_at = 0.0
 
     def record_failure(self) -> None:
+        if self._state == "half_open":
+            # A half-open probe failed: re-open with a fresh failure count so
+            # the full cooldown must elapse before the next probe.
+            self._failure_count = 1
+            self._state = "open"
+            self._opened_at = time.monotonic()
+            return
         self._failure_count += 1
         if self._failure_count >= self._failure_threshold:
             self._state = "open"
@@ -61,6 +75,7 @@ class CircuitBreaker:
     @property
     def status(self) -> dict[str, object]:
         return {
+            "name": self._name,
             "state": self.state,
             "failure_count": self._failure_count,
             "failure_threshold": self._failure_threshold,

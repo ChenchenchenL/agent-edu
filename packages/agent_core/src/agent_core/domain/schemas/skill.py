@@ -44,6 +44,10 @@ SkillCuratorRecommendationType = Literal[
     "rollback_review",
     "flag_for_review",
     "restore_candidate",
+    "patch_routing_policy",
+    "patch_template_policy",
+    "patch_skill_package",
+    "select_replacement_skill_package",
 ]
 SkillCuratorRecommendedAction = Literal[
     "none",
@@ -84,6 +88,7 @@ class SkillArtifactResponse(BaseModel):
     definition: dict[str, Any]
     runtime_directives: dict[str, Any]
     tool_plan: list[dict[str, Any]]
+    plan_templates: list[dict[str, Any]] = Field(default_factory=list)
     compatibility_contract: dict[str, Any]
     source_reflection_ids: list[str]
     source_memory_ids: list[str]
@@ -195,6 +200,9 @@ class SkillResolutionResponse(BaseModel):
     resolver_status: str
     selection_reason: str
     implementation_binding: str
+    requested_capability: str | None = None
+    selected_capability: str | None = None
+    resolution_mode: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -315,5 +323,154 @@ class RuntimeBindingExplainResponse(BaseModel):
     tool_plan_summary: dict[str, Any] | None
     blocked_reason_codes: list[str]
     fallback_reason_codes: list[str]
+    requested_capability: str | None = None
+    selected_capability: str | None = None
+    resolution_mode: str | None = None
+    confidence: float | None = None
+    fallback_chain: list[str] | None = None
+    candidate_count: int | None = None
+    routing_mode: str | None = None
 
     model_config = {"from_attributes": True}
+
+
+class ImportSkillPackageRequest(BaseModel):
+    name: str
+    provider: str
+    version: str
+    manifest: dict[str, Any]
+    signature_hash: str
+    signature_algorithm: str = "sha256"
+    provenance_url: str | None = None
+    sandbox_eval_bundle: dict[str, Any] | None = None
+
+
+class RejectSkillPackageRequest(BaseModel):
+    reason_code: str
+
+
+class SkillPackageResponse(BaseModel):
+    id: str
+    name: str
+    provider: str
+    version: str
+    provenance_url: str | None
+    signature_hash: str
+    signature_algorithm: str
+    manifest: dict[str, Any]
+    status: str
+    sandbox_eval_bundle: dict[str, Any]
+    kill_switch: bool
+    imported_by: str
+    imported_at: datetime
+    verified_at: datetime | None
+    rejected_at: datetime | None
+    rejected_reason_code: str | None
+    archived_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class InstallSkillPackageRequest(BaseModel):
+    learner_profile_id: str
+
+
+class SuppressInstallationRequest(BaseModel):
+    reason_code: str
+
+
+class TenantSkillPackageInstallationResponse(BaseModel):
+    id: str
+    learner_profile_id: str
+    package_id: str
+    status: str
+    installed_by: str
+    installed_at: datetime
+    suppressed_at: datetime | None
+    suppressed_reason_code: str | None
+    suppressed_by: str | None
+    uninstalled_at: datetime | None
+    uninstalled_by: str | None
+    rolled_back_at: datetime | None
+    rolled_back_by: str | None
+    rollback_source_installation_id: str | None
+    created_artifact_ids: list[str]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class RouterCandidateExplain(BaseModel):
+    candidate_id: str
+    source_type: str
+    skill_name: str
+    artifact_id: str | None
+    artifact_status: str
+    total_score: float
+    sub_scores: dict[str, float]
+    trust_level: int
+    failure_rate: float
+    rollback_pressure: float
+    artifact_quality: float
+    eligible: bool
+    ineligible_reason_codes: list[str]
+    reason_codes: list[str]
+
+
+class RouterExplainResponse(BaseModel):
+    request: dict[str, Any]
+    bridge: dict[str, Any]
+    selection: dict[str, Any] | None
+    router_decision: dict[str, Any] | None
+
+
+class ArtifactTimelineEvent(BaseModel):
+    event_type: str
+    resource_type: str
+    actor: str
+    event_data: dict[str, Any]
+    created_at: datetime
+
+
+class ArtifactTimelineResponse(BaseModel):
+    artifact_id: str
+    artifact_summary: dict[str, Any]
+    lifecycle_events: list[ArtifactTimelineEvent]
+    usage_summary: dict[str, Any]
+    quality_history: list[dict[str, Any]]
+    related_proposal_ids: list[str]
+    suppression_history: list[dict[str, Any]]
+    recommendation_history: list[dict[str, Any]]
+
+
+class RolloutDrillDownResponse(BaseModel):
+    rollout_id: str
+    proposal_summary: dict[str, Any]
+    observation_timeline: list[dict[str, Any]]
+    decision_timeline: list[dict[str, Any]]
+    usage_attribution: dict[str, Any]
+    signal_trend: dict[str, Any]
+    current_status: str
+    duration_days: float
+
+
+class FallbackTraceEntry(BaseModel):
+    usage_event_id: str
+    fallback_chain: list[str]
+    confidence: float | None
+    resolver_status: str
+    selection_reason: str
+    created_at: datetime
+
+
+class FallbackTraceResponse(BaseModel):
+    skill_name: str
+    surface: str
+    total_events: int
+    fallback_history: list[FallbackTraceEntry]
+    fallback_rate: float
+    baseline_reliance_rate: float
+    common_failure_reasons: list[dict[str, Any]]

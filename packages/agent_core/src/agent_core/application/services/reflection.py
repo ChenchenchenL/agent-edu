@@ -21,6 +21,14 @@ from agent_core.application.services.reflection_outcomes import ReflectionOutcom
 from agent_core.application.services.reflection_proposals import ReflectionProposalService
 from agent_core.application.services.reflection_replay import ReflectionReplayService
 from agent_core.application.services.strategy_cards import StrategyCardService
+from agent_core.application.services.reflection_trigger_policy import (
+    ReflectionTriggerPolicy,
+    ReflectionTriggerContext,
+    ReflectionTriggerDecision,
+    ExistingReflectionSummary,
+)
+from agent_core.application.services.reflection_evidence_contracts import build_runtime_evidence_contract
+from agent_core.infrastructure.db.repositories.skill import SkillUsageEventRepository
 from agent_core.domain.entities.autonomy import GoalAutonomyState, LearnerTopicMastery, TaskAttempt
 from agent_core.domain.entities.memory import MemoryEvent
 from agent_core.domain.entities.planning import DailyTask, StudyPlan, WorkflowRun
@@ -45,9 +53,12 @@ from agent_core.infrastructure.db.repositories import (
     StudyPlanRepository,
     TaskAttemptRepository,
     WorkflowRunRepository,
+    ReflectionProposalRolloutRepository,
+    ReflectionProposalRolloutObservationRepository,
 )
 from agent_core.infrastructure.llm.types import LLMProvider
 from agent_core.infrastructure.observability.metrics import (
+    observe_corpus_trigger_reflection,
     observe_long_term_memory_materialization,
     observe_reflection_session_signal_coverage,
     observe_reflection_verdict,
@@ -67,6 +78,7 @@ class ReflectionTriggerRequest:
     workflow_run_id: str | None = None
     study_plan_id: str | None = None
     source_attempt_id: str | None = None
+    topic_focus: str | None = None
 
 
 class ReflectionService:
@@ -97,6 +109,9 @@ class ReflectionService:
         llm_provider: LLMProvider,
         db_session: AsyncSession | None = None,
         reflection_max_depth: int = 2,
+        usage_repository: SkillUsageEventRepository | None = None,
+        rollout_repository: ReflectionProposalRolloutRepository | None = None,
+        rollout_observation_repository: ReflectionProposalRolloutObservationRepository | None = None,
     ) -> None:
         self._reflection_record_repository = reflection_record_repository
         self._reflection_action_repository = reflection_action_repository
@@ -125,6 +140,9 @@ class ReflectionService:
         self._llm_provider = llm_provider
         self._db_session = db_session
         self._reflection_max_depth = reflection_max_depth
+        self._usage_repository = usage_repository
+        self._rollout_repository = rollout_repository
+        self._rollout_observation_repository = rollout_observation_repository
 
     async def trigger_reflection(self, request: ReflectionTriggerRequest) -> ReflectionRecord | None:
         if request.reflection_depth > self._reflection_max_depth:
@@ -142,12 +160,141 @@ class ReflectionService:
                 },
             )
             return None
-        existing = await self._reflection_record_repository.get_by_dedupe_key(
-            self._build_dedupe_key(request)
+
+        # 1. Fetch Goal phase
+        goal_phase = "active"
+        if self._goal_autonomy_state_repository is not None:
+            state = await self._goal_autonomy_state_repository.get_by_goal(request.learner_goal_id)
+            if state is not None:
+                goal_phase = state.phase
+
+        # 2. Fetch existing reflections for cooldown/dedupe
+        existing_records = await self._reflection_record_repository.list_by_goal(
+            request.learner_goal_id,
+            limit=50,
         )
-        if existing is not None:
-            return existing
-        return await self._create_and_process(request)
+        existing_summaries = []
+        for rec in existing_records:
+            tf = getattr(rec, "topic_focus", None)
+            if not tf and rec.evidence_payload:
+                tf = rec.evidence_payload.get("topic_focus") or (rec.evidence_payload.get("task") or {}).get("topic_focus")
+            existing_summaries.append(
+                ExistingReflectionSummary(
+                    id=rec.id,
+                    scope=rec.scope,
+                    status=rec.status,
+                    cooldown_until=rec.cooldown_until,
+                    topic_focus=tf,
+                    trigger_source=rec.trigger_source,
+                    created_at=rec.created_at,
+                )
+            )
+
+        # 3. Task info & consecutive failures
+        has_consecutive_failures = False
+        task_status = None
+        task_type = None
+        topic_focus = request.topic_focus
+        if request.daily_task_id:
+            task = await self._daily_task_repository.get_by_id(request.daily_task_id)
+            if task is not None:
+                task_status = task.status
+                task_type = task.task_type
+                if not topic_focus:
+                    topic_focus = task.topic_focus
+                if self._task_attempt_repository is not None:
+                    attempts = await self._task_attempt_repository.list_recent_by_goal(request.learner_goal_id, limit=5)
+                    topic_attempts = [item for item in attempts if item.topic_focus == task.topic_focus][:3]
+                    has_consecutive_failures = len([item for item in topic_attempts if item.outcome_status in {"failed", "skipped"}]) >= 2
+
+        # 4. Handle outcome triggers mapping
+        is_handled_outcome = False
+        if task_status in {"failed", "skipped"} or (task_status == "completed" and task_type == "assessment"):
+            is_handled_outcome = True
+
+        explicit_source = None
+        if not is_handled_outcome:
+            explicit_source = request.trigger_source
+
+        context = ReflectionTriggerContext(
+            learner_profile_id=request.learner_profile_id,
+            learner_goal_id=request.learner_goal_id,
+            goal_phase=goal_phase,
+            existing_reflections=existing_summaries,
+            scope=request.scope,
+            task_id=request.daily_task_id,
+            task_status=task_status,
+            task_type=task_type,
+            topic_focus=topic_focus,
+            workflow_run_id=request.workflow_run_id,
+            study_plan_id=request.study_plan_id,
+            has_consecutive_failures=has_consecutive_failures,
+            explicit_trigger_source=explicit_source,
+        )
+
+        now = datetime.now(timezone.utc)
+        decisions = ReflectionTriggerPolicy.evaluate(context, now)
+
+        # 5. Process decisions
+        allowed_decisions = [d for d in decisions if d.should_trigger]
+        denied_decisions = [d for d in decisions if not d.should_trigger]
+
+        # Audit denied decisions
+        for d in denied_decisions:
+            if d.trigger_source == request.trigger_source or (d.scope == request.scope and d.topic_focus == request.topic_focus):
+                await self._audit_service.record(
+                    event_type="reflection.trigger.denied",
+                    resource_type="learner_goal" if d.scope == "goal" else "daily_task",
+                    resource_id=request.learner_goal_id if d.scope == "goal" else (request.daily_task_id or ""),
+                    actor="system",
+                    event_data={
+                        "scope": d.scope,
+                        "trigger_source": d.trigger_source,
+                        "denial_reason": d.denial_reason,
+                        "reason_codes": d.reason_codes,
+                        "topic_focus": d.topic_focus,
+                    }
+                )
+
+        target_decisions = []
+        for d in allowed_decisions:
+            if d.trigger_source == request.trigger_source:
+                target_decisions.append(d)
+            elif request.trigger_source in {"task_failed", "task_skipped"} and d.trigger_source == "consecutive_failure_pattern":
+                target_decisions.append(d)
+
+        if not target_decisions:
+            return None
+
+        created_records = []
+        for d in target_decisions:
+            req = ReflectionTriggerRequest(
+                learner_profile_id=request.learner_profile_id,
+                learner_goal_id=request.learner_goal_id,
+                scope=d.scope,
+                target_type="learner_goal" if d.scope == "goal" else request.target_type,
+                target_id=request.learner_goal_id if d.scope == "goal" else request.target_id,
+                trigger_source=d.trigger_source,
+                reflection_depth=request.reflection_depth,
+                daily_task_id=request.daily_task_id,
+                workflow_run_id=request.workflow_run_id,
+                study_plan_id=request.study_plan_id,
+                source_attempt_id=request.source_attempt_id,
+                topic_focus=d.topic_focus,
+            )
+
+            # Check deduplication
+            existing = await self._reflection_record_repository.get_by_dedupe_key(
+                self._build_dedupe_key(req)
+            )
+            if existing is not None:
+                created_records.append(existing)
+                continue
+
+            record = await self._create_and_process(req)
+            created_records.append(record)
+
+        return created_records[0] if created_records else None
 
     async def list_goal_reflections(
         self,
@@ -455,6 +602,12 @@ class ReflectionService:
             evidence_payload=evidence_payload,
         )
         record = await self._reflection_record_repository.create(record)
+        # Emit corpus-trigger counter when applicable (operator observability, Phase 6)
+        if record.trigger_source and "corpus" in record.trigger_source:
+            observe_corpus_trigger_reflection(
+                scope=record.scope,
+                trigger_source=record.trigger_source,
+            )
         await self._audit_service.record(
             event_type="reflection.record.created",
             resource_type="reflection_record",
@@ -671,8 +824,9 @@ class ReflectionService:
         workflow = await self._workflow_run_repository.get_by_id(request.workflow_run_id) if request.workflow_run_id else None
         plan = await self._study_plan_repository.get_by_id(request.study_plan_id) if request.study_plan_id else None
         attempts = await self._recent_attempts(request.learner_goal_id)
-        topic_attempts = await self._topic_attempts(request.learner_goal_id, task.topic_focus if task is not None else None)
-        mastery = await self._mastery(request.learner_goal_id, task.topic_focus if task is not None else None)
+        topic = request.topic_focus or (task.topic_focus if task is not None else None)
+        topic_attempts = await self._topic_attempts(request.learner_goal_id, topic)
+        mastery = await self._mastery(request.learner_goal_id, topic)
         goal_state = await self._goal_state(request.learner_goal_id)
         memory_corpus = await self._memory_corpus(request.learner_profile_id, request.learner_goal_id)
         session_signals = await self._session_signals(task)
@@ -695,6 +849,39 @@ class ReflectionService:
         payload["memory_corpus"] = memory_corpus
         payload["session_signals"] = session_signals
         payload["derived_signals"] = [self._signal_payload(item) for item in derived_signals]
+        payload["topic_focus"] = topic
+
+        # Fetch runtime and rollout/governance evidence
+        usage_event = None
+        if self._usage_repository is not None:
+            if request.daily_task_id:
+                events = await self._usage_repository.list_events(daily_task_id=request.daily_task_id, limit=1)
+                if events:
+                    usage_event = events[0]
+            if usage_event is None and request.workflow_run_id:
+                events = await self._usage_repository.list_events(workflow_run_id=request.workflow_run_id, limit=1)
+                if events:
+                    usage_event = events[0]
+
+        rollout = None
+        observation = None
+        if self._rollout_repository is not None and usage_event is not None:
+            surface = usage_event.surface
+            if surface:
+                rollout = await self._rollout_repository.get_active_by_goal_and_surface(
+                    learner_goal_id=request.learner_goal_id,
+                    surface=surface,
+                )
+                if rollout is not None and self._rollout_observation_repository is not None:
+                    observations = await self._rollout_observation_repository.list_by_rollout(rollout.id)
+                    if observations:
+                        observation = observations[0]
+
+        payload["runtime_evidence"] = build_runtime_evidence_contract(
+            event=usage_event,
+            rollout=rollout,
+            observation=observation,
+        )
         return payload
 
     def _classify(
@@ -746,7 +933,62 @@ class ReflectionService:
             "sequencing_issue": 0.0,
             "engagement_constraint": 0.0,
             "assessment_regression": 0.0,
+            "router_issue": 0.0,
+            "template_issue": 0.0,
+            "memory_governance_issue": 0.0,
+            "sandbox_admission_issue": 0.0,
         }
+        if request.trigger_source in ("fallback_to_baseline_burst", "low_confidence_burst"):
+            scores["router_issue"] += 0.85
+        elif request.trigger_source == "repeated_sequence_mismatch":
+            scores["template_issue"] += 0.85
+        elif request.trigger_source == "corpus_contested_high_priority":
+            scores["memory_governance_issue"] += 0.85
+        elif request.trigger_source == "repeated_misconception":
+            scores["knowledge_gap"] += 0.85
+        elif request.trigger_source == "low_mastery_high_difficulty_mismatch":
+            scores["difficulty_mismatch"] += 0.85
+        elif request.trigger_source == "hint_dependency_failure":
+            scores["engagement_constraint"] += 0.85
+        elif request.trigger_source == "consecutive_wrong_answers":
+            scores["knowledge_gap"] += 0.85
+        elif request.trigger_source == "high_failure_rate_artifact":
+            scores["router_issue"] += 0.85
+        elif request.trigger_source == "assessment_regression_from_quiz":
+            scores["assessment_regression"] += 0.85
+        elif request.trigger_source == "short_guess_answer":
+            scores["engagement_constraint"] += 0.7
+        if evidence_payload.get("sandbox_failed"):
+            scores["sandbox_admission_issue"] += 0.95
+
+        # Check runtime evidence if present to adjust scores
+        runtime_ev = evidence_payload.get("runtime_evidence") or {}
+        cap_sel = runtime_ev.get("capability_selection") or {}
+        if cap_sel:
+            res_mode = cap_sel.get("resolution_mode")
+            if res_mode in ("blocked", "incompatible"):
+                scores["router_issue"] += 0.6
+            fb_chain = cap_sel.get("fallback_chain") or []
+            if "static_fallback" in fb_chain or "baseline" in fb_chain:
+                scores["router_issue"] += 0.5
+            conf = cap_sel.get("confidence")
+            if conf is not None and conf < 0.5:
+                scores["router_issue"] += 0.4
+
+        tpl_sum = runtime_ev.get("template_summary") or {}
+        if tpl_sum:
+            steps_count = tpl_sum.get("steps_count")
+            if steps_count is not None and steps_count > 5:
+                scores["template_issue"] += 0.3
+            if tpl_sum.get("sequence_contract_version") is None and tpl_sum.get("template_id"):
+                scores["template_issue"] += 0.4
+
+        rollout_gov = runtime_ev.get("rollout_governance") or {}
+        if rollout_gov:
+            rec = rollout_gov.get("recent_observation_recommendation")
+            if rec == "rollback":
+                scores["memory_governance_issue"] += 0.5
+
         if task_status == "skipped":
             scores["engagement_constraint"] += 0.72
         if task_type == "assessment" and mastery_score < 0.6:
@@ -804,6 +1046,77 @@ class ReflectionService:
         }
 
     async def _propose_actions(self, record: ReflectionRecord) -> list[ReflectionAction]:
+        if record.trigger_source == "consecutive_wrong_answers":
+            return [
+                ReflectionAction.build(
+                    reflection_record_id=record.id,
+                    action_type="enqueue_review_job",
+                    risk_level="low",
+                    approval_required=False,
+                    payload={"reason": "consecutive_wrong_answers"},
+                )
+            ]
+        if record.trigger_source == "repeated_misconception":
+            return [
+                ReflectionAction.build(
+                    reflection_record_id=record.id,
+                    action_type="enqueue_replan_job",
+                    risk_level="low",
+                    approval_required=False,
+                    payload={"reason": "repeated_misconception", "mode": "partial"},
+                )
+            ]
+        if record.trigger_source == "low_mastery_high_difficulty_mismatch":
+            return [
+                ReflectionAction.build(
+                    reflection_record_id=record.id,
+                    action_type="update_strategy_card_candidate",
+                    risk_level="high",
+                    approval_required=True,
+                    payload={"reason": "low_mastery_high_difficulty_mismatch"},
+                )
+            ]
+        if record.trigger_source == "hint_dependency_failure":
+            return [
+                ReflectionAction.build(
+                    reflection_record_id=record.id,
+                    action_type="enqueue_assessment_job",
+                    risk_level="low",
+                    approval_required=False,
+                    payload={"reason": "hint_dependency_failure"},
+                )
+            ]
+        if record.trigger_source == "high_failure_rate_artifact":
+            return [
+                ReflectionAction.build(
+                    reflection_record_id=record.id,
+                    action_type="enqueue_skill_curator_review",
+                    risk_level="high",
+                    approval_required=True,
+                    payload={"reason": "high_failure_rate_artifact"},
+                )
+            ]
+        if record.trigger_source == "assessment_regression_from_quiz":
+            return [
+                ReflectionAction.build(
+                    reflection_record_id=record.id,
+                    action_type="enqueue_replan_job",
+                    risk_level="low",
+                    approval_required=False,
+                    payload={"reason": "assessment_regression_from_quiz", "mode": "partial"},
+                )
+            ]
+        if record.trigger_source == "short_guess_answer":
+            return [
+                ReflectionAction.build(
+                    reflection_record_id=record.id,
+                    action_type="enqueue_review_job",
+                    risk_level="low",
+                    approval_required=False,
+                    payload={"reason": "short_guess_answer"},
+                )
+            ]
+
         cause = record.primary_root_cause
         if cause == "workflow_issue":
             return [
@@ -876,6 +1189,46 @@ class ReflectionService:
                     payload={"reason": "engagement_constraint", "mode": "partial"},
                 )
             ]
+        if cause == "router_issue":
+            return [
+                ReflectionAction.build(
+                    reflection_record_id=record.id,
+                    action_type="enqueue_router_review",
+                    risk_level="medium",
+                    approval_required=False,
+                    payload={"reason": "router_issue"},
+                )
+            ]
+        if cause == "template_issue":
+            return [
+                ReflectionAction.build(
+                    reflection_record_id=record.id,
+                    action_type="enqueue_template_review",
+                    risk_level="medium",
+                    approval_required=False,
+                    payload={"reason": "template_issue"},
+                )
+            ]
+        if cause == "memory_governance_issue":
+            return [
+                ReflectionAction.build(
+                    reflection_record_id=record.id,
+                    action_type="enqueue_memory_governance_review",
+                    risk_level="high",
+                    approval_required=True,
+                    payload={"reason": "memory_governance_issue"},
+                )
+            ]
+        if cause == "sandbox_admission_issue":
+            return [
+                ReflectionAction.build(
+                    reflection_record_id=record.id,
+                    action_type="enqueue_sandbox_admission_review",
+                    risk_level="high",
+                    approval_required=True,
+                    payload={"reason": "sandbox_admission_issue"},
+                )
+            ]
         return []
 
     async def _execute_action(self, *, record: ReflectionRecord, action: ReflectionAction) -> ReflectionAction:
@@ -905,7 +1258,7 @@ class ReflectionService:
             job = await self._autonomy_job_service.create_job(
                 learner_goal_id=record.learner_goal_id,
                 job_type="review_scheduling",
-                trigger_source="task_completed",
+                trigger_source=record.trigger_source or "task_completed",
                 due_at=due_at,
                 idempotency_key=f"reflection:{record.id}:review",
                 payload={
@@ -926,6 +1279,19 @@ class ReflectionService:
                     "topic_focus": topic_focus,
                     "reflection_record_id": record.id,
                     "reflection_depth": record.reflection_depth,
+                    "origin": "reflection",
+                },
+            )
+        elif action.action_type in ("enqueue_router_review", "enqueue_template_review"):
+            job = await self._autonomy_job_service.create_job(
+                learner_goal_id=record.learner_goal_id,
+                job_type="reflection_skill_evolution_curator",
+                trigger_source=record.trigger_source,
+                due_at=due_at,
+                idempotency_key=f"reflection:{record.id}:{action.action_type}",
+                payload={
+                    "action_type": action.action_type,
+                    "reflection_record_id": record.id,
                     "origin": "reflection",
                 },
             )
@@ -969,6 +1335,8 @@ class ReflectionService:
     def _build_dedupe_key(self, request: ReflectionTriggerRequest) -> str:
         if request.scope == "goal" and request.source_attempt_id is not None:
             return f"goal:{request.learner_goal_id}:{request.trigger_source}:{request.source_attempt_id}"
+        if request.topic_focus:
+            return f"{request.scope}:{request.target_type}:{request.target_id}:{request.topic_focus}:{request.trigger_source}:{request.reflection_depth}"
         return f"{request.scope}:{request.target_type}:{request.target_id}:{request.trigger_source}:{request.reflection_depth}"
 
     async def _recent_attempts(self, learner_goal_id: str) -> list[TaskAttempt]:
@@ -1148,7 +1516,7 @@ class ReflectionService:
         evidence_payload: dict[str, Any],
         primary_root_cause: str,
     ) -> str:
-        topic_key = str((evidence_payload.get("task") or {}).get("topic_focus") or "general")
+        topic_key = request.topic_focus or str((evidence_payload.get("task") or {}).get("topic_focus") or "general")
         workflow_type = str((evidence_payload.get("workflow") or {}).get("workflow_type") or "workflow")
         error_code = str((evidence_payload.get("workflow") or {}).get("error_code") or "none")
         if request.target_type == "workflow_run":
@@ -1264,6 +1632,17 @@ class ReflectionService:
         actions: list[ReflectionAction],
     ) -> ReflectionRecordDetailResponse:
         verdict = self._record_verdict_payload(record)
+        evidence_payload = record.evidence_payload or {}
+        
+        routing_evidence = {
+            "capability_request": evidence_payload.get("capability_request"),
+            "capability_selection": evidence_payload.get("capability_selection"),
+            "candidates": evidence_payload.get("candidates"),
+        } if any(k in evidence_payload for k in ("capability_request", "capability_selection", "candidates")) else None
+        
+        template_evidence = evidence_payload.get("template_summary")
+        governance_evidence = evidence_payload.get("rollout_governance")
+
         return ReflectionRecordDetailResponse.model_validate(
             {
                 **record.__dict__,
@@ -1272,8 +1651,11 @@ class ReflectionService:
                 "evidence_breakdown": verdict.get("evidence_breakdown", {}),
                 "memory_implications": verdict.get("memory_implications", []),
                 "strategy_implications": verdict.get("strategy_implications", {}),
-                "session_signal_summary": dict((record.evidence_payload or {}).get("session_signals") or {}),
+                "session_signal_summary": dict(evidence_payload.get("session_signals") or {}),
                 "actions": [ReflectionActionResponse.model_validate(item) for item in actions],
+                "routing_evidence": routing_evidence,
+                "template_evidence": template_evidence,
+                "governance_evidence": governance_evidence,
             }
         )
 
@@ -1296,3 +1678,182 @@ class ReflectionService:
             for item in topic_attempts[:3]
         ]
         return len([item for item in recent if item in {"failed", "skipped"}]) >= 2
+
+    async def evaluate_and_trigger_proactive_reflections(
+        self,
+        *,
+        learner_profile_id: str,
+        learner_goal_id: str,
+        task: DailyTask | None = None,
+    ) -> list[ReflectionRecord]:
+        """Proactively evaluate the reflection memory corpus and trigger reflections based on policy."""
+        # 0. Check goal autonomy phase - only trigger if goal is currently active
+        if self._goal_autonomy_state_repository is None:
+            return []
+        state = await self._goal_autonomy_state_repository.get_by_goal(learner_goal_id)
+        if state is None or state.phase != "active":
+            return []
+
+        # 1. Fetch reflection corpus
+        corpus = await self._memory_service.build_reflection_corpus(
+            learner_profile_id=learner_profile_id,
+            learner_goal_id=learner_goal_id,
+            limit_per_type=24,
+        )
+
+        # 2. Get existing records for this goal to enforce dedupe and cooldown
+        existing_records = await self._reflection_record_repository.list_by_goal(
+        learner_goal_id,
+            limit=50,
+        )
+
+        now = datetime.now(timezone.utc)
+        
+        # Convert existing records to summaries
+        existing_summaries = []
+        for rec in existing_records:
+            tf = getattr(rec, "topic_focus", None)
+            if not tf and rec.evidence_payload:
+                tf = rec.evidence_payload.get("topic_focus") or (rec.evidence_payload.get("task") or {}).get("topic_focus")
+            existing_summaries.append(
+                ExistingReflectionSummary(
+                    id=rec.id,
+                    scope=rec.scope,
+                    status=rec.status,
+                    cooldown_until=rec.cooldown_until,
+                    topic_focus=tf,
+                    trigger_source=rec.trigger_source,
+                    created_at=rec.created_at,
+                )
+            )
+
+        # Filter items: exclude those related to the current task's topic, as it is actively being addressed
+        task_topic = task.topic_focus.lower().replace(" ", "-").replace("_", "-") if task is not None and task.topic_focus else None
+        active_items = corpus.items
+        if task_topic:
+            # Exact match of the topic segment to avoid sub-string mismatch issues (e.g. matrix vs matrix-advanced)
+            active_items = []
+            for item in corpus.items:
+                parts = item.memory_key.lower().replace(" ", "-").replace("_", "-").split(":")
+                topic_part = parts[-1]
+                if topic_part != task_topic:
+                    active_items.append(item)
+
+        # Calculate memory signals
+        review_backlog_count = len([item for item in active_items if item.recommended_action == "review"])
+        validate_backlog_count = len([item for item in active_items if item.recommended_action == "validate"])
+        reinforce_opportunity_count = len([item for item in active_items if item.recommended_action == "reinforce"])
+        
+        contested_items = [
+            item for item in active_items
+            if item.contested and item.reflection_priority_score >= 0.7
+        ]
+        contested_high_severity_items = [
+            {
+                "memory_key": item.memory_key,
+                "reflection_priority_score": item.reflection_priority_score,
+            }
+            for item in contested_items
+        ]
+
+        # Calculate runtime signals
+        fallback_to_baseline_count = 0
+        low_confidence_count = 0
+        repeated_sequence_mismatch = False
+
+        if self._usage_repository is not None:
+            created_from = now - timedelta(hours=24)
+            usage_events = await self._usage_repository.list_events(
+                learner_goal_id=learner_goal_id,
+                created_at_from=created_from,
+                limit=50,
+            )
+            for ev in usage_events:
+                is_fallback = (
+                    ev.selection_reason == "artifact_missing_static_fallback"
+                    or ev.resolver_status == "fallback"
+                    or ev.metadata.get("fallback_used") is True
+                    or (ev.metadata.get("source_summary") or {}).get("artifact_source") == "static_fallback"
+                )
+                if is_fallback:
+                    fallback_to_baseline_count += 1
+
+                is_low_conf = (
+                    ev.selection_reason == "low_confidence"
+                    or "low_confidence" in (ev.metadata.get("fallback_chain") or [])
+                    or (ev.metadata.get("capability") or {}).get("confidence", 1.0) < 0.6
+                    or ev.metadata.get("confidence", 1.0) < 0.6
+                )
+                if is_low_conf:
+                    low_confidence_count += 1
+
+            mismatch_count = 0
+            for ev in usage_events:
+                metadata = dict(ev.metadata or {})
+                if metadata.get("sequence_mismatch") is True or metadata.get("sequence_mismatch_count", 0) > 0:
+                    mismatch_count += 1
+                elif (ev.outcome_signals or {}).get("sequence_mismatch") is True:
+                    mismatch_count += 1
+            repeated_sequence_mismatch = (mismatch_count >= 2)
+
+        # 3. Build trigger context and evaluate
+        context = ReflectionTriggerContext(
+            learner_profile_id=learner_profile_id,
+            learner_goal_id=learner_goal_id,
+            goal_phase=state.phase,
+            existing_reflections=existing_summaries,
+            task_id=task.id if task is not None else None,
+            study_plan_id=task.study_plan_id if task is not None else None,
+            contested_high_severity_items=contested_high_severity_items,
+            validate_backlog_count=validate_backlog_count,
+            review_backlog_count=review_backlog_count,
+            reinforce_opportunity_count=reinforce_opportunity_count,
+            fallback_to_baseline_count=fallback_to_baseline_count,
+            low_confidence_count=low_confidence_count,
+            repeated_sequence_mismatch=repeated_sequence_mismatch,
+        )
+
+        decisions = ReflectionTriggerPolicy.evaluate(context, now)
+
+        # 4. Process decisions
+        triggered_records = []
+        for d in decisions:
+            if d.should_trigger:
+                req = ReflectionTriggerRequest(
+                    learner_profile_id=learner_profile_id,
+                    learner_goal_id=learner_goal_id,
+                    scope=d.scope,
+                    target_type="learner_goal",
+                    target_id=learner_goal_id,
+                    trigger_source=d.trigger_source,
+                    reflection_depth=1,
+                    daily_task_id=task.id if task is not None else None,
+                    study_plan_id=task.study_plan_id if task is not None else None,
+                    topic_focus=d.topic_focus,
+                )
+                existing = await self._reflection_record_repository.get_by_dedupe_key(
+                    self._build_dedupe_key(req)
+                )
+                if existing is not None:
+                    triggered_records.append(existing)
+                    continue
+
+                rec = await self._create_and_process(req)
+                if rec is not None:
+                    triggered_records.append(rec)
+            elif d.denial_reason:
+                await self._audit_service.record(
+                    event_type="reflection.trigger.denied",
+                    resource_type="learner_goal",
+                    resource_id=learner_goal_id,
+                    actor="system",
+                    event_data={
+                        "scope": d.scope,
+                        "trigger_source": d.trigger_source,
+                        "denial_reason": d.denial_reason,
+                        "reason_codes": d.reason_codes,
+                        "topic_focus": d.topic_focus,
+                    }
+                )
+
+        return triggered_records

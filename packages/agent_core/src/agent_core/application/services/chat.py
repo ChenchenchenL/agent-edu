@@ -10,6 +10,7 @@ from agent_core.application.services.dynamic_runtime_registry import (
     DynamicRuntimeRegistryService,
     RuntimeSkillExecutionPlan,
 )
+from agent_core.application.services.skill.capability import CapabilityRequest
 from agent_core.application.services.long_term_memory_materialization import LongTermMemoryMaterializationService
 from agent_core.application.services.long_term_memory_materialization_replay import (
     LongTermMemoryMaterializationReplayScheduler,
@@ -297,7 +298,13 @@ class ChatService:
                 status="completed",
                 latency_ms=profile_retrieval_result.latency_ms,
             )
-        long_term_context = cross_session_context + [item.summary for item in profile_retrieval_result.memories]
+        long_term_context = await self._retrieve_and_build_long_term_context(
+            session=session,
+            history=history,
+            cross_session_context=cross_session_context,
+            profile_retrieval_result=profile_retrieval_result,
+            payload=payload,
+        )
         strategy_card = (
             await self._strategy_card_service.get_active(session.learner_goal_id)
             if self._strategy_card_service is not None and session.learner_goal_id is not None
@@ -326,6 +333,157 @@ class ChatService:
             rollout_overlay_payload=dict(rollout_overlay.payload) if rollout_overlay is not None else None,
             skill_binding=skill_binding,
         )
+
+    async def _retrieve_and_build_long_term_context(
+        self,
+        *,
+        session: LearningSession,
+        history: list[SessionMessage],
+        cross_session_context: list[str],
+        profile_retrieval_result: MemoryRetrievalResult,
+        payload: MessageRequest,
+    ) -> list[str]:
+        # Layered quota limits
+        CROSS_SESSION_QUOTA = 2
+        PROFILE_QUOTA = 2
+        KNOWLEDGE_QUOTA = 2
+        BEHAVIOR_QUOTA = 2
+
+        # 1. Cross-session context
+        cross_session_list = cross_session_context[:CROSS_SESSION_QUOTA]
+
+        # 2. Profile memory summaries
+        profile_list = [
+            f"Profile: {self._truncate_summary(item.summary)}"
+            for item in profile_retrieval_result.memories[:PROFILE_QUOTA]
+        ]
+
+        # 3. Knowledge memory summaries
+        knowledge_list = []
+        try:
+            knowledge_result = await self._memory_service.retrieve_relevant_knowledge_memories(
+                learner_profile_id=session.learner_profile_id,
+                query_text=payload.content,
+                limit=3,
+                candidate_limit=24,
+                surface="hint" if payload.mode == "hint" else "chat",
+            )
+            observe_embedding_operation(
+                operation="knowledge_memory_retrieval",
+                provider=knowledge_result.provider,
+                status="completed",
+                latency_ms=knowledge_result.latency_ms,
+            )
+            for item in knowledge_result.memories:
+                # knowledge memory 只注入 active/stable，以及经过明确 eligibility gate 的少量 candidate special-case
+                if item.status not in {"active", "stable"} and item.governance_state != "candidate_eligible":
+                    continue
+                # contested/conflict-heavy memory 默认不直接注入 learner-facing natural language context
+                try:
+                    full_memory = await self._memory_service.get_knowledge_memory(item.memory_id)
+                    if full_memory and full_memory.validation_status == "contested":
+                        continue
+                except Exception:
+                    continue
+
+                knowledge_list.append(
+                    f"Knowledge: {item.title} - {self._truncate_summary(item.summary)}"
+                )
+                if len(knowledge_list) >= KNOWLEDGE_QUOTA:
+                    break
+        except Exception as exc:
+            observe_embedding_operation(
+                operation="knowledge_memory_retrieval",
+                provider=self._memory_service.embedding_provider_name,
+                status="failed",
+                latency_ms=0,
+            )
+            await self._audit_service.record_durable(
+                event_type="embedding.query.failed",
+                resource_type="learning_session",
+                resource_id=session.id,
+                actor="system",
+                event_data={
+                    "provider": self._memory_service.embedding_provider_name,
+                    "model": self._memory_service.embedding_model_name,
+                    "operation": "knowledge_memory_retrieval",
+                    "status": "failed",
+                    "latency_ms": 0,
+                    "retry_count": 0,
+                    "session_id": session.id,
+                    "learner_profile_id": session.learner_profile_id,
+                    "response_shape_valid": False,
+                    "usage": None,
+                    "error": str(exc),
+                    "history_count": len(history),
+                    "cross_session_context_count": len(cross_session_context),
+                },
+            )
+
+        # 4. Behavior memory summaries
+        behavior_list = []
+        try:
+            behavior_result = await self._memory_service.retrieve_relevant_behavior_memories(
+                learner_profile_id=session.learner_profile_id,
+                query_text=payload.content,
+                limit=3,
+                candidate_limit=24,
+                surface="hint" if payload.mode == "hint" else "chat",
+            )
+            observe_embedding_operation(
+                operation="behavior_memory_retrieval",
+                provider=behavior_result.provider,
+                status="completed",
+                latency_ms=behavior_result.latency_ms,
+            )
+            for item in behavior_result.memories:
+                # behavior memory 只注入 active/stable
+                if item.status not in {"active", "stable"}:
+                    continue
+                # contested/conflict-heavy memory 默认不直接注入 learner-facing natural language context
+                try:
+                    full_memory = await self._memory_service.get_behavior_memory(item.memory_id)
+                    if full_memory and full_memory.validation_status == "contested":
+                        continue
+                except Exception:
+                    continue
+
+                behavior_list.append(
+                    f"Behavior: {item.title} - {self._truncate_summary(item.summary)}"
+                )
+                if len(behavior_list) >= BEHAVIOR_QUOTA:
+                    break
+        except Exception as exc:
+            observe_embedding_operation(
+                operation="behavior_memory_retrieval",
+                provider=self._memory_service.embedding_provider_name,
+                status="failed",
+                latency_ms=0,
+            )
+            await self._audit_service.record_durable(
+                event_type="embedding.query.failed",
+                resource_type="learning_session",
+                resource_id=session.id,
+                actor="system",
+                event_data={
+                    "provider": self._memory_service.embedding_provider_name,
+                    "model": self._memory_service.embedding_model_name,
+                    "operation": "behavior_memory_retrieval",
+                    "status": "failed",
+                    "latency_ms": 0,
+                    "retry_count": 0,
+                    "session_id": session.id,
+                    "learner_profile_id": session.learner_profile_id,
+                    "response_shape_valid": False,
+                    "usage": None,
+                    "error": str(exc),
+                    "history_count": len(history),
+                    "cross_session_context_count": len(cross_session_context),
+                },
+            )
+
+        return cross_session_list + profile_list + knowledge_list + behavior_list
+
 
     async def _generate_reply(
         self,
@@ -583,6 +741,8 @@ class ChatService:
                 "cross_session_context_count": len(context.long_term_context),
                 "hint_level": context.hint_context.hint_level if context.hint_context is not None else None,
                 "profile_retrieved_count": len(context.profile_retrieval_result.memories),
+                "knowledge_retrieved_count": len([x for x in context.long_term_context if x.startswith("Knowledge:")]),
+                "behavior_retrieved_count": len([x for x in context.long_term_context if x.startswith("Behavior:")]),
             },
         )
         await self._audit_service.record(
@@ -718,6 +878,30 @@ class ChatService:
     ) -> RuntimeSkillExecutionPlan | None:
         if self._runtime_registry is None:
             return None
+        # Phase 1/2: prefer capability-driven resolution for all surfaces
+        # that have a catalog entry.  The mapping covers all surfaces the
+        # chat service uses; only truly unlisted surfaces fall back to the
+        # legacy skill_name path.
+        surface_to_capability = {
+            "chat": "chat.respond",
+            "hint": "hint.adaptive",
+        }
+        capability = surface_to_capability.get(surface)
+        if capability is not None:
+            request = CapabilityRequest(
+                capability=capability,
+                surface=surface,
+                learner_goal_id=learner_goal_id,
+                topic_key=topic_key,
+                trigger_source=trigger_source,
+            )
+            result = await self._runtime_registry.resolve_capability_request(
+                request,
+                resource_id=resource_id,
+            )
+            if result is not None:
+                return result.plan
+        # Legacy fallback for surfaces without a capability catalog entry.
         return await self._runtime_registry.resolve_runtime_plan(
             learner_goal_id=learner_goal_id,
             skill_name=skill_name,
@@ -900,6 +1084,13 @@ class ChatService:
             )
 
     @staticmethod
+    def _truncate_summary(summary: str, limit: int = 120) -> str:
+        s = summary.strip()
+        if len(s) > limit:
+            return s[:limit] + "..."
+        return s
+
+    @staticmethod
     def _build_session_summary(*, session_title: str | None, subject: str | None, payload: MessageRequest) -> str:
         topic = subject or session_title or "current topic"
         mode = payload.mode or "chat"
@@ -954,7 +1145,7 @@ class ChatService:
             response_preference=response_preference,
             recent_struggles=recent_struggles,
             known_context=known_context[:3],
-            long_term_context=long_term_context[:4],
+            long_term_context=long_term_context[:8],
             teaching_goal=(
                 str(rollout_overlay_payload["teaching_goal"])
                 if rollout_overlay_payload is not None and rollout_overlay_payload.get("teaching_goal")

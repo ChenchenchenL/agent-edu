@@ -171,3 +171,8 @@ class OverrideReflectionActionRequest(BaseModel):
     payload: dict
     reason_code: str = Field(min_length=1, max_length=128)
     reason_note: str | None = Field(default=None, max_length=2000)
+
+
+class ActivateReflectionActionRequest(BaseModel):
+    reason_code: str = Field(min_length=1, max_length=128)
+    reason_note: str | None = Field(default=None, max_length=2000)

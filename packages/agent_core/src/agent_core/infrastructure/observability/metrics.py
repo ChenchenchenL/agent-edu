@@ -40,6 +40,11 @@ EMBEDDING_OPERATION_DURATION_SECONDS = Histogram(
     ["operation", "provider", "status"],
     buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
 )
+EMBEDDING_DIMENSION_MISMATCH_TOTAL = Counter(
+    "agent_edu_embedding_dimension_mismatch_total",
+    "Total number of dimension mismatches during embedding scoring.",
+    ["memory_type", "surface"],
+)
 AUDIT_WRITES_TOTAL = Counter(
     "agent_edu_audit_writes_total",
     "Total number of audit write attempts.",
@@ -147,6 +152,11 @@ REFLECTION_SESSION_SIGNAL_COVERAGE_TOTAL = Counter(
     "Total number of reflection session-signal aggregation results.",
     ["coverage"],
 )
+REFLECTION_EVIDENCE_DERIVATION_TOTAL = Counter(
+    "agent_edu_reflection_evidence_derivation_total",
+    "Total number of reflection evidence derivation attempts.",
+    ["source_type", "status"],
+)
 SKILL_RESOLUTIONS_TOTAL = Counter(
     "agent_edu_skill_resolutions_total",
     "Total number of skill resolver decisions.",
@@ -202,6 +212,116 @@ SKILL_CURATOR_PENDING_RECOMMENDATIONS_GAUGE = Gauge(
     "agent_edu_skill_curator_pending_recommendations",
     "Current number of pending skill curator recommendations by type.",
     ["recommendation_type"],
+)
+SKILL_ROUTER_INVOCATIONS_TOTAL = Counter(
+    "agent_edu_skill_router_invocations_total",
+    "Total number of skill router invocations.",
+    ["capability", "surface"],
+)
+SKILL_ROUTER_CANDIDATES_TOTAL = Counter(
+    "agent_edu_skill_router_candidates_total",
+    "Total number of router candidates collected by source type.",
+    ["source_type", "eligible"],
+)
+SKILL_ROUTER_WINNER_SOURCE_TOTAL = Counter(
+    "agent_edu_skill_router_winner_source_total",
+    "Winner source type distribution.",
+    ["source_type"],
+)
+SKILL_ROUTER_FALLBACK_TOTAL = Counter(
+    "agent_edu_skill_router_fallback_total",
+    "Router fallback events by reason.",
+    ["reason"],
+)
+SKILL_ROUTER_REJECTION_TOTAL = Counter(
+    "agent_edu_skill_router_rejection_total",
+    "Router candidate rejection reason distribution.",
+    ["reason"],
+)
+SANDBOX_ADMISSION_TOTAL = Counter(
+    "agent_edu_sandbox_admission_total",
+    "Sandbox admission decisions by status and profile.",
+    ["status", "profile"],
+)
+ACTIVATION_GOVERNANCE_TOTAL = Counter(
+    "agent_edu_activation_governance_total",
+    "Activation governance decisions by action and status.",
+    ["action", "status"],
+)
+PRIVILEGE_DELTA_REJECTION_TOTAL = Counter(
+    "agent_edu_privilege_delta_rejection_total",
+    "Privilege delta rejections by action.",
+    ["action"],
+)
+BROADEN_SCOPE_REJECTION_TOTAL = Counter(
+    "agent_edu_broaden_scope_rejection_total",
+    "Scope broadening rejections.",
+    ["action"],
+)
+CURATOR_EXECUTION_TOTAL = Counter(
+    "agent_edu_curator_execution_total",
+    "Curator auto-execution events by status and reason.",
+    ["event", "reason_code"],
+)
+PLAN_TEMPLATE_SELECTION_TOTAL = Counter(
+    "agent_edu_plan_template_selection_total",
+    "Plan template selection events by surface and outcome.",
+    ["surface", "outcome", "template_source"],
+)
+PLAN_TEMPLATE_REJECTION_TOTAL = Counter(
+    "agent_edu_plan_template_rejection_total",
+    "Plan template rejection events by reason code.",
+    ["surface", "reason_code"],
+)
+PLAN_TEMPLATE_VALIDATION_TOTAL = Counter(
+    "agent_edu_plan_template_validation_total",
+    "Plan template validation events by surface and result.",
+    ["surface", "result"],
+)
+ROUTING_REGRESSION_TOTAL = Counter(
+    "agent_edu_routing_regression_total",
+    "Total number of routing regression events detected by curator.",
+    ["skill_name", "surface"],
+)
+LOW_CONFIDENCE_BURST_TOTAL = Counter(
+    "agent_edu_low_confidence_burst_total",
+    "Total number of low-confidence selection burst events detected by curator.",
+    ["skill_name", "surface"],
+)
+CORPUS_TRIGGER_REFLECTION_TOTAL = Counter(
+    "agent_edu_corpus_trigger_reflection_total",
+    "Total number of corpus-triggered reflection records created.",
+    ["scope", "trigger_source"],
+)
+HIGH_RISK_AUTO_SANDBOX_TOTAL = Counter(
+    "agent_edu_high_risk_auto_sandbox_total",
+    "Total number of high-risk proposal auto-sandbox admissions.",
+    ["proposal_type"],
+)
+SKILL_QUALITY_SCORE = Gauge(
+    "agent_edu_skill_quality_score",
+    "Current quality score of a skill artifact.",
+    ["artifact_id", "skill_name", "surface"],
+)
+SKILL_OUTCOME_COMPLETION_RATE = Gauge(
+    "agent_edu_skill_outcome_completion_rate",
+    "Completion rate for a skill artifact over the feedback window.",
+    ["artifact_id", "surface"],
+)
+SKILL_OUTCOME_FAILURE_RATE = Gauge(
+    "agent_edu_skill_outcome_failure_rate",
+    "Failure rate for a skill artifact over the feedback window.",
+    ["artifact_id", "surface"],
+)
+SKILL_OUTCOME_CORRECTION_RATE = Gauge(
+    "agent_edu_skill_outcome_correction_rate",
+    "Correction rate for a skill artifact over the feedback window.",
+    ["artifact_id", "surface"],
+)
+SKILL_AUTO_SUPPRESS_TOTAL = Counter(
+    "agent_edu_skill_auto_suppress_total",
+    "Total number of auto-suppress recommendations created by outcome feedback.",
+    ["skill_name", "surface"],
 )
 
 
@@ -373,6 +493,13 @@ def observe_reflection_session_signal_coverage(*, covered: bool) -> None:
     ).inc()
 
 
+def observe_reflection_evidence_derivation(*, source_type: str, status: str) -> None:
+    REFLECTION_EVIDENCE_DERIVATION_TOTAL.labels(
+        source_type=source_type,
+        status=status,
+    ).inc()
+
+
 def observe_skill_resolution(*, surface: str, resolver_status: str, selection_reason: str) -> None:
     SKILL_RESOLUTIONS_TOTAL.labels(
         surface=surface,
@@ -444,6 +571,89 @@ def observe_reflection_skill_evolution(*, event: str, reason_code: str) -> None:
     ).inc()
 
 
+def observe_embedding_dimension_mismatch(*, memory_type: str, surface: str) -> None:
+    EMBEDDING_DIMENSION_MISMATCH_TOTAL.labels(
+        memory_type=memory_type,
+        surface=surface,
+    ).inc()
+
+
+def observe_skill_router_decision(
+    *,
+    capability: str,
+    surface: str,
+    winner_source: str,
+    candidate_count: int,
+    baseline_used: bool,
+    fallback_reasons: list[str] | None = None,
+    rejection_reasons: list[str] | None = None,
+) -> None:
+    SKILL_ROUTER_INVOCATIONS_TOTAL.labels(capability=capability, surface=surface).inc()
+    SKILL_ROUTER_WINNER_SOURCE_TOTAL.labels(source_type=winner_source).inc()
+    if baseline_used:
+        SKILL_ROUTER_FALLBACK_TOTAL.labels(reason="baseline_selected").inc()
+    for reason in (fallback_reasons or []):
+        SKILL_ROUTER_FALLBACK_TOTAL.labels(reason=reason).inc()
+    for reason in (rejection_reasons or []):
+        SKILL_ROUTER_REJECTION_TOTAL.labels(reason=reason).inc()
+
+
+def observe_sandbox_admission(*, status: str, profile: str) -> None:
+    SANDBOX_ADMISSION_TOTAL.labels(status=status, profile=profile).inc()
+
+
+def observe_activation_governance(*, action: str, status: str) -> None:
+    ACTIVATION_GOVERNANCE_TOTAL.labels(action=action, status=status).inc()
+
+
+def observe_privilege_delta_rejection(*, action: str) -> None:
+    PRIVILEGE_DELTA_REJECTION_TOTAL.labels(action=action).inc()
+
+
+def observe_broaden_scope_rejection(*, action: str) -> None:
+    BROADEN_SCOPE_REJECTION_TOTAL.labels(action=action).inc()
+
+
+def observe_curator_execution(*, event: str, reason_code: str) -> None:
+    CURATOR_EXECUTION_TOTAL.labels(event=event, reason_code=reason_code).inc()
+
+
+def observe_plan_template_selection(*, surface: str, outcome: str, template_source: str) -> None:
+    PLAN_TEMPLATE_SELECTION_TOTAL.labels(
+        surface=surface,
+        outcome=outcome,
+        template_source=template_source,
+    ).inc()
+
+
+def observe_plan_template_rejection(*, surface: str, reason_code: str) -> None:
+    PLAN_TEMPLATE_REJECTION_TOTAL.labels(surface=surface, reason_code=reason_code).inc()
+
+
+def observe_plan_template_validation(*, surface: str, result: str) -> None:
+    PLAN_TEMPLATE_VALIDATION_TOTAL.labels(surface=surface, result=result).inc()
+
+
+def observe_routing_regression(*, skill_name: str, surface: str) -> None:
+    """Increment routing regression counter (curator detects a routing degradation)."""
+    ROUTING_REGRESSION_TOTAL.labels(skill_name=skill_name, surface=surface).inc()
+
+
+def observe_low_confidence_burst(*, skill_name: str, surface: str) -> None:
+    """Increment low-confidence burst counter (curator detects repeated sub-threshold confidence)."""
+    LOW_CONFIDENCE_BURST_TOTAL.labels(skill_name=skill_name, surface=surface).inc()
+
+
+def observe_corpus_trigger_reflection(*, scope: str, trigger_source: str) -> None:
+    """Increment corpus-triggered reflection counter (reflection created by corpus evidence)."""
+    CORPUS_TRIGGER_REFLECTION_TOTAL.labels(scope=scope, trigger_source=trigger_source).inc()
+
+
+def observe_high_risk_auto_sandbox(*, proposal_type: str) -> None:
+    """Increment high-risk auto-sandbox counter (high-risk proposal admitted to sandbox)."""
+    HIGH_RISK_AUTO_SANDBOX_TOTAL.labels(proposal_type=proposal_type).inc()
+
+
 def set_skill_artifacts_total(*, status: str, count: int) -> None:
     SKILL_ARTIFACTS_GAUGE.labels(status=status).set(max(count, 0))
 
@@ -452,6 +662,109 @@ def set_skill_curator_pending_recommendations(*, recommendation_type: str, count
     SKILL_CURATOR_PENDING_RECOMMENDATIONS_GAUGE.labels(
         recommendation_type=recommendation_type,
     ).set(max(count, 0))
+
+
+def observe_skill_quality(*, artifact_id: str, skill_name: str, surface: str, score: float) -> None:
+    """Set the quality score gauge for a skill artifact."""
+    SKILL_QUALITY_SCORE.labels(artifact_id=artifact_id, skill_name=skill_name, surface=surface).set(score)
+
+
+def observe_skill_outcome_metrics(
+    *, artifact_id: str, surface: str, completion_rate: float, failure_rate: float, correction_rate: float,
+) -> None:
+    """Set outcome metric gauges for a skill artifact."""
+    SKILL_OUTCOME_COMPLETION_RATE.labels(artifact_id=artifact_id, surface=surface).set(completion_rate)
+    SKILL_OUTCOME_FAILURE_RATE.labels(artifact_id=artifact_id, surface=surface).set(failure_rate)
+    SKILL_OUTCOME_CORRECTION_RATE.labels(artifact_id=artifact_id, surface=surface).set(correction_rate)
+
+
+def observe_skill_auto_suppress(*, skill_name: str, surface: str) -> None:
+    """Increment auto-suppress counter when outcome feedback creates a suppress recommendation."""
+    SKILL_AUTO_SUPPRESS_TOTAL.labels(skill_name=skill_name, surface=surface).inc()
+
+
+# --- Phase 8 New Metrics ---
+
+QUIZ_ATTEMPTS_TOTAL = Counter(
+    "agent_edu_quiz_attempts_total",
+    "Total number of quiz answer attempts.",
+    ["topic_key", "is_correct"],
+)
+
+GRADING_FAILURES_TOTAL = Counter(
+    "agent_edu_grading_failures_total",
+    "Total number of grading failures.",
+    ["grading_source"],
+)
+
+SCHEMA_VALIDATION_FAILURES_TOTAL = Counter(
+    "agent_edu_schema_validation_failures_total",
+    "Total number of schema validation failures.",
+    ["schema_name"],
+)
+
+MASTERY_DELTA_DISTRIBUTION = Histogram(
+    "agent_edu_mastery_delta_distribution",
+    "Distribution of topic mastery score changes.",
+    ["topic_key"],
+    buckets=(-1.0, -0.5, -0.2, -0.1, 0.0, 0.1, 0.2, 0.5, 1.0),
+)
+
+ADAPTIVE_DIFFICULTY_CHANGES_TOTAL = Counter(
+    "agent_edu_adaptive_difficulty_changes_total",
+    "Total number of adaptive quiz difficulty changes.",
+    ["from_difficulty", "to_difficulty"],
+)
+
+REPEATED_MISCONCEPTIONS_TOTAL = Counter(
+    "agent_edu_repeated_misconceptions_total",
+    "Total number of repeated misconceptions observed.",
+    ["misconception_code"],
+)
+
+ANSWER_ATTEMPT_MATERIALIZATION_FAILURES_TOTAL = Counter(
+    "agent_edu_answer_attempt_materialization_failures_total",
+    "Total number of answer-attempt memory materialization failures.",
+)
+
+SKILL_LEARNING_GAIN_RATE = Gauge(
+    "agent_edu_skill_learning_gain_rate",
+    "Current learning gain rate per skill.",
+    ["skill_name"],
+)
+
+
+def observe_quiz_attempt(*, topic_key: str, is_correct: bool) -> None:
+    QUIZ_ATTEMPTS_TOTAL.labels(topic_key=topic_key, is_correct=str(is_correct)).inc()
+
+
+def observe_grading_failure(*, grading_source: str) -> None:
+    GRADING_FAILURES_TOTAL.labels(grading_source=grading_source).inc()
+
+
+def observe_schema_validation_failure(*, schema_name: str) -> None:
+    SCHEMA_VALIDATION_FAILURES_TOTAL.labels(schema_name=schema_name).inc()
+
+
+def observe_mastery_delta(*, topic_key: str, delta: float) -> None:
+    MASTERY_DELTA_DISTRIBUTION.labels(topic_key=topic_key).observe(delta)
+
+
+def observe_adaptive_difficulty(*, from_difficulty: str, to_difficulty: str) -> None:
+    ADAPTIVE_DIFFICULTY_CHANGES_TOTAL.labels(from_difficulty=from_difficulty, to_difficulty=to_difficulty).inc()
+
+
+def observe_repeated_misconception(*, misconception_code: str) -> None:
+    REPEATED_MISCONCEPTIONS_TOTAL.labels(misconception_code=misconception_code).inc()
+
+
+def observe_answer_attempt_materialization_failure() -> None:
+    ANSWER_ATTEMPT_MATERIALIZATION_FAILURES_TOTAL.inc()
+
+
+def observe_skill_learning_gain(*, skill_name: str, gain_rate: float) -> None:
+    SKILL_LEARNING_GAIN_RATE.labels(skill_name=skill_name).set(gain_rate)
+
 
 
 class PrometheusHttpMiddleware(BaseHTTPMiddleware):

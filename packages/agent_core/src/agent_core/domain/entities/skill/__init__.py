@@ -29,6 +29,15 @@ from agent_core.domain.entities.skill.execution import (
     SkillResolution,
 )
 
+from agent_core.domain.entities.skill.package import (
+    SkillPackage,
+    TenantSkillPackageInstallation,
+    SKILL_PACKAGE_STATUSES,
+    SKILL_PACKAGE_INSTALLATION_STATUSES,
+    SKILL_PACKAGE_SIGNATURE_ALGORITHMS,
+    SKILL_PACKAGE_MANIFEST_REQUIRED_KEYS,
+)
+
 __all__ = [
     # Artifact
     "SkillArtifact",
@@ -43,6 +52,10 @@ __all__ = [
     "SkillExecutionPlan",
     "SkillResolution",
 
+    # Package
+    "SkillPackage",
+    "TenantSkillPackageInstallation",
+
     # Constants
     "SKILL_ARTIFACT_STATUSES",
     "SKILL_SELECTABLE_ARTIFACT_STATUSES",
@@ -56,4 +69,8 @@ __all__ = [
     "SKILL_CURATOR_RECOMMENDATION_TYPES",
     "SKILL_CURATOR_RECOMMENDED_ACTIONS",
     "SKILL_CURATOR_RECOMMENDATION_STATUSES",
+    "SKILL_PACKAGE_STATUSES",
+    "SKILL_PACKAGE_INSTALLATION_STATUSES",
+    "SKILL_PACKAGE_SIGNATURE_ALGORITHMS",
+    "SKILL_PACKAGE_MANIFEST_REQUIRED_KEYS",
 ]

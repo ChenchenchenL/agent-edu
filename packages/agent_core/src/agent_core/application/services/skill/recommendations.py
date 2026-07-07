@@ -328,13 +328,15 @@ class SkillCuratorRecommendationService:
                 "scope": artifact.scope,
             }
         if recommendation.recommended_action == "none":
-            if recommendation.recommendation_type == "patch_needed":
-                return await self._create_skill_patch_request(
-                    recommendation,
-                    operator_id=operator_id,
-                )
-            if recommendation.recommendation_type == "merge_candidate":
-                return await self._create_skill_merge_package(
+            if recommendation.recommendation_type in {
+                "patch_needed",
+                "merge_candidate",
+                "patch_routing_policy",
+                "patch_template_policy",
+                "patch_skill_package",
+                "select_replacement_skill_package",
+            }:
+                return await self._create_proposal_from_recommendation_unified(
                     recommendation,
                     operator_id=operator_id,
                 )
@@ -437,7 +439,7 @@ class SkillCuratorRecommendationService:
             result["replacement_readiness"] = self._replacement_readiness_from_evidence(recommendation.evidence_snapshot)
         return result
 
-    async def _create_skill_patch_request(
+    async def _create_proposal_from_recommendation_unified(
         self,
         recommendation: SkillCuratorRecommendation,
         *,
@@ -445,67 +447,67 @@ class SkillCuratorRecommendationService:
     ) -> dict[str, Any]:
         if self._proposal_service is None:
             raise ValidationError("Reflection proposal service is not configured.")
-        learner_goal_id, reflection_record_id = await self._skill_patch_anchor(recommendation)
-        create = getattr(self._proposal_service, "create_skill_patch_request_from_recommendation", None)
-        if create is None:
-            raise ValidationError("Reflection proposal service does not support skill patch requests.")
-        proposal = await create(
-            recommendation_id=recommendation.id,
-            artifact_id=recommendation.artifact_id,
-            skill_name=recommendation.skill_name,
-            skill_version=recommendation.skill_version,
-            scope=recommendation.scope,
-            surface=recommendation.surface,
-            recommendation_reason_code=recommendation.reason_code,
-            evidence_snapshot=dict(recommendation.evidence_snapshot),
-            metrics_snapshot=dict(recommendation.metrics_snapshot),
-            related_artifact_ids=list(recommendation.related_artifact_ids),
-            reflection_record_id=reflection_record_id,
-            learner_goal_id=learner_goal_id,
-            operator_id=operator_id,
-        )
-        return {
-            "executed": True,
-            "recommended_action": "create_skill_patch_proposal",
-            "proposal_id": proposal.id,
-            "proposal_type": proposal.proposal_type,
-            "proposal_status": proposal.status,
-            "artifact_id": recommendation.artifact_id,
-            "skill_name": recommendation.skill_name,
-            "skill_version": recommendation.skill_version,
-            "scope": recommendation.scope,
-        }
+        create = getattr(self._proposal_service, "create_proposal_from_recommendation", None)
+        if create is not None:
+            proposal = await create(
+                recommendation,
+                operator_id=operator_id,
+            )
+        else:
+            # Fallback for legacy stub/mock objects in tests
+            if recommendation.recommendation_type in {"patch_needed", "patch_routing_policy", "patch_template_policy", "patch_skill_package", "select_replacement_skill_package"}:
+                learner_goal_id, reflection_record_id = await self._skill_patch_anchor(recommendation)
+                create_legacy = getattr(self._proposal_service, "create_skill_patch_request_from_recommendation", None)
+                if create_legacy is None:
+                    raise ValidationError("Reflection proposal service does not support skill patch requests.")
+                proposal = await create_legacy(
+                    recommendation_id=recommendation.id,
+                    artifact_id=recommendation.artifact_id,
+                    skill_name=recommendation.skill_name,
+                    skill_version=recommendation.skill_version,
+                    scope=recommendation.scope,
+                    surface=recommendation.surface,
+                    recommendation_reason_code=recommendation.reason_code,
+                    evidence_snapshot=dict(recommendation.evidence_snapshot),
+                    metrics_snapshot=dict(recommendation.metrics_snapshot),
+                    related_artifact_ids=list(recommendation.related_artifact_ids),
+                    reflection_record_id=reflection_record_id,
+                    learner_goal_id=learner_goal_id,
+                    operator_id=operator_id,
+                )
+            elif recommendation.recommendation_type == "merge_candidate":
+                learner_goal_id, reflection_record_id = await self._skill_patch_anchor(recommendation)
+                create_legacy = getattr(self._proposal_service, "create_skill_merge_package_from_recommendation", None)
+                if create_legacy is None:
+                    raise ValidationError("Reflection proposal service does not support skill merge proposals.")
+                proposal = await create_legacy(
+                    recommendation_id=recommendation.id,
+                    artifact_id=recommendation.artifact_id,
+                    skill_name=recommendation.skill_name,
+                    skill_version=recommendation.skill_version,
+                    scope=recommendation.scope,
+                    surface=recommendation.surface,
+                    recommendation_reason_code=recommendation.reason_code,
+                    evidence_snapshot=dict(recommendation.evidence_snapshot),
+                    metrics_snapshot=dict(recommendation.metrics_snapshot),
+                    related_artifact_ids=list(recommendation.related_artifact_ids),
+                    reflection_record_id=reflection_record_id,
+                    learner_goal_id=learner_goal_id,
+                    operator_id=operator_id,
+                )
+            else:
+                raise ValidationError(f"Reflection proposal service does not support create_proposal_from_recommendation for {recommendation.recommendation_type}")
 
-    async def _create_skill_merge_package(
-        self,
-        recommendation: SkillCuratorRecommendation,
-        *,
-        operator_id: str,
-    ) -> dict[str, Any]:
-        if self._proposal_service is None:
-            raise ValidationError("Reflection proposal service is not configured.")
-        learner_goal_id, reflection_record_id = await self._skill_patch_anchor(recommendation)
-        create = getattr(self._proposal_service, "create_skill_merge_package_from_recommendation", None)
-        if create is None:
-            raise ValidationError("Reflection proposal service does not support skill merge proposals.")
-        proposal = await create(
-            recommendation_id=recommendation.id,
-            artifact_id=recommendation.artifact_id,
-            skill_name=recommendation.skill_name,
-            skill_version=recommendation.skill_version,
-            scope=recommendation.scope,
-            surface=recommendation.surface,
-            recommendation_reason_code=recommendation.reason_code,
-            evidence_snapshot=dict(recommendation.evidence_snapshot),
-            metrics_snapshot=dict(recommendation.metrics_snapshot),
-            related_artifact_ids=list(recommendation.related_artifact_ids),
-            reflection_record_id=reflection_record_id,
-            learner_goal_id=learner_goal_id,
-            operator_id=operator_id,
-        )
-        return {
+        action_mapping = {
+            "skill_patch_request": "create_skill_patch_proposal",
+            "skill_merge_package": "create_skill_merge_proposal",
+            "skill_package": "create_skill_merge_proposal" if recommendation.recommendation_type == "merge_candidate" else "create_skill_package_proposal",
+        }
+        rec_action = action_mapping.get(proposal.proposal_type, f"create_{proposal.proposal_type}_proposal")
+
+        result = {
             "executed": True,
-            "recommended_action": "create_skill_merge_proposal",
+            "recommended_action": rec_action,
             "proposal_id": proposal.id,
             "proposal_type": proposal.proposal_type,
             "proposal_status": proposal.status,
@@ -513,8 +515,10 @@ class SkillCuratorRecommendationService:
             "skill_name": recommendation.skill_name,
             "skill_version": recommendation.skill_version,
             "scope": recommendation.scope,
-            "merge_source_artifact_ids": list(recommendation.related_artifact_ids),
         }
+        if proposal.proposal_type in {"skill_merge_package", "skill_package"} and recommendation.recommendation_type == "merge_candidate":
+            result["merge_source_artifact_ids"] = list(recommendation.related_artifact_ids)
+        return result
 
     async def _skill_patch_anchor(self, recommendation: SkillCuratorRecommendation) -> tuple[str, str]:
         evidence = dict(recommendation.evidence_snapshot)

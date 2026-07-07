@@ -7,6 +7,7 @@ from pydantic import BaseModel, ValidationError as PydanticValidationError
 
 from agent_core.domain.errors import ProviderError
 from agent_core.infrastructure.embedding.types import EmbeddingProvider
+from agent_core.infrastructure.llm.circuit_breaker import CircuitBreaker
 
 
 class _EmbeddingDatum(BaseModel):
@@ -26,6 +27,8 @@ class DashScopeCompatibleEmbeddingProvider(EmbeddingProvider):
         model_name: str,
         timeout_seconds: float,
         dimensions: int | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.provider_name = "dashscope_compatible"
         self.model_name = model_name
@@ -33,10 +36,15 @@ class DashScopeCompatibleEmbeddingProvider(EmbeddingProvider):
         self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
         self._dimensions = dimensions
+        self._circuit_breaker = circuit_breaker
+        self._transport = transport
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
+
+        if self._circuit_breaker is not None:
+            self._circuit_breaker.allow_call()
 
         payload: dict[str, Any] = {
             "model": self.model_name,
@@ -46,10 +54,13 @@ class DashScopeCompatibleEmbeddingProvider(EmbeddingProvider):
         if self._dimensions is not None:
             payload["dimensions"] = self._dimensions
         try:
-            async with httpx.AsyncClient(
-                base_url=self._base_url,
-                timeout=self._timeout_seconds,
-            ) as client:
+            client_kwargs: dict[str, Any] = {
+                "base_url": self._base_url,
+                "timeout": self._timeout_seconds,
+            }
+            if self._transport is not None:
+                client_kwargs["transport"] = self._transport
+            async with httpx.AsyncClient(**client_kwargs) as client:
                 response = await client.post(
                     "/embeddings",
                     headers={
@@ -61,15 +72,24 @@ class DashScopeCompatibleEmbeddingProvider(EmbeddingProvider):
             response.raise_for_status()
             data = _EmbeddingResponse.model_validate(response.json())
         except httpx.HTTPStatusError as exc:
+            if self._circuit_breaker is not None:
+                self._circuit_breaker.record_failure()
             raise ProviderError(
                 f"Embedding provider request failed with status {exc.response.status_code}."
             ) from exc
         except (httpx.HTTPError, PydanticValidationError) as exc:
+            if self._circuit_breaker is not None:
+                self._circuit_breaker.record_failure()
             raise ProviderError("Embedding provider request failed.") from exc
 
         vectors = [item.embedding for item in data.data]
         if len(vectors) != len(texts):
+            if self._circuit_breaker is not None:
+                self._circuit_breaker.record_failure()
             raise ProviderError(
                 f"Embedding provider returned {len(vectors)} vectors; expected {len(texts)}."
             )
+
+        if self._circuit_breaker is not None:
+            self._circuit_breaker.record_success()
         return vectors

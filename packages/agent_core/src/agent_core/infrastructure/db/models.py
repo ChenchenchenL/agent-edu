@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Date, DateTime, Float, ForeignKey, Index, JSON, Integer, String, Text, func, literal_column
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Index, JSON, Integer, String, Text, func, literal_column
 from sqlalchemy.orm import Mapped, mapped_column
 
 from agent_core.infrastructure.db.base import Base
@@ -44,6 +44,7 @@ class LearnerGoalModel(Base):
     baseline_note: Mapped[str | None] = mapped_column(Text(), nullable=True)
     deadline_date: Mapped[datetime] = mapped_column(Date(), nullable=False)
     weekly_study_minutes: Mapped[int] = mapped_column(nullable=False)
+    preferred_language: Mapped[str] = mapped_column(String(16), nullable=False, default="zh")
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -628,6 +629,56 @@ class SessionQuizQuestionModel(Base):
     position: Mapped[int] = mapped_column(nullable=False)
     prompt: Mapped[str] = mapped_column(Text(), nullable=False)
     answer: Mapped[str] = mapped_column(Text(), nullable=False)
+    question_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="open_ended"
+    )
+    options: Mapped[list] = mapped_column(JSON(), nullable=False, server_default="[]")
+
+
+class SessionQuizAnswerAttemptModel(Base):
+    __tablename__ = "session_quiz_answer_attempts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("learning_sessions.id"), nullable=False)
+    quiz_id: Mapped[str] = mapped_column(ForeignKey("session_quizzes.id"), nullable=False)
+    question_id: Mapped[str] = mapped_column(
+        ForeignKey("session_quiz_questions.id"), nullable=False
+    )
+    learner_profile_id: Mapped[str] = mapped_column(
+        ForeignKey("learner_profiles.id"), nullable=False
+    )
+    learner_goal_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learner_goals.id"), nullable=True
+    )
+    daily_task_id: Mapped[str | None] = mapped_column(
+        ForeignKey("daily_tasks.id"), nullable=True
+    )
+    topic_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    subskill_keys: Mapped[list] = mapped_column(JSON(), nullable=False, server_default="[]")
+    question_prompt: Mapped[str] = mapped_column(Text(), nullable=False)
+    reference_answer: Mapped[str] = mapped_column(Text(), nullable=False)
+    learner_answer: Mapped[str] = mapped_column(Text(), nullable=False)
+    grading_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    grading_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    is_correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rubric_feedback: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    misconception_codes: Mapped[list] = mapped_column(
+        JSON(), nullable=False, server_default="[]"
+    )
+    hint_used: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=literal_column("false")
+    )
+    hint_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=literal_column("0")
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    metadata_: Mapped[dict] = mapped_column(
+        "metadata", JSON(), nullable=False, server_default="{}"
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class SkillArtifactModel(Base):
@@ -646,6 +697,7 @@ class SkillArtifactModel(Base):
     definition: Mapped[dict] = mapped_column(JSON, nullable=False)
     runtime_directives: Mapped[dict] = mapped_column(JSON, nullable=False)
     tool_plan: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
+    plan_templates: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
     compatibility_contract: Mapped[dict] = mapped_column(JSON, nullable=False)
     source_reflection_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     source_memory_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
@@ -1097,3 +1149,49 @@ class GoalSkillBindingModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     rolled_back_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SkillPackageModel(Base):
+    __tablename__ = "skill_packages"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    provider: Mapped[str] = mapped_column(String(128), nullable=False)
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    provenance_url: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    signature_hash: Mapped[str] = mapped_column(String(256), nullable=False)
+    signature_algorithm: Mapped[str] = mapped_column(String(16), nullable=False, server_default="sha256")
+    manifest: Mapped[dict] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    sandbox_eval_bundle: Mapped[dict] = mapped_column(JSON, nullable=False, server_default="{}")
+    kill_switch: Mapped[bool] = mapped_column(nullable=False, server_default=literal_column("false"))
+    imported_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rejected_reason_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class TenantSkillPackageInstallationModel(Base):
+    __tablename__ = "tenant_skill_package_installations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    learner_profile_id: Mapped[str] = mapped_column(ForeignKey("learner_profiles.id"), nullable=False)
+    package_id: Mapped[str] = mapped_column(ForeignKey("skill_packages.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    installed_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    installed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    suppressed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    suppressed_reason_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    suppressed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    uninstalled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    uninstalled_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    rolled_back_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rolled_back_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    rollback_source_installation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_artifact_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, server_default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

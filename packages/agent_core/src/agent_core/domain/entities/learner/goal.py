@@ -19,6 +19,7 @@ class LearnerGoal:
     baseline_note: str | None
     deadline_date: date
     weekly_study_minutes: int
+    preferred_language: str
     status: str
     created_at: datetime
     updated_at: datetime
@@ -34,6 +35,7 @@ class LearnerGoal:
         baseline_note: str | None,
         deadline_date: date,
         weekly_study_minutes: int,
+        preferred_language: str = "zh",
     ) -> "LearnerGoal":
         now = datetime.now(timezone.utc)
         return cls(
@@ -45,6 +47,7 @@ class LearnerGoal:
             baseline_note=baseline_note,
             deadline_date=deadline_date,
             weekly_study_minutes=weekly_study_minutes,
+            preferred_language=preferred_language,
             status="active",
             created_at=now,
             updated_at=now,
@@ -63,6 +66,7 @@ class LearnerGoal:
             baseline_note=self.baseline_note,
             deadline_date=self.deadline_date,
             weekly_study_minutes=self.weekly_study_minutes,
+            preferred_language=self.preferred_language,
             status=status,
             created_at=self.created_at,
             updated_at=datetime.now(timezone.utc),

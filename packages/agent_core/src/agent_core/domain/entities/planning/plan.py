@@ -15,6 +15,7 @@ PLAN_TRIGGER_SOURCES = {
     "task_skipped",
     "proposal_rollout_activation",
     "proposal_rollout_rollback",
+    "learner_ui",
 }
 TASK_ORIGINS = {"planner", "review_scheduler", "assessment_scheduler", "replan_scheduler"}
 TASK_TYPES = {"lesson", "practice", "review", "assessment", "milestone", "repair"}

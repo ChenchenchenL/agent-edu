@@ -1,0 +1,241 @@
+Date : 2026-07-07 10:12:45
+Directory : /home/cl/agent-edu
+Total : 160 files,  18845 codes, 858 comments, 2534 blanks, all 22237 lines
+
+Languages
++----------------+------------+------------+------------+------------+------------+
+| language       | files      | code       | comment    | blank      | total      |
++----------------+------------+------------+------------+------------+------------+
+| Python         |        130 |     14,254 |        783 |      2,045 |     17,082 |
+| JSON           |          2 |      1,723 |          0 |          0 |      1,723 |
+| TypeScript JSX |         13 |      1,549 |         33 |        128 |      1,710 |
+| Markdown       |          4 |        688 |          0 |        272 |        960 |
+| TypeScript     |         10 |        605 |         19 |         83 |        707 |
+| Makefile       |          1 |         26 |         23 |          6 |         55 |
++----------------+------------+------------+------------+------------+------------+
+
+Directories
++-----------------------------------------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| path                                                                                                                  | files      | code       | comment    | blank      | total      |
++-----------------------------------------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| .                                                                                                                     |        160 |     18,845 |        858 |      2,534 |     22,237 |
+| . (Files)                                                                                                             |          1 |         26 |         23 |          6 |         55 |
+| alembic                                                                                                               |          2 |        199 |         12 |         18 |        229 |
+| alembic/versions                                                                                                      |          2 |        199 |         12 |         18 |        229 |
+| apps                                                                                                                  |          1 |         32 |          6 |          4 |         42 |
+| apps/worker                                                                                                           |          1 |         32 |          6 |          4 |         42 |
+| docs                                                                                                                  |          3 |        260 |          0 |         95 |        355 |
+| packages                                                                                                              |        124 |     11,144 |        412 |      1,052 |     12,608 |
+| packages/agent_core                                                                                                   |         99 |      7,267 |        360 |        841 |      8,468 |
+| packages/agent_core/src                                                                                               |         99 |      7,267 |        360 |        841 |      8,468 |
+| packages/agent_core/src/agent_core                                                                                    |         99 |      7,267 |        360 |        841 |      8,468 |
+| packages/agent_core/src/agent_core/api                                                                                |         10 |        755 |         30 |         90 |        875 |
+| packages/agent_core/src/agent_core/api (Files)                                                                        |          4 |        137 |         23 |         13 |        173 |
+| packages/agent_core/src/agent_core/api/routes                                                                         |          6 |        618 |          7 |         77 |        702 |
+| packages/agent_core/src/agent_core/application                                                                        |         54 |      4,772 |        310 |        527 |      5,609 |
+| packages/agent_core/src/agent_core/application/services                                                               |         54 |      4,772 |        310 |        527 |      5,609 |
+| packages/agent_core/src/agent_core/application/services (Files)                                                       |         29 |      2,933 |        217 |        289 |      3,439 |
+| packages/agent_core/src/agent_core/application/services/learner_memory                                                |          1 |         43 |          0 |          1 |         44 |
+| packages/agent_core/src/agent_core/application/services/runtime_protection                                            |          1 |         80 |         31 |         20 |        131 |
+| packages/agent_core/src/agent_core/application/services/skill                                                         |         23 |      1,716 |         62 |        217 |      1,995 |
+| packages/agent_core/src/agent_core/domain                                                                             |         19 |        770 |          9 |        104 |        883 |
+| packages/agent_core/src/agent_core/domain (Files)                                                                     |          1 |          3 |          5 |          1 |          9 |
+| packages/agent_core/src/agent_core/domain/entities                                                                    |         14 |        559 |          1 |         37 |        597 |
+| packages/agent_core/src/agent_core/domain/entities (Files)                                                            |          1 |         10 |          0 |          0 |         10 |
+| packages/agent_core/src/agent_core/domain/entities/learner                                                            |          1 |         15 |          0 |          3 |         18 |
+| packages/agent_core/src/agent_core/domain/entities/memory                                                             |          1 |          2 |          0 |          0 |          2 |
+| packages/agent_core/src/agent_core/domain/entities/reflection                                                         |          3 |         51 |          0 |          0 |         51 |
+| packages/agent_core/src/agent_core/domain/entities/session                                                            |          2 |        146 |          0 |          7 |        153 |
+| packages/agent_core/src/agent_core/domain/entities/skill                                                              |          6 |        335 |          1 |         27 |        363 |
+| packages/agent_core/src/agent_core/domain/schemas                                                                     |          4 |        208 |          3 |         66 |        277 |
+| packages/agent_core/src/agent_core/infrastructure                                                                     |         16 |        970 |         11 |        120 |      1,101 |
+| packages/agent_core/src/agent_core/infrastructure/config                                                              |          1 |          9 |          0 |          0 |          9 |
+| packages/agent_core/src/agent_core/infrastructure/db                                                                  |          9 |        651 |          1 |         65 |        717 |
+| packages/agent_core/src/agent_core/infrastructure/db (Files)                                                          |          1 |         87 |          0 |          9 |         96 |
+| packages/agent_core/src/agent_core/infrastructure/db/repositories                                                     |          8 |        564 |          1 |         56 |        621 |
+| packages/agent_core/src/agent_core/infrastructure/embedding                                                           |          1 |         18 |          0 |          2 |         20 |
+| packages/agent_core/src/agent_core/infrastructure/llm                                                                 |          4 |        163 |          2 |         10 |        175 |
+| packages/agent_core/src/agent_core/infrastructure/observability                                                       |          1 |        129 |          8 |         43 |        180 |
+| packages/frontend                                                                                                     |         25 |      3,877 |         52 |        211 |      4,140 |
+| packages/frontend (Files)                                                                                             |          3 |      1,741 |          0 |          2 |      1,743 |
+| packages/frontend/src                                                                                                 |         22 |      2,136 |         52 |        209 |      2,397 |
+| packages/frontend/src (Files)                                                                                         |          1 |          6 |          0 |          0 |          6 |
+| packages/frontend/src/api                                                                                             |          2 |        112 |         19 |         22 |        153 |
+| packages/frontend/src/hooks                                                                                           |          3 |        296 |          0 |         32 |        328 |
+| packages/frontend/src/pages                                                                                           |         12 |      1,543 |         33 |        128 |      1,704 |
+| packages/frontend/src/pages/goals                                                                                     |          1 |         -1 |          0 |          0 |         -1 |
+| packages/frontend/src/pages/learning                                                                                  |          6 |        691 |         21 |         75 |        787 |
+| packages/frontend/src/pages/learning/components                                                                       |          6 |        691 |         21 |         75 |        787 |
+| packages/frontend/src/pages/operator                                                                                  |          5 |        853 |         12 |         53 |        918 |
+| packages/frontend/src/test                                                                                            |          2 |         84 |          0 |          8 |         92 |
+| packages/frontend/src/types                                                                                           |          2 |         95 |          0 |         19 |        114 |
+| plan                                                                                                                  |          1 |        428 |          0 |        177 |        605 |
+| tests                                                                                                                 |         28 |      6,756 |        405 |      1,182 |      8,343 |
++-----------------------------------------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+
+Files
++-----------------------------------------------------------------------------------------------------------------------+----------------+------------+------------+------------+------------+
+| filename                                                                                                              | language       | code       | comment    | blank      | total      |
++-----------------------------------------------------------------------------------------------------------------------+----------------+------------+------------+------------+------------+
+| /home/cl/agent-edu/Makefile                                                                                           | Makefile       |         26 |         23 |          6 |         55 |
+| /home/cl/agent-edu/alembic/versions/0025_skill_packages_and_installations.py                                          | Python         |         56 |          6 |          9 |         71 |
+| /home/cl/agent-edu/alembic/versions/0026_quiz_answer_attempts.py                                                      | Python         |        143 |          6 |          9 |        158 |
+| /home/cl/agent-edu/apps/worker/main.py                                                                                | Python         |         32 |          6 |          4 |         42 |
+| /home/cl/agent-edu/docs/DOCKER_VALIDATION.md                                                                          | Markdown       |          5 |          0 |          1 |          6 |
+| /home/cl/agent-edu/docs/MVP_VALIDATION_BASELINE.md                                                                    | Markdown       |        101 |          0 |         35 |        136 |
+| /home/cl/agent-edu/docs/QUIZ_ATTEMPT_OBSERVABILITY_CONTRACT.md                                                        | Markdown       |        154 |          0 |         59 |        213 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/api/app.py                                                      | Python         |          2 |          0 |          0 |          2 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/api/dependencies.py                                             | Python         |        120 |          9 |         11 |        140 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/api/error_handlers.py                                           | Python         |          1 |          3 |          0 |          4 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/api/rate_limit.py                                               | Python         |         14 |         11 |          2 |         27 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/api/routes/health.py                                            | Python         |         13 |          1 |          0 |         14 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/api/routes/quiz.py                                              | Python         |        138 |          6 |         31 |        175 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/api/routes/reflection.py                                        | Python         |         23 |          0 |          2 |         25 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/api/routes/sessions.py                                          | Python         |         37 |          0 |          2 |         39 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/api/routes/skill_packages.py                                    | Python         |        263 |          0 |         32 |        295 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/api/routes/skills.py                                            | Python         |        144 |          0 |         10 |        154 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/adaptive_quiz_policy.py                    | Python         |        195 |         38 |         32 |        265 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/audit.py                                   | Python         |          6 |          0 |          1 |          7 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/chat.py                                    | Python         |          3 |          5 |          0 |          8 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/dynamic_runtime_registry.py                | Python         |        127 |         29 |         10 |        166 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/learner_memory/evidence.py                 | Python         |         43 |          0 |          1 |         44 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/long_term_memory_materialization.py        | Python         |        144 |          9 |          6 |        159 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/long_term_memory_materialization_replay.py | Python         |         43 |          0 |          2 |         45 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/memory.py                                  | Python         |         13 |          0 |          1 |         14 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/memory_normalization.py                    | Python         |          6 |          0 |          0 |          6 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/quiz.py                                    | Python         |         91 |          1 |          9 |        101 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/quiz_attempt.py                            | Python         |        474 |         18 |         34 |        526 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/quiz_grading.py                            | Python         |        260 |         20 |         28 |        308 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/quiz_observability.py                      | Python         |        219 |         40 |         30 |        289 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/reflection.py                              | Python         |        371 |          9 |         32 |        412 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/reflection_evidence.py                     | Python         |        134 |          8 |         11 |        153 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/reflection_evidence_contracts.py           | Python         |        104 |         14 |         21 |        139 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/reflection_governance.py                   | Python         |        105 |          1 |          9 |        115 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/reflection_proposal_sandbox.py             | Python         |         32 |          3 |          2 |         37 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/reflection_proposals.py                    | Python         |        214 |          2 |          6 |        222 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/reflection_replay.py                       | Python         |         40 |          0 |          8 |         48 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/reflection_sandbox_admission.py            | Python         |          2 |          0 |          0 |          2 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/reflection_sandbox_policy.py               | Python         |         10 |          0 |          1 |         11 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/reflection_skill_evolution_curator.py      | Python         |          6 |          1 |          0 |          7 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/reflection_trigger_policy.py               | Python         |        332 |         17 |         44 |        393 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/runtime_protection/alert_bridge.py         | Python         |         80 |         31 |         20 |        131 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/__init__.py                          | Python         |         10 |          0 |          0 |         10 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/artifact_timeline.py                 | Python         |        126 |          0 |         16 |        142 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/candidates.py                        | Python         |         -2 |          5 |          0 |          3 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/capability.py                        | Python         |          1 |          6 |          0 |          7 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/curator_execution_policy.py          | Python         |          4 |          0 |          0 |          4 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/curator_executor.py                  | Python         |         17 |          0 |          2 |         19 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/curator_job.py                       | Python         |        228 |         15 |         20 |        263 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/outcome_aggregator.py                | Python         |        157 |          8 |         22 |        187 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/outcome_feedback_job.py              | Python         |        113 |          0 |         16 |        129 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/outcome_trigger_strategy.py          | Python         |        155 |          0 |         20 |        175 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/package_import.py                    | Python         |        116 |          0 |         12 |        128 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/package_installation.py              | Python         |        211 |          0 |         25 |        236 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/package_manifest.py                  | Python         |        102 |          0 |         15 |        117 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/package_verification.py              | Python         |         41 |          0 |          9 |         50 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/quality_updater.py                   | Python         |         93 |          0 |         18 |        111 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/recommendations.py                   | Python         |          2 |          1 |          1 |          4 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/resolution.py                        | Python         |          4 |          0 |          0 |          4 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/rollout_drilldown.py                 | Python         |        113 |          0 |         15 |        128 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/router.py                            | Python         |         10 |          0 |          1 |         11 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/router_policy.py                     | Python         |         16 |          7 |          6 |         29 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/router_sources.py                    | Python         |         56 |          0 |          8 |         64 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/runtime_explain.py                   | Python         |        118 |         12 |          8 |        138 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skill/usage.py                             | Python         |         25 |          8 |          3 |         36 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/skills.py                                  | Python         |         10 |          2 |          0 |         12 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/task.py                                    | Python         |          2 |          0 |          0 |          2 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/task_autonomy_scheduling.py                | Python         |          4 |          0 |          0 |          4 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/task_runtime_skill.py                      | Python         |          2 |          0 |          0 |          2 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/task_status_update_support.py              | Python         |        -41 |          0 |          1 |        -40 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/application/services/tool_plan_runtime.py                       | Python         |         25 |          0 |          1 |         26 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/domain/entities/learner/autonomy.py                             | Python         |         15 |          0 |          3 |         18 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/domain/entities/memory/governance.py                            | Python         |          2 |          0 |          0 |          2 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/domain/entities/quiz.py                                         | Python         |         10 |          0 |          0 |         10 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/domain/entities/reflection/evaluation.py                        | Python         |          5 |          0 |          0 |          5 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/domain/entities/reflection/proposal.py                          | Python         |         26 |          0 |          0 |         26 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/domain/entities/reflection/record.py                            | Python         |         20 |          0 |          0 |         20 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/domain/entities/session/__init__.py                             | Python         |         15 |          0 |          0 |         15 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/domain/entities/session/quiz.py                                 | Python         |        131 |          0 |          7 |        138 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/domain/entities/skill/__init__.py                               | Python         |         14 |          1 |          2 |         17 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/domain/entities/skill/artifact.py                               | Python         |         13 |          0 |          0 |         13 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/domain/entities/skill/execution.py                              | Python         |         30 |          0 |          0 |         30 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/domain/entities/skill/package.py                                | Python         |        245 |          0 |         25 |        270 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/domain/entities/skill/recommendation.py                         | Python         |         20 |          0 |          0 |         20 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/domain/entities/skill/usage.py                                  | Python         |         13 |          0 |          0 |         13 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/domain/errors.py                                                | Python         |          3 |          5 |          1 |          9 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/domain/schemas/quiz.py                                          | Python         |         84 |          3 |         36 |        123 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/domain/schemas/reflection.py                                    | Python         |          3 |          0 |          0 |          3 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/domain/schemas/reflection_v2.py                                 | Python         |          3 |          0 |          2 |          5 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/domain/schemas/skill.py                                         | Python         |        118 |          0 |         28 |        146 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/infrastructure/config/settings.py                               | Python         |          9 |          0 |          0 |          9 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/infrastructure/db/models.py                                     | Python         |         87 |          0 |          9 |         96 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/infrastructure/db/repositories/__init__.py                      | Python         |          7 |          0 |          2 |          9 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/infrastructure/db/repositories/audit.py                         | Python         |         55 |          0 |          2 |         57 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/infrastructure/db/repositories/learner.py                       | Python         |         19 |          0 |          1 |         20 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/infrastructure/db/repositories/quiz_answer_attempt.py           | Python         |        199 |          1 |         22 |        222 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/infrastructure/db/repositories/reflection.py                    | Python         |          5 |          0 |          1 |          6 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/infrastructure/db/repositories/session.py                       | Python         |         22 |          0 |          1 |         23 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/infrastructure/db/repositories/skill.py                         | Python         |          6 |          0 |          0 |          6 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/infrastructure/db/repositories/skill_package.py                 | Python         |        251 |          0 |         27 |        278 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/infrastructure/embedding/dashscope_compatible_provider.py       | Python         |         18 |          0 |          2 |         20 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/infrastructure/llm/circuit_breaker.py                           | Python         |         12 |          2 |          1 |         15 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/infrastructure/llm/dashscope_compatible_provider.py             | Python         |         88 |          0 |          5 |         93 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/infrastructure/llm/mock_provider.py                             | Python         |         40 |          0 |          1 |         41 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/infrastructure/llm/types.py                                     | Python         |         23 |          0 |          3 |         26 |
+| /home/cl/agent-edu/packages/agent_core/src/agent_core/infrastructure/observability/metrics.py                         | Python         |        129 |          8 |         43 |        180 |
+| /home/cl/agent-edu/packages/frontend/package-lock.json                                                                | JSON           |      1,715 |          0 |          0 |      1,715 |
+| /home/cl/agent-edu/packages/frontend/package.json                                                                     | JSON           |          8 |          0 |          0 |          8 |
+| /home/cl/agent-edu/packages/frontend/src/App.tsx                                                                      | TypeScript JSX |          6 |          0 |          0 |          6 |
+| /home/cl/agent-edu/packages/frontend/src/api/client.test.ts                                                           | TypeScript     |         80 |         11 |         20 |        111 |
+| /home/cl/agent-edu/packages/frontend/src/api/client.ts                                                                | TypeScript     |         32 |          8 |          2 |         42 |
+| /home/cl/agent-edu/packages/frontend/src/hooks/use-operator-quiz-observability.ts                                     | TypeScript     |         65 |          0 |          8 |         73 |
+| /home/cl/agent-edu/packages/frontend/src/hooks/use-quiz-attempts.ts                                                   | TypeScript     |        206 |          0 |         22 |        228 |
+| /home/cl/agent-edu/packages/frontend/src/hooks/use-quiz.ts                                                            | TypeScript     |         25 |          0 |          2 |         27 |
+| /home/cl/agent-edu/packages/frontend/src/pages/goals/goals-page.tsx                                                   | TypeScript JSX |         -1 |          0 |          0 |         -1 |
+| /home/cl/agent-edu/packages/frontend/src/pages/learning/components/answer-feedback-card.test.tsx                      | TypeScript JSX |        104 |          1 |         15 |        120 |
+| /home/cl/agent-edu/packages/frontend/src/pages/learning/components/answer-feedback-card.tsx                           | TypeScript JSX |        200 |          7 |         18 |        225 |
+| /home/cl/agent-edu/packages/frontend/src/pages/learning/components/question-card.test.tsx                             | TypeScript JSX |         86 |          1 |         11 |         98 |
+| /home/cl/agent-edu/packages/frontend/src/pages/learning/components/question-card.tsx                                  | TypeScript JSX |        184 |          8 |         12 |        204 |
+| /home/cl/agent-edu/packages/frontend/src/pages/learning/components/quiz-panel.test.tsx                                | TypeScript JSX |        213 |          4 |         25 |        242 |
+| /home/cl/agent-edu/packages/frontend/src/pages/learning/components/quiz-panel.tsx                                     | TypeScript JSX |        -96 |          0 |         -6 |       -102 |
+| /home/cl/agent-edu/packages/frontend/src/pages/operator/learning-gains-page.tsx                                       | TypeScript JSX |        250 |          3 |         17 |        270 |
+| /home/cl/agent-edu/packages/frontend/src/pages/operator/memory-detail-page.tsx                                        | TypeScript JSX |         -1 |          0 |          0 |         -1 |
+| /home/cl/agent-edu/packages/frontend/src/pages/operator/misconceptions-page.tsx                                       | TypeScript JSX |        191 |          4 |         11 |        206 |
+| /home/cl/agent-edu/packages/frontend/src/pages/operator/operator-dashboard-page.tsx                                   | TypeScript JSX |         80 |          0 |          4 |         84 |
+| /home/cl/agent-edu/packages/frontend/src/pages/operator/quiz-attempts-page.tsx                                        | TypeScript JSX |        333 |          5 |         21 |        359 |
+| /home/cl/agent-edu/packages/frontend/src/test/fixtures.ts                                                             | TypeScript     |         78 |          0 |          6 |         84 |
+| /home/cl/agent-edu/packages/frontend/src/test/setup.ts                                                                | TypeScript     |          6 |          0 |          2 |          8 |
+| /home/cl/agent-edu/packages/frontend/src/types/quiz-observability.ts                                                  | TypeScript     |         43 |          0 |         10 |         53 |
+| /home/cl/agent-edu/packages/frontend/src/types/quiz.ts                                                                | TypeScript     |         52 |          0 |          9 |         61 |
+| /home/cl/agent-edu/packages/frontend/vitest.config.ts                                                                 | TypeScript     |         18 |          0 |          2 |         20 |
+| /home/cl/agent-edu/plan/QUIZ_ADAPTIVE_MEMORY_SKILL_ENHANCEMENT_PLAN.md                                                | Markdown       |        428 |          0 |        177 |        605 |
+| /home/cl/agent-edu/tests/e2e_quiz_contract_smoke.py                                                                   | Python         |        117 |         20 |         24 |        161 |
+| /home/cl/agent-edu/tests/test_adaptive_quiz_policy.py                                                                 | Python         |        513 |          4 |         92 |        609 |
+| /home/cl/agent-edu/tests/test_answer_attempt_memory_bridge.py                                                         | Python         |        703 |          6 |        109 |        818 |
+| /home/cl/agent-edu/tests/test_answer_attempt_reflection.py                                                            | Python         |        482 |         13 |         92 |        587 |
+| /home/cl/agent-edu/tests/test_answer_grading_service.py                                                               | Python         |        264 |         17 |         41 |        322 |
+| /home/cl/agent-edu/tests/test_api_integration.py                                                                      | Python         |          1 |          0 |          1 |          2 |
+| /home/cl/agent-edu/tests/test_curator_executor.py                                                                     | Python         |         36 |          1 |          3 |         40 |
+| /home/cl/agent-edu/tests/test_embedding_circuit_breaker.py                                                            | Python         |        105 |         11 |         28 |        144 |
+| /home/cl/agent-edu/tests/test_error_contract.py                                                                       | Python         |         53 |          6 |         22 |         81 |
+| /home/cl/agent-edu/tests/test_mvp_acceptance.py                                                                       | Python         |         56 |          4 |          5 |         65 |
+| /home/cl/agent-edu/tests/test_mvp_blackbox.py                                                                         | Python         |        143 |         33 |         28 |        204 |
+| /home/cl/agent-edu/tests/test_phase6_mastery_routing.py                                                               | Python         |        361 |         11 |         52 |        424 |
+| /home/cl/agent-edu/tests/test_phase6_metrics_and_validation.py                                                        | Python         |         92 |          2 |         21 |        115 |
+| /home/cl/agent-edu/tests/test_phase7_learning_gain.py                                                                 | Python         |        386 |         24 |         66 |        476 |
+| /home/cl/agent-edu/tests/test_phase8_observability_api.py                                                             | Python         |        417 |         37 |         71 |        525 |
+| /home/cl/agent-edu/tests/test_quiz_answer_attempts.py                                                                 | Python         |        483 |         29 |         77 |        589 |
+| /home/cl/agent-edu/tests/test_rate_limit_security.py                                                                  | Python         |         77 |          8 |         32 |        117 |
+| /home/cl/agent-edu/tests/test_reflection_service.py                                                                   | Python         |        581 |         42 |         67 |        690 |
+| /home/cl/agent-edu/tests/test_reflection_skill_evolution_regression.py                                                | Python         |         23 |          4 |          4 |         31 |
+| /home/cl/agent-edu/tests/test_reflection_trigger_policy.py                                                            | Python         |        216 |          3 |         26 |        245 |
+| /home/cl/agent-edu/tests/test_runtime_protection_alert_bridge.py                                                      | Python         |         98 |         10 |         35 |        143 |
+| /home/cl/agent-edu/tests/test_sandbox_admission_and_governance.py                                                     | Python         |         40 |         24 |          9 |         73 |
+| /home/cl/agent-edu/tests/test_skill_explainability.py                                                                 | Python         |        340 |         19 |         69 |        428 |
+| /home/cl/agent-edu/tests/test_skill_outcome_feedback.py                                                               | Python         |        391 |         25 |         73 |        489 |
+| /home/cl/agent-edu/tests/test_skill_package_registry.py                                                               | Python         |        557 |         28 |        108 |        693 |
+| /home/cl/agent-edu/tests/test_skill_router.py                                                                         | Python         |        111 |         15 |         14 |        140 |
+| /home/cl/agent-edu/tests/test_skill_service.py                                                                        | Python         |        108 |          9 |         13 |        130 |
+| /home/cl/agent-edu/tests/test_task_runtime_skill.py                                                                   | Python         |          2 |          0 |          0 |          2 |
+| Total                                                                                                                 |                |     18,845 |        858 |      2,534 |     22,237 |
++-----------------------------------------------------------------------------------------------------------------------+----------------+------------+------------+------------+------------+

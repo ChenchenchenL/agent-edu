@@ -32,6 +32,7 @@ export function GoalCreateForm({
   const [deadlineDate, setDeadlineDate] = useState(defaultDeadlineDate());
   const [weeklyMinutes, setWeeklyMinutes] = useState(300);
   const [baselineNote, setBaselineNote] = useState("");
+  const [language, setLanguage] = useState("zh");
   const [planGenerating, setPlanGenerating] = useState(false);
   const [planError, setPlanError] = useState<string | null>(null);
 
@@ -49,6 +50,7 @@ export function GoalCreateForm({
       deadline_date: deadlineDate,
       weekly_study_minutes: weeklyMinutes,
       baseline_note: baselineNote.trim() || null,
+      preferred_language: language,
     };
 
     try {
@@ -163,6 +165,24 @@ export function GoalCreateForm({
                 className="h-11 bg-background/50"
               />
             </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="goal-language" className="text-text-primary">
+              学习内容语言
+            </Label>
+            <select
+              id="goal-language"
+              value={language}
+              onChange={(e) => setLanguage(e.target.value)}
+              className="flex h-11 w-full rounded-md border border-input bg-background/50 px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <option value="zh">中文</option>
+              <option value="en">English</option>
+            </select>
+            <p className="text-xs text-text-secondary">
+              选择学习计划、任务标题和说明使用的语言
+            </p>
           </div>
 
           <div className="space-y-1.5">

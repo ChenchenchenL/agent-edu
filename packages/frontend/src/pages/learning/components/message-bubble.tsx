@@ -1,5 +1,6 @@
 import { GraduationCap, User } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { MarkdownContent } from "@/components/markdown-content";
 import { ExplanationCard } from "@/pages/learning/components/explanation-card";
 import { HintCard } from "@/pages/learning/components/hint-card";
 import type { MessageHistoryItem } from "@/types/session";
@@ -50,9 +51,13 @@ export function MessageBubble({ message }: MessageBubbleProps) {
               : "rounded-tl-sm border border-border-subtle bg-surface shadow-sm"
           }`}
         >
-          <p className="whitespace-pre-wrap text-[14px] leading-relaxed">
-            {message.content}
-          </p>
+          {isUser ? (
+            <p className="whitespace-pre-wrap text-[14px] leading-relaxed">
+              {message.content}
+            </p>
+          ) : (
+            <MarkdownContent content={message.content} />
+          )}
 
           {message.content_payload?.type === "explanation" && (
             <ExplanationCard payload={message.content_payload} />

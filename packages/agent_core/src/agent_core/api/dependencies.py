@@ -51,6 +51,7 @@ from agent_core.application.services.reflection_skill_evolution_curator import (
     ReflectionSkillEvolutionCuratorConfig,
     ReflectionSkillEvolutionCuratorService,
 )
+from agent_core.application.services.reflection_sandbox_admission import SandboxAdmissionService
 from agent_core.application.services.skill_replacement_auto_execution import (
     SkillReplacementAutoExecutionConfig,
     SkillReplacementAutoExecutionScheduler,
@@ -59,18 +60,27 @@ from agent_core.application.services.skill_replacement_auto_execution import (
 from agent_core.application.services.reflection_proposals import ReflectionProposalService
 from agent_core.application.services.reflection_replay import ReflectionReplayService
 from agent_core.application.services.session import SessionService
-from agent_core.application.services.skills import (
+from agent_core.application.services.skill import (
     SkillArtifactLifecycleService,
     SkillCandidateService,
     SkillCatalogService,
     SkillCuratorJobConfig,
     SkillCuratorJobService,
     SkillCuratorRecommendationService,
+    SkillOutcomeAggregator,
+    SkillOutcomeFeedbackJob,
     SkillReplacementReadinessService,
     SkillReplacementStagingService,
     SkillResolver,
     SkillUsageService,
     RuntimeExplainService,
+    # Phase 2: router and candidate sources
+    SkillRouterService,
+    SkillCandidateRanker,
+    ActiveArtifactCandidateSource,
+    BaselineBuiltinCandidateSource,
+    StagedArtifactCandidateSource,
+    TenantExternalArtifactCandidateSource,
 )
 from agent_core.application.services.strategy_cards import StrategyCardService
 from agent_core.application.services.task import AutonomousTaskService
@@ -130,6 +140,7 @@ from agent_core.infrastructure.db.repositories import (
     SessionRepository,
     StudyPlanRepository,
     TaskAttemptRepository,
+    TenantSkillPackageInstallationRepository,
     WorkflowRunRepository,
     LearnerGoalStrategyCardRepository,
 )
@@ -187,6 +198,19 @@ def get_circuit_breaker() -> CircuitBreaker | None:
     return CircuitBreaker(
         failure_threshold=settings.llm_circuit_breaker_failure_threshold,
         cooldown_seconds=settings.llm_circuit_breaker_cooldown_seconds,
+        name="LLM provider",
+    )
+
+
+@lru_cache(maxsize=1)
+def get_embedding_circuit_breaker() -> CircuitBreaker | None:
+    settings = get_settings()
+    if not settings.embedding_circuit_breaker_enabled:
+        return None
+    return CircuitBreaker(
+        failure_threshold=settings.embedding_circuit_breaker_failure_threshold,
+        cooldown_seconds=settings.embedding_circuit_breaker_cooldown_seconds,
+        name="Embedding provider",
     )
 
 
@@ -243,6 +267,7 @@ def get_embedding_provider() -> EmbeddingProvider | None:
             model_name=settings.embedding_model or "",
             timeout_seconds=settings.embedding_timeout_seconds,
             dimensions=settings.embedding_dimensions,
+            circuit_breaker=get_embedding_circuit_breaker(),
         )
     raise ConfigurationError(f"Unsupported AGENT_EDU_EMBEDDING_PROVIDER value: {settings.embedding_provider}")
 
@@ -523,6 +548,63 @@ def get_quiz_service(session: AsyncSession) -> QuizService:
         rollout_observation_scheduler=get_reflection_proposal_rollout_observation_scheduler(session),
         skill_usage_service=_build_skill_usage_service(session),
         runtime_registry=get_dynamic_runtime_registry_service(session),
+        memory_service=get_memory_service(session),
+    )
+
+
+def get_quiz_attempt_service(session: AsyncSession) -> QuizAttemptService:
+    from agent_core.application.services.quiz_attempt import QuizAttemptService
+    from agent_core.application.services.quiz_grading import AnswerGradingService
+    from agent_core.infrastructure.db.repositories.quiz_answer_attempt import (
+        SessionQuizAnswerAttemptRepository,
+    )
+    from agent_core.application.services.long_term_memory_materialization import (
+        LongTermMemoryMaterializationService,
+    )
+    from agent_core.application.services.long_term_memory_materialization_replay import (
+        LongTermMemoryMaterializationReplayScheduler,
+    )
+    
+    audit_service = get_audit_service(session)
+    memory_service = get_memory_service(session)
+    return QuizAttemptService(
+        db_session=session,
+        audit_service=audit_service,
+        session_repository=SessionRepository(session),
+        quiz_repository=SessionQuizRepository(session),
+        attempt_repository=SessionQuizAnswerAttemptRepository(session),
+        grading_service=AnswerGradingService(llm_provider=get_llm_provider()),
+        topic_mastery_repository=LearnerTopicMasteryRepository(session),
+        skill_usage_service=_build_skill_usage_service(session),
+        materialization_service=LongTermMemoryMaterializationService(
+            memory_service,
+            audit_service=audit_service,
+        ),
+        long_term_memory_replay_scheduler=LongTermMemoryMaterializationReplayScheduler(
+            autonomy_job_service=get_autonomy_job_service(session),
+        ),
+        reflection_evidence_service=get_reflection_evidence_service(session),
+        reflection_service=get_reflection_service(session),
+    )
+
+
+def get_quiz_observability_service(session: AsyncSession):
+    from agent_core.application.services.quiz_observability import QuizObservabilityService
+    from agent_core.infrastructure.db.repositories import (
+        AuditRepository,
+        LearnerTopicMasteryRepository,
+        SessionQuizAnswerAttemptRepository,
+        SessionQuizRepository,
+        SessionRepository,
+        SkillUsageEventRepository,
+    )
+    return QuizObservabilityService(
+        attempt_repository=SessionQuizAnswerAttemptRepository(session),
+        topic_mastery_repository=LearnerTopicMasteryRepository(session),
+        audit_repository=AuditRepository(session),
+        skill_usage_repository=SkillUsageEventRepository(session),
+        quiz_repository=SessionQuizRepository(session),
+        session_repository=SessionRepository(session),
     )
 
 
@@ -702,6 +784,15 @@ def get_skill_curator_job_service(
     )
 
 
+def get_skill_outcome_feedback_job_service(session: AsyncSession) -> SkillOutcomeFeedbackJob:
+    return SkillOutcomeFeedbackJob(
+        artifact_repository=SkillArtifactRepository(session),
+        recommendation_repository=SkillCuratorRecommendationRepository(session),
+        aggregator=SkillOutcomeAggregator(usage_repository=SkillUsageEventRepository(session)),
+        audit_service=get_audit_service(session),
+    )
+
+
 def _build_skill_resolver(
     session: AsyncSession,
     *,
@@ -776,10 +867,16 @@ def get_reflection_service(session: AsyncSession) -> ReflectionService:
         llm_provider=get_llm_provider(),
         db_session=session,
         reflection_max_depth=get_settings().reflection_max_depth,
+        usage_repository=SkillUsageEventRepository(session),
+        rollout_repository=ReflectionProposalRolloutRepository(session),
+        rollout_observation_repository=ReflectionProposalRolloutObservationRepository(session),
     )
 
 
 def get_reflection_evidence_service(session: AsyncSession) -> ReflectionEvidenceService:
+    from agent_core.infrastructure.db.repositories.quiz_answer_attempt import (
+        SessionQuizAnswerAttemptRepository,
+    )
     return ReflectionEvidenceService(
         repository=ReflectionEvidenceSignalRepository(session),
         message_repository=SessionMessageRepository(session),
@@ -788,6 +885,7 @@ def get_reflection_evidence_service(session: AsyncSession) -> ReflectionEvidence
         workflow_run_repository=WorkflowRunRepository(session),
         learner_topic_mastery_repository=LearnerTopicMasteryRepository(session),
         audit_service=get_audit_service(session),
+        quiz_answer_attempt_repository=SessionQuizAnswerAttemptRepository(session),
     )
 
 
@@ -802,6 +900,9 @@ def get_reflection_outcome_service(session: AsyncSession) -> ReflectionOutcomeSe
 def get_long_term_memory_materialization_replay_executor(
     session: AsyncSession,
 ) -> LongTermMemoryMaterializationReplayExecutor:
+    from agent_core.infrastructure.db.repositories.quiz_answer_attempt import (
+        SessionQuizAnswerAttemptRepository,
+    )
     return LongTermMemoryMaterializationReplayExecutor(
         session_repository=SessionRepository(session),
         message_repository=SessionMessageRepository(session),
@@ -813,6 +914,7 @@ def get_long_term_memory_materialization_replay_executor(
         reflection_outcome_evaluation_repository=ReflectionOutcomeEvaluationRepository(session),
         materialization_service=get_long_term_memory_materialization_service(session),
         audit_service=get_audit_service(session),
+        quiz_answer_attempt_repository=SessionQuizAnswerAttemptRepository(session),
     )
 
 
@@ -822,6 +924,7 @@ def get_reflection_governance_service(session: AsyncSession) -> ReflectionGovern
         reflection_action_repository=ReflectionActionRepository(session),
         review_decision_repository=ReflectionReviewDecisionRepository(session),
         audit_service=get_audit_service(session),
+        autonomy_job_service=get_autonomy_job_service(session),
     )
 
 
@@ -892,6 +995,8 @@ def get_reflection_skill_evolution_curator_service(
         proposal_service=get_reflection_proposal_service(session),
         staging_service=get_skill_replacement_staging_service(session),
         audit_service=get_audit_service(session),
+        sandbox_admission_service=SandboxAdmissionService(),
+        sandbox_service=get_reflection_proposal_sandbox_service(session),
         db_session=session,
         config=ReflectionSkillEvolutionCuratorConfig(
             enabled=settings.reflection_skill_evolution_curator_enabled,
@@ -1068,10 +1173,45 @@ def get_task_runtime_skill_service(session: AsyncSession) -> TaskRuntimeSkillSer
     return _scope(session).task_services().runtime_skill
 
 
+def _build_skill_router(session: AsyncSession) -> SkillRouterService:
+    """Build a fully-wired SkillRouterService with all four candidate sources.
+
+    Sources (in priority order, handled by the ranker):
+    - ActiveArtifactCandidateSource: active/stable governed artifacts
+    - StagedArtifactCandidateSource: staged probe artifacts
+    - TenantExternalArtifactCandidateSource: installed external package artifacts (tenant-scoped)
+    - BaselineBuiltinCandidateSource: registry static fallback
+    """
+    return SkillRouterService(
+        sources=[
+            ActiveArtifactCandidateSource(
+                artifact_repository=SkillArtifactRepository(session),
+                usage_repository=SkillUsageEventRepository(session),
+                goal_skill_binding_resolver=get_goal_skill_binding_resolver(session),
+            ),
+            StagedArtifactCandidateSource(
+                artifact_repository=SkillArtifactRepository(session),
+            ),
+            TenantExternalArtifactCandidateSource(
+                artifact_repository=SkillArtifactRepository(session),
+                installation_repository=TenantSkillPackageInstallationRepository(session),
+                goal_repository=LearnerGoalRepository(session),
+            ),
+            BaselineBuiltinCandidateSource(
+                skill_registry=get_skill_registry(),
+            ),
+        ],
+        ranker=SkillCandidateRanker(),
+    )
+
+
 def get_dynamic_runtime_registry_service(session: AsyncSession) -> DynamicRuntimeRegistryService:
     return DynamicRuntimeRegistryService(
         goal_skill_binding_resolver=get_goal_skill_binding_resolver(session),
         skill_usage_service=_build_skill_usage_service(session),
+        router=_build_skill_router(session),
+        artifact_repository=SkillArtifactRepository(session),
+        topic_mastery_repository=LearnerTopicMasteryRepository(session),
     )
 
 

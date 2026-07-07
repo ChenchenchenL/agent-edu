@@ -134,7 +134,18 @@ function TaskCard({ task }: { task: DailyTask }) {
         </span>
       </div>
 
-      {isExecutable && (
+      {task.execution_session_id ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="mt-3 w-full"
+          onClick={() => navigate(`/sessions/${task.execution_session_id}`)}
+        >
+          <BookOpen className="h-3.5 w-3.5" />
+          继续学习
+        </Button>
+      ) : isExecutable ? (
         <Button
           type="button"
           size="sm"
@@ -154,7 +165,7 @@ function TaskCard({ task }: { task: DailyTask }) {
             </>
           )}
         </Button>
-      )}
+      ) : null}
 
       {executeTask.error && (
         <p className="mt-2 text-xs text-error">{executeTask.error.message}</p>
@@ -165,7 +176,7 @@ function TaskCard({ task }: { task: DailyTask }) {
 
 export function GoalDetailPage() {
   const { id: goalId } = useParams<{ id: string }>();
-  const { data: goal, isLoading: goalLoading, error: goalError } = useGoal(goalId ?? "");
+  const { data: goal, isLoading: goalLoading } = useGoal(goalId ?? "");
   const { data: plans, isLoading: plansLoading } = useGoalPlans(goalId ?? "");
   const { data: tasks, isLoading: tasksLoading, refetch: refetchTasks } = useGoalTasks(goalId ?? "");
   const materializeToday = useMaterializeToday(goalId ?? "");
@@ -200,11 +211,28 @@ export function GoalDetailPage() {
 
   const activePlan = plans?.[0] ?? null;
   const taskList = tasks ?? [];
+  const todayStr = new Date().toISOString().slice(0, 10);
+
   const todayTasks = taskList.filter(
-    (t) => t.status === "pending" || t.status === "in_progress" || t.status === "due",
+    (t) =>
+      t.due_on === todayStr &&
+      (t.status === "pending" || t.status === "in_progress" || t.status === "due"),
+  );
+  const futureTasks = taskList.filter(
+    (t) =>
+      t.due_on > todayStr &&
+      (t.status === "pending" || t.status === "in_progress" || t.status === "due"),
   );
   const reviewTasks = taskList.filter((t) => t.status === "review");
   const completedTasks = taskList.filter((t) => t.status === "completed");
+
+  const futureTasksByDate = futureTasks.reduce<Record<string, typeof futureTasks>>((acc, task) => {
+    const date = task.due_on;
+    if (!acc[date]) acc[date] = [];
+    acc[date].push(task);
+    return acc;
+  }, {});
+  const futureDates = Object.keys(futureTasksByDate).sort();
 
   function handleGeneratePlan() {
     if (!goalId) return;
@@ -339,6 +367,13 @@ export function GoalDetailPage() {
             {todayTasks.length > 0 && (
               <TaskGroup title="今日任务" tasks={todayTasks} />
             )}
+            {futureDates.map((date) => (
+              <TaskGroup
+                key={date}
+                title={formatDate(date)}
+                tasks={futureTasksByDate[date]}
+              />
+            ))}
             {reviewTasks.length > 0 && (
               <TaskGroup title="待复习" tasks={reviewTasks} />
             )}
